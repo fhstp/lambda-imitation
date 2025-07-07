@@ -8,16 +8,17 @@ Planned features:
  - [ ] Evaluation on simulator environments
  - [ ] Evaluation on Deep Racers
 
-# Installation
+## Installation
 
 This repo is strucured as a python package, so install using
 ```bash
 pip install -e .
 ```
 in the root directory of this project. (`-e` optional for quicker updates during development)
+
 Tested for `python 3.12`.
 
-# Tests
+## Tests
 
 Tests are written using `pytest`, so run
 ```bash
