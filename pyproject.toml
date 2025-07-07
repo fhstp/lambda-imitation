@@ -4,6 +4,7 @@ version = "0.0.1"
 dependencies = [
   "numpy",
   "gymnasium",
+  "pytest",
 ]
 requires-python = ">=3.12"
 authors = [
