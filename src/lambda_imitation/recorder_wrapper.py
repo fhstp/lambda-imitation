@@ -215,16 +215,22 @@ class RecorderWrapper(gym.Wrapper):
             self.hidden_states = np.load(f)
 
     def sample(self, batch_size):
-        if self.pos > self.buffer_size:
+        return self._sample(self._generate_indices(batch_size))
+
+    def _generate_indices(self, batch_size):
+        if self.pos >= self.buffer_size:
             upper_bound = self.buffer_size - 1
             batch_inds = np.random.randint(0, upper_bound, size=batch_size)
-            batch_inds = (
-                batch_inds - self.pos + 1
-            ) % self.buffer_size  # shift so pos never gets sampled
+            # batch_inds = (
+            #     batch_inds + self.pos + 1
+            # ) % self.buffer_size  # shift so pos never gets sampled
+            batch_inds[batch_inds >= (self.pos % self.buffer_size)] += 1
         else:
             upper_bound = self.pos
             batch_inds = np.random.randint(0, upper_bound, size=batch_size)
+        return batch_inds
 
+    def _sample(self, batch_inds):
         observations = self.get_observation_at(batch_inds)
         next_observations = self.get_observation_at((batch_inds + 1) % self.buffer_size)
         actions = self.get_action_at(batch_inds)
