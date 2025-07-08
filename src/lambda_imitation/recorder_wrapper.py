@@ -47,7 +47,7 @@ class RecorderWrapper(gym.Wrapper):
         self.setup_hidden_states(hidden_state_dim, hidden_state_net)
 
         self.pos = 0
-        self.last_reset_pos = 0
+        self.last_return_calculation = 0
 
     def setup_hidden_states(self, hidden_state_dim, hidden_state_net):
         self.hidden_states = np.zeros(
@@ -99,16 +99,8 @@ class RecorderWrapper(gym.Wrapper):
             info (dictionary):  This dictionary contains auxiliary information complementing ``observation``. It should be analogous to
                 the ``info`` returned by :meth:`step`.
         """
-        if self.pos > self.last_reset_pos:
-            assert (
-                self.pos - self.last_reset_pos < self.buffer_size
-            ), f"Episode was longer than buffer size, return calculation not possible, {self.pos=}, {self.last_reset_pos=}, {self.pos-self.last_reset_pos}, {self.buffer_size}"
-            ret = 0
-            for i in reversed(range(self.last_reset_pos, self.pos + 1)):
-                ret = self.rewards[i % self.buffer_size] + self.gamma * ret
-                self.returns[i % self.buffer_size] = ret
+        self._calculate_returns()
         obs, info = super().reset(**kwargs)
-        self.last_reset_pos = self.pos
         self.last_obs = obs
         self.last_hidden_state = np.zeros((self.hidden_state_dim))
         _add_collection_entry(
@@ -117,6 +109,19 @@ class RecorderWrapper(gym.Wrapper):
         mod_pos = self.pos % self.buffer_size
         self.hidden_states[mod_pos] = np.zeros((self.hidden_state_dim))
         return obs, info
+
+    def _calculate_returns(self):
+        if self.pos > self.last_return_calculation:
+            assert (
+                self.pos - self.last_return_calculation < self.buffer_size
+            ), f"Episode was longer than buffer size, return calculation not possible, {self.pos=}, {self.last_return_calculation=}, {self.pos-self.last_return_calculation}, {self.buffer_size}"
+            print("calc")
+            ret = 0
+            for i in reversed(range(self.last_return_calculation, self.pos + 1)):
+                ret = self.rewards[i % self.buffer_size] + self.gamma * ret
+                print(f"{i}: {ret}")
+                self.returns[i % self.buffer_size] = ret
+            self.last_return_calculation = self.pos
 
     def step(self, action):
         """Run one timestep of the environment's dynamics using the agent actions and record the step. Note: if the environment is
@@ -163,6 +168,8 @@ class RecorderWrapper(gym.Wrapper):
             self.hidden_states[mod_pos] = self.last_hidden_state
 
         self.pos += 1
+        if terminated or truncated:
+            self._calculate_returns()
         self.last_obs = obs
         _add_collection_entry(
             self.observation_space, self.observations, obs, self.pos % self.buffer_size
