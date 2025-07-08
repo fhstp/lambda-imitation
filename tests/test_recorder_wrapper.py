@@ -254,3 +254,152 @@ def test_buffer_too_short_for_return():
     with pytest.raises(AssertionError):
         env.reset()
 
+
+def test_hidden_state_calculation():
+    # assemble
+    def hidden_state_net(state, action, hidden_state):
+        hidden_state = hidden_state.copy()
+        hidden_state[0] += 1
+        return hidden_state
+
+    gamma = 0.99
+    env = RecorderWrapper(gym.make("MountainCar-v0"), gamma, 100, 2, hidden_state_net)
+
+    # act
+    env.reset()
+    env.step(env.action_space.sample())
+    env.step(env.action_space.sample())
+
+    # assert
+    assert env.hidden_states[0][0] == 1
+    assert env.hidden_states[0][1] == 0
+    assert env.hidden_states[1][0] == 2
+    assert env.hidden_states[1][1] == 0
+    assert env.hidden_states[2][0] == 0  # not set yet
+    assert env.hidden_states[2][1] == 0
+
+    # act again after reset
+    env.reset()
+    env.step(env.action_space.sample())
+
+    # assert nothing gets overwritten
+    assert env.hidden_states[0][0] == 1
+    assert env.hidden_states[0][1] == 0
+    assert env.hidden_states[1][0] == 2
+    assert env.hidden_states[1][1] == 0
+    assert env.hidden_states[2][0] == 1
+    assert env.hidden_states[2][1] == 0
+
+
+def test_hidden_state_recalculation():
+    # assemble
+    def hidden_state_net(state, action, hidden_state):
+        hidden_state = hidden_state.copy()
+        hidden_state[0] += 1
+        return hidden_state
+
+    gamma = 0.99
+    env = RecorderWrapper(gym.make("MountainCar-v0"), gamma, 100)
+
+    # act
+    env.reset()
+    env.step(env.action_space.sample())
+    env.step(env.action_space.sample())
+
+    # assert no hidden states
+    assert env.hidden_states.shape == (100, 0)
+
+    # act again - recalculate
+    env.setup_hidden_states(2, hidden_state_net)
+    env.recalculate_hidden_states()
+
+    # assert hidden states as above when directly calculating
+    assert env.hidden_states[0][0] == 1
+    assert env.hidden_states[0][1] == 0
+    assert env.hidden_states[1][0] == 2
+    assert env.hidden_states[1][1] == 0
+    assert env.hidden_states[2][0] == 0
+    assert env.hidden_states[2][1] == 0
+
+
+def test_hidden_state_recalculation_two_episodes():
+    # assemble
+    def hidden_state_net(state, action, hidden_state):
+        hidden_state = hidden_state.copy()
+        hidden_state[0] += 1
+        return hidden_state
+
+    gamma = 0.99
+    env = RecorderWrapper(gym.make("MountainCar-v0"), gamma, 100)
+
+    # act
+    env.reset()
+    env.step(env.action_space.sample())
+    env.step(env.action_space.sample())
+    env.truncated[1] = True  # mock truncation with reset
+    env.reset()
+    env.step(env.action_space.sample())
+
+    # assert no hidden states
+    assert env.hidden_states.shape == (100, 0)
+
+    # act again - recalculate
+    env.setup_hidden_states(2, hidden_state_net)
+    env.recalculate_hidden_states()
+
+    # assert hidden states as above when directly calculating
+    assert env.hidden_states[0][0] == 1
+    assert env.hidden_states[0][1] == 0
+    assert env.hidden_states[1][0] == 2
+    assert env.hidden_states[1][1] == 0
+    assert env.hidden_states[2][0] == 1
+    assert env.hidden_states[2][1] == 0
+
+
+def test_sample_generate_indices_not_full():
+    # assemble
+    env = RecorderWrapper(gym.make("MountainCar-v0"), 0.99, 7)
+    env.reset()
+    for i in range(5):
+        env.step(env.action_space.sample())
+
+    # act
+    inds = env._generate_indices(10)
+
+    # assert
+    assert env.pos == 5
+    assert inds.shape[0] == 10
+    assert np.max(inds) < 5
+
+
+def test_sample_generate_indices_exactly_full():
+    # assemble
+    env = RecorderWrapper(gym.make("MountainCar-v0"), 0.99, 7)
+    env.reset()
+    for i in range(6):
+        env.step(env.action_space.sample())
+
+    # act assert in loop for probabilistic testing
+    for _ in range(100):
+        # act
+        inds = env._generate_indices(10)
+
+        # assert
+        assert np.max(inds) < 6
+
+
+def test_sample_generate_indices_over_full():
+    # assemble
+    env = RecorderWrapper(gym.make("MountainCar-v0"), 0.99, 7)
+    env.reset()
+    for i in range(9):
+        env.step(env.action_space.sample())
+
+    # act assert in loop for probabilistic testing
+    for _ in range(100):
+        # act
+        env.step(env.action_space.sample())
+        inds = env._generate_indices(10)
+
+        # assert
+        assert (env.pos % env.buffer_size) not in inds
