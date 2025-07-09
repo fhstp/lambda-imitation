@@ -4,10 +4,18 @@ This is the repository for lambda-discrepancy based offline imitation learning.
 
 Planned features:
  - [ ] Recording Wrapper for TD(0) and TD(1) training, as well as hidden-state recording and sampling
+    - [x] SARS logging
+    - [x] return logging
+    - [ ] return recalculation
+    - [x] hidden-state logging and recalculation
  - [ ] IQLearn utilizing lambda-discrepancy
-    - [ ] continuous action space
-    - [ ] discrete action space
+    - [ ] continuous action space training
+    - [ ] continuous action space imitation
+    - [ ] discrete action space training
+    - [ ] discrete action space imitation
  - [ ] Evaluation on simulator environments
+    - [ ] Atari
+    - [ ] Isaac Sim based custom environment
  - [ ] Evaluation on Deep Racers
 
 ## Installation
