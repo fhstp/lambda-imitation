@@ -5,6 +5,7 @@ dependencies = [
   "numpy",
   "gymnasium",
   "pytest",
+  "torch",
 ]
 requires-python = ">=3.12"
 authors = [

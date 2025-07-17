@@ -3,6 +3,7 @@ from collections import OrderedDict
 import gymnasium as gym
 import numpy as np
 import pytest
+import torch
 from gymnasium.spaces import Box, Dict, Discrete
 
 from lambda_imitation import RecorderWrapper
@@ -462,6 +463,88 @@ def test_sample():
     hidden_states = sample.hidden_states
 
     # assert
+    assert observations[0] == obs1
+    assert next_observations[0] == obs2
+    assert actions[0] == action1
+    assert rewards[0] == reward1
+    assert returns[0] == pytest.approx(gamma**2)
+    assert terminated[0] == terminated1
+    assert truncated[0] == truncated1
+    assert hidden_states[0].shape == (0,)
+
+    assert observations[1] == obs0
+    assert next_observations[1] == obs1
+    assert actions[1] == action0
+    assert rewards[1] == reward0
+    assert returns[1] == pytest.approx(gamma**3)
+    assert terminated[1] == terminated0
+    assert truncated[1] == truncated0
+    assert hidden_states[1].shape == (0,)
+
+    assert observations[2] == obs2
+    assert next_observations[2] == obs3
+    assert actions[2] == action2
+    assert rewards[2] == reward2
+    assert returns[2] == pytest.approx(gamma**1)
+    assert terminated[2] == terminated2
+    assert truncated[2] == truncated2
+    assert hidden_states[2].shape == (0,)
+
+    assert observations[3] == obs2
+    assert next_observations[3] == obs3
+    assert actions[3] == action2
+    assert rewards[3] == reward2
+    assert returns[3] == pytest.approx(gamma**1)
+    assert terminated[3] == terminated2
+    assert truncated[3] == truncated2
+    assert hidden_states[3].shape == (0,)
+
+    assert observations[4] == obs3
+    assert actions[4] == action3
+    assert rewards[4] == reward3
+    assert returns[4] == reward3
+    assert terminated[4] == terminated3
+    assert truncated[4] == truncated3
+    assert hidden_states[4].shape == (0,)
+
+
+def test_sample_torch():
+    # assemble
+    gamma = 0.99
+    env = RecorderWrapper(SimpleGridWorld(), gamma, 1000)
+
+    # act
+    obs0, _ = env.reset()
+    action0 = 1
+    obs1, reward0, terminated0, truncated0, _ = env.step(action0)
+    action1 = 0
+    obs2, reward1, terminated1, truncated1, _ = env.step(action1)
+    action2 = 1
+    obs3, reward2, terminated2, truncated2, _ = env.step(action2)
+    action3 = 1
+    obs4, reward3, terminated3, truncated3, _ = env.step(action3)
+    action4 = 1
+    sample = env._sample(np.array([1, 0, 2, 2, 3]), "cpu")
+
+    observations = sample.observations
+    next_observations = sample.next_observations
+    actions = sample.actions
+    rewards = sample.rewards
+    returns = sample.returns
+    terminated = sample.terminated
+    truncated = sample.truncated
+    hidden_states = sample.hidden_states
+
+    # assert
+    assert type(observations) == torch.Tensor
+    assert type(next_observations) == torch.Tensor
+    assert type(actions) == torch.Tensor
+    assert type(rewards) == torch.Tensor
+    assert type(returns) == torch.Tensor
+    assert type(terminated) == torch.Tensor
+    assert type(truncated) == torch.Tensor
+    assert type(hidden_states) == torch.Tensor
+
     assert observations[0] == obs1
     assert next_observations[0] == obs2
     assert actions[0] == action1

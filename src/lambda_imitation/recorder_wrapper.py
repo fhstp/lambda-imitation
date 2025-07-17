@@ -231,8 +231,11 @@ class RecorderWrapper(gym.Wrapper):
             self.truncated = np.load(f)
             self.hidden_states = np.load(f)
 
-    def sample(self, batch_size):
-        return self._sample(self._generate_indices(batch_size))
+    def sample(self, batch_size, mode="numpy"):
+        """
+        Sample `batch_size` items from the buffer, mode can be either "numpy" or a torch device, e.g. "cpu", "cuda", "auto"
+        """
+        return self._sample(self._generate_indices(batch_size), mode)
 
     def _generate_indices(self, batch_size):
         if self.pos >= self.buffer_size:
@@ -247,7 +250,7 @@ class RecorderWrapper(gym.Wrapper):
             batch_inds = np.random.randint(0, upper_bound, size=batch_size)
         return batch_inds
 
-    def _sample(self, batch_inds):
+    def _sample(self, batch_inds, mode="numpy"):
         observations = self.get_observation_at(batch_inds)
         next_observations = self.get_observation_at((batch_inds + 1) % self.buffer_size)
         actions = self.get_action_at(batch_inds)
@@ -256,6 +259,16 @@ class RecorderWrapper(gym.Wrapper):
         terminated = self.terminated[batch_inds]
         truncated = self.truncated[batch_inds]
         hidden_states = self.hidden_states[batch_inds]
+
+        if mode != "numpy":
+            observations = torch.tensor(observations).to(mode)
+            next_observations = torch.tensor(next_observations).to(mode)
+            actions = torch.tensor(actions).to(mode)
+            rewards = torch.tensor(rewards).to(mode)
+            returns = torch.tensor(returns).to(mode)
+            terminated = torch.tensor(terminated).to(mode)
+            truncated = torch.tensor(truncated).to(mode)
+            hidden_states = torch.tensor(hidden_states).to(mode)
 
         return RecorderSample(
             observations=observations,
