@@ -23,6 +23,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from numpy.typing import NDArray
+from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.rich import tqdm
 
@@ -92,20 +93,34 @@ def layer_init(layer, bias_const=0.0):
 class SoftQNetwork(nn.Module):
     def __init__(self, env):
         super().__init__()
-        self.fc1 = nn.Linear(
-            env.observation_space.shape[0] + env.action_space.shape[0], 32
-        )
-        self.fc2 = nn.Linear(32, 32)
-        self.fc3 = nn.Linear(32, 32)
-        self.fc4 = nn.Linear(32, 1)
+        self.env = env
+        if type(self.env.action_space) == gym.spaces.Box:
+            self.fc1 = nn.Linear(
+                env.observation_space.shape[0] + env.action_space.shape[0], 32
+            )
+            self.fc2 = nn.Linear(32, 32)
+            self.fc3 = nn.Linear(32, 32)
+            self.fc4 = nn.Linear(32, 1)
+        elif type(self.env.action_space) == gym.spaces.Discrete:
+            self.fc1 = nn.Linear(env.observation_space.shape[0], 32)
+            self.fc2 = nn.Linear(32, 32)
+            self.fc3 = nn.Linear(32, 32)
+            self.fc4 = nn.Linear(32, self.env.action_space.n)
 
     def forward(self, x, a):
-        x = torch.cat([x, a], 1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        x = self.fc4(x)
-        return x
+        if type(self.env.action_space) == gym.spaces.Box:
+            x = torch.cat([x, a], 1)
+            x = F.relu(self.fc1(x))
+            x = F.relu(self.fc2(x))
+            x = F.relu(self.fc3(x))
+            x = self.fc4(x)
+            return x
+        else:
+            x = F.relu(self.fc1(x))
+            x = F.relu(self.fc2(x))
+            x = F.relu(self.fc3(x))
+            x = self.fc4(x)
+            return x.gather(1, a.unsqueeze(1).long()).view(-1)
 
 
 LOG_STD_MAX = 2
@@ -116,68 +131,83 @@ class Actor(nn.Module):
     def __init__(self, env, net=None):
         super().__init__()
         self.net = None
+        self.env = env
         if net is None:
-            self.fc1 = nn.Linear(env.observation_space.shape[0], 32)
-            self.fc2 = nn.Linear(32, 32)
-            self.fc3 = nn.Linear(32, 32)
-            self.fc_mean = nn.Linear(32, np.prod(env.action_space.shape))
-            self.fc_logstd = nn.Linear(32, np.prod(env.action_space.shape))
+            if type(self.env.action_space) == gym.spaces.Box:
+                self.fc1 = nn.Linear(env.observation_space.shape[0], 32)
+                self.fc2 = nn.Linear(32, 32)
+                self.fc3 = nn.Linear(32, 32)
+                self.fc_mean = nn.Linear(32, np.prod(env.action_space.shape))
+                self.fc_logstd = nn.Linear(32, np.prod(env.action_space.shape))
+            elif type(self.env.action_space) == gym.spaces.Discrete:
+                self.fc1 = nn.Linear(env.observation_space.shape[0], 32)
+                self.fc2 = nn.Linear(32, 32)
+                self.fc3 = nn.Linear(32, 32)
+                self.fc4 = nn.Linear(32, env.action_space.n)
         else:
             self.net = net
 
-        self.register_buffer(
-            "action_scale",
-            torch.tensor(
-                (env.action_space.high - env.action_space.low) / 2.0,
-                dtype=torch.float32,
-            ),
-        )
-        self.register_buffer(
-            "action_bias",
-            torch.tensor(
-                (env.action_space.high + env.action_space.low) / 2.0,
-                dtype=torch.float32,
-            ),
-        )
+        if type(self.env.action_space) == gym.spaces.Box:
+            self.register_buffer(
+                "action_scale",
+                torch.tensor(
+                    (env.action_space.high - env.action_space.low) / 2.0,
+                    dtype=torch.float32,
+                ),
+            )
+            self.register_buffer(
+                "action_bias",
+                torch.tensor(
+                    (env.action_space.high + env.action_space.low) / 2.0,
+                    dtype=torch.float32,
+                ),
+            )
 
     def forward(self, x):
         if self.net is None:
             x = F.relu(self.fc1(x))
             x = F.relu(self.fc2(x))
             x = F.relu(self.fc3(x))
-            mean = self.fc_mean(x)
-            log_std = self.fc_logstd(x)
-            log_std = torch.tanh(log_std)
-            log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (
-                log_std + 1
-            )  # From SpinUp / Denis Yarats
+            if type(self.env.action_space) == gym.spaces.Box:
+                mean = self.fc_mean(x)
+                log_std = self.fc_logstd(x)
+                log_std = torch.tanh(log_std)
+                log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (
+                    log_std + 1
+                )  # From SpinUp / Denis Yarats
+            else:
+                logits = self.fc4(x)
+                return logits
         else:
             mean, log_std = self.net(x)
 
         return mean, log_std
 
-    def get_action(self, x, bias_actor=None):
-        mean, log_std = self(x)
-        std = log_std.exp()
-        normal = torch.distributions.Normal(mean, std)
-        x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
-        y_t = torch.tanh(x_t)
-        action = y_t * self.action_scale + self.action_bias
-        log_prob = normal.log_prob(x_t)
-        # Enforcing Action Bound
-        log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
-        log_prob = log_prob.sum(1, keepdim=True)
-        mean = torch.tanh(mean) * self.action_scale + self.action_bias
-
-        if bias_actor is not None:
-            mean, log_std = bias_actor(x)
+    def get_action(self, x):
+        if type(self.env.action_space) == gym.spaces.Box:
+            mean, log_std = self(x)
             std = log_std.exp()
-            bias_normal = torch.distributions.Normal(mean, std)
-            bias_log_prob = bias_normal.log_prob(x_t)
+            normal = torch.distributions.Normal(mean, std)
+            x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
+            y_t = torch.tanh(x_t)
+            action = y_t * self.action_scale + self.action_bias
+            log_prob = normal.log_prob(x_t)
             # Enforcing Action Bound
-            bias_log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
-            log_prob -= bias_log_prob.sum(1, keepdim=True)
-        return action, log_prob, mean
+            log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
+            log_prob = log_prob.sum(1, keepdim=True)
+            mean = torch.tanh(mean) * self.action_scale + self.action_bias
+
+            return action, log_prob, mean
+        else:
+            logits = self(x)
+            policy_dist = Categorical(logits=logits)
+            actions = policy_dist.sample()
+            action_probs = policy_dist.probs
+            log_prob = F.log_softmax(logits, dim=1)
+            entropy = torch.sum(action_probs * log_prob, dim=-1)
+            greedy_actions = torch.argmax(action_probs, dim=-1)
+
+            return actions, entropy, greedy_actions
 
 
 def default_phi(x):
@@ -241,15 +271,14 @@ class IQLearn:
         torch.manual_seed(self.args.seed)
         torch.backends.cudnn.deterministic = self.args.torch_deterministic
 
-        assert isinstance(
-            self.env.action_space, gym.spaces.Box
-        ), "only continuous action space is supported"
+        assert isinstance(self.env.action_space, gym.spaces.Box) or isinstance(
+            self.env.action_space, gym.spaces.Discrete
+        ), "only discrete or continuous action space is supported"
         assert isinstance(
             self.env.observation_space, gym.spaces.Box
         ), "only continuous observation space is supported"
 
         self.actor = Actor(self.env, actor_net).to(self.args.device)
-        self.bias_actor = None
         self.qf1 = q_cls(self.env).to(self.args.device)
         self.qf2 = q_cls(self.env).to(self.args.device)
         if self.args.use_targets:
@@ -282,9 +311,6 @@ class IQLearn:
         self.start_time = time.time()
 
         self.n_updates = 0
-
-    def set_bias_actor(self, actor):
-        self.bias_actor = actor
 
     def recreate_optimizers(self):
         self.q_optimizer = optim.Adam(
@@ -566,7 +592,7 @@ class IQLearn:
                 data = self.env.sample(self.args.batch_size, self.args.device)
                 with torch.no_grad():
                     next_state_actions, next_state_log_pi, _ = self.actor.get_action(
-                        data.next_observations, self.bias_actor
+                        data.next_observations
                     )
                     qf1_next_target = self.qf1_target(
                         data.next_observations, next_state_actions
@@ -599,9 +625,7 @@ class IQLearn:
                     for _ in range(
                         self.args.policy_frequency
                     ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-                        pi, log_pi, _ = self.actor.get_action(
-                            data.observations, self.bias_actor
-                        )
+                        pi, log_pi, _ = self.actor.get_action(data.observations)
                         qf1_pi = self.qf1(data.observations, pi)
                         qf2_pi = self.qf2(data.observations, pi)
                         min_qf_pi = torch.min(qf1_pi, qf2_pi)
