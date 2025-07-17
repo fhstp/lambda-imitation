@@ -127,11 +127,9 @@ class RecorderWrapper(gym.Wrapper):
             assert (
                 self.pos - self.last_return_calculation < self.buffer_size
             ), f"Episode was longer than buffer size, return calculation not possible, {self.pos=}, {self.last_return_calculation=}, {self.pos-self.last_return_calculation}, {self.buffer_size}"
-            print("calc")
             ret = 0
             for i in reversed(range(self.last_return_calculation, self.pos + 1)):
                 ret = self.rewards[i % self.buffer_size] + self.gamma * ret
-                print(f"{i}: {ret}")
                 self.returns[i % self.buffer_size] = ret
             self.last_return_calculation = self.pos
 
