@@ -3,6 +3,7 @@ from typing import Any, NamedTuple
 
 import gymnasium as gym
 import numpy as np
+import torch
 from gymnasium.spaces import Box, Dict, Discrete
 
 
