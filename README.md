@@ -35,3 +35,8 @@ Tests are written using `pytest`, so run
 python -m pytest
 ```
 in the root-directory of this project.
+
+For imitation learning, there are also tests of algorithm functionality, which are intrinsically quite slow, so they are skipped by default. To run them, use
+```bash
+python -m pytest --runslow
+```
