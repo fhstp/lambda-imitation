@@ -6,6 +6,9 @@ dependencies = [
   "gymnasium",
   "pytest",
   "torch",
+  "tensorboard",
+  "tqdm",
+  "rich",
 ]
 requires-python = ">=3.12"
 authors = [
