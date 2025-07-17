@@ -404,6 +404,7 @@ def test_sample_generate_indices_over_full():
         # assert
         assert (env.pos % env.buffer_size) not in inds
 
+
 class SimpleGridWorld(gym.Env):
     def __init__(self):
         super().__init__()
@@ -432,11 +433,12 @@ class SimpleGridWorld(gym.Env):
 
         return self.pos, reward, terminated, truncated, {}
 
+
 def test_sample():
     # assemble
     gamma = 0.99
     env = RecorderWrapper(SimpleGridWorld(), gamma, 1000)
-    
+
     # act
     obs0, _ = env.reset()
     action0 = 1
@@ -448,7 +450,16 @@ def test_sample():
     action3 = 1
     obs4, reward3, terminated3, truncated3, _ = env.step(action3)
     action4 = 1
-    observations, next_observations, actions, rewards, returns, terminated, truncated, hidden_states = env._sample(np.array([1,0,2,2, 3]))
+    sample = env._sample(np.array([1, 0, 2, 2, 3]))
+
+    observations = sample.observations
+    next_observations = sample.next_observations
+    actions = sample.actions
+    rewards = sample.rewards
+    returns = sample.returns
+    terminated = sample.terminated
+    truncated = sample.truncated
+    hidden_states = sample.hidden_states
 
     # assert
     assert observations[0] == obs1
@@ -458,6 +469,7 @@ def test_sample():
     assert returns[0] == pytest.approx(gamma**2)
     assert terminated[0] == terminated1
     assert truncated[0] == truncated1
+    assert hidden_states[0].shape == (0,)
 
     assert observations[1] == obs0
     assert next_observations[1] == obs1
@@ -466,6 +478,7 @@ def test_sample():
     assert returns[1] == pytest.approx(gamma**3)
     assert terminated[1] == terminated0
     assert truncated[1] == truncated0
+    assert hidden_states[1].shape == (0,)
 
     assert observations[2] == obs2
     assert next_observations[2] == obs3
@@ -474,6 +487,7 @@ def test_sample():
     assert returns[2] == pytest.approx(gamma**1)
     assert terminated[2] == terminated2
     assert truncated[2] == truncated2
+    assert hidden_states[2].shape == (0,)
 
     assert observations[3] == obs2
     assert next_observations[3] == obs3
@@ -482,6 +496,7 @@ def test_sample():
     assert returns[3] == pytest.approx(gamma**1)
     assert terminated[3] == terminated2
     assert truncated[3] == truncated2
+    assert hidden_states[3].shape == (0,)
 
     assert observations[4] == obs3
     assert actions[4] == action3
@@ -489,4 +504,4 @@ def test_sample():
     assert returns[4] == reward3
     assert terminated[4] == terminated3
     assert truncated[4] == truncated3
-
+    assert hidden_states[4].shape == (0,)

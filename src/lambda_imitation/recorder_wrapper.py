@@ -1,8 +1,20 @@
 import os
+from typing import Any, NamedTuple
 
 import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box, Dict, Discrete
+
+
+class RecorderSample(NamedTuple):
+    observations: Any
+    next_observations: Any
+    actions: Any
+    rewards: Any
+    returns: Any
+    terminated: Any
+    truncated: Any
+    hidden_states: Any
 
 
 class RecorderWrapper(gym.Wrapper):
@@ -247,15 +259,15 @@ class RecorderWrapper(gym.Wrapper):
         truncated = self.truncated[batch_inds]
         hidden_states = self.hidden_states[batch_inds]
 
-        return (
-            observations,
-            next_observations,
-            actions,
-            rewards,
-            returns,
-            terminated,
-            truncated,
-            hidden_states,
+        return RecorderSample(
+            observations=observations,
+            next_observations=next_observations,
+            actions=actions,
+            rewards=rewards,
+            returns=returns,
+            terminated=terminated,
+            truncated=truncated,
+            hidden_states=hidden_states,
         )
 
     def get_sb3_buffer(self, device="auto"):
