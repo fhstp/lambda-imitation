@@ -107,7 +107,7 @@ class SoftQNetwork(nn.Module):
             self.fc3 = nn.Linear(32, 32)
             self.fc4 = nn.Linear(32, self.env.action_space.n)
 
-    def forward(self, x, a):
+    def forward(self, x, a, gather=True):
         if type(self.env.action_space) == gym.spaces.Box:
             x = torch.cat([x, a], 1)
             x = F.relu(self.fc1(x))
@@ -120,7 +120,10 @@ class SoftQNetwork(nn.Module):
             x = F.relu(self.fc2(x))
             x = F.relu(self.fc3(x))
             x = self.fc4(x)
-            return x.gather(1, a.unsqueeze(1).long()).view(-1)
+            if gather:
+                return x.gather(1, a.unsqueeze(1).long()).view(-1)
+            else:
+                return x
 
 
 LOG_STD_MAX = 2
@@ -128,9 +131,10 @@ LOG_STD_MIN = -5
 
 
 class Actor(nn.Module):
-    def __init__(self, env, net=None):
+    def __init__(self, env, iqlearn, net=None):
         super().__init__()
         self.net = None
+        self.iqlearn = iqlearn
         self.env = env
         if net is None:
             if type(self.env.action_space) == gym.spaces.Box:
@@ -209,6 +213,26 @@ class Actor(nn.Module):
 
             return actions, entropy, greedy_actions
 
+    def get_actor_loss(self, observations):
+        if type(self.env.action_space) == gym.spaces.Box:
+            pi, log_pi, _ = self.get_action(observations)
+            qf1_pi = self.iqlearn.qf1(observations, pi)
+            qf2_pi = self.iqlearn.qf2(observations, pi)
+            min_qf_pi = torch.min(qf1_pi, qf2_pi)
+            return ((self.iqlearn.alpha * log_pi) - min_qf_pi).mean()
+        else:
+            _, log_pi, _ = self.get_action(observations)
+            qf1_pi = self.iqlearn.qf1(observations, None, False)
+            qf2_pi = self.iqlearn.qf2(observations, None, False)
+            min_qf_pi = torch.min(qf1_pi, qf2_pi)
+            logits = self(observations)
+            policy_dist = Categorical(logits=logits)
+            action_probs = policy_dist.probs
+            log_prob = F.log_softmax(logits, dim=1)
+            return (
+                (action_probs * ((self.iqlearn.alpha * log_prob) - min_qf_pi)).sum(-1)
+            ).mean()
+
 
 def default_phi(x):
     return x
@@ -278,7 +302,7 @@ class IQLearn:
             self.env.observation_space, gym.spaces.Box
         ), "only continuous observation space is supported"
 
-        self.actor = Actor(self.env, actor_net).to(self.args.device)
+        self.actor = Actor(self.env, self, actor_net).to(self.args.device)
         self.qf1 = q_cls(self.env).to(self.args.device)
         self.qf2 = q_cls(self.env).to(self.args.device)
         if self.args.use_targets:
@@ -625,13 +649,8 @@ class IQLearn:
                     for _ in range(
                         self.args.policy_frequency
                     ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-                        pi, log_pi, _ = self.actor.get_action(data.observations)
-                        qf1_pi = self.qf1(data.observations, pi)
-                        qf2_pi = self.qf2(data.observations, pi)
-                        min_qf_pi = torch.min(qf1_pi, qf2_pi)
-                        # actor_loss = (-min_qf_pi).mean()
-                        actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
 
+                        actor_loss = self.actor.get_actor_loss(data.observations)
                         self.actor_optimizer.zero_grad()
                         actor_loss.backward()
                         self.actor_optimizer.step()
@@ -693,6 +712,9 @@ class IQLearn:
                     if self.args.autotune:
                         self.writer.add_scalar(
                             "losses/alpha_loss", alpha_loss.item(), self.n_updates
+                        )
+                        self.writer.add_scalar(
+                            "losses/entropy", (-log_pi).mean().item(), self.n_updates
                         )
             self.n_updates += 1
 
