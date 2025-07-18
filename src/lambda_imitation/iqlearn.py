@@ -374,12 +374,16 @@ class IQLearn:
     def set_demonstration_buffer(self, demonstration_buffer):
         self.demonstration_buffer = demonstration_buffer
 
-    def learn(self, timesteps: int):
+    def learn(self, timesteps: int, progress="tqdm"):
         # ALGO LOGIC: put action logic here
         if self.online_size > 0:
             obs, _ = self.env.reset(seed=np.random.randint(2147483647))
 
-        for _ in tqdm(range(timesteps)):
+        if progress == "tqdm":
+            it = tqdm(range(timesteps))
+        else:
+            it = range(timesteps)
+        for _ in it:
             if self.online_size > 0:
                 if self.n_updates < self.args.learning_starts:
                     action = np.array(self.env.action_space.sample())
@@ -417,7 +421,9 @@ class IQLearn:
 
             # ALGO LOGIC: training.
             if self.n_updates > self.args.learning_starts:
-                data = self.demonstration_buffer.sample(self.args.batch_size)
+                data = self.demonstration_buffer.sample(
+                    self.args.batch_size, self.args.device
+                )
 
                 loss, demonstration_loss, mixed_loss, regularizer_loss = (
                     self.update_critic(data)
@@ -495,20 +501,20 @@ class IQLearn:
     def update_critic(self, data, live_data=None):
         demonstration_loss = (
             self.get_values(data.observations, data.actions)
-            - (1 - data.dones)
+            - (1 - data.terminated.float())
             * self.args.gamma
             * self.get_values(data.next_observations).detach()
         )
         mixed_loss = (
             self.get_values(data.observations)
-            - (1 - data.dones)
+            - (1 - data.terminated.float())
             * self.args.gamma
             * self.get_values(data.next_observations).detach()
         )
         if live_data is not None:
             live_loss = (
                 self.get_values(live_data.observations)
-                - (1 - live_data.dones)
+                - (1 - live_data.terminated.float())
                 * self.args.gamma
                 * self.get_values(live_data.next_observations).detach()
             )
@@ -544,11 +550,7 @@ class IQLearn:
         for _ in range(
             self.args.policy_frequency
         ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-            pi, log_pi, _ = self.actor.get_action(data.observations)
-            qf1_pi = self.qf1(data.observations, pi)
-            qf2_pi = self.qf2(data.observations, pi)
-            min_qf_pi = torch.min(qf1_pi, qf2_pi)
-            actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
+            actor_loss = self.actor.get_actor_loss(data.observations)
 
             self.actor_optimizer.zero_grad()
             actor_loss.backward()
