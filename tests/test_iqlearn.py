@@ -318,3 +318,35 @@ def test_iqlearn_pendulum():
                 break
 
     assert np.mean(returns) > -300
+
+
+@pytest.mark.slow
+def test_sac_cartpole_q_lstm():
+    # assemble
+    env = gym.make("CartPole-v1")
+    iqlearn = IQLearn(
+        env,
+        sac_args={
+            "device": "cpu",
+            "target_entropy": 0.2,
+            "tensorboard_dir": None,
+        },
+        hidden_state_dims=(0, 10, 10),
+    )
+
+    # act
+    iqlearn.sac_learn(15000, progress="none")
+
+    # assert
+    steps = 0
+    obs, info = env.reset()
+    while True:
+        action = iqlearn.predict(torch.tensor(obs), True)[0]
+        obs, _, terminated, truncated, _ = env.step(action)
+        steps += 1
+        if terminated or truncated:
+            break
+
+    assert np.nonzero(iqlearn.env.hidden_states[0][32])
+    assert np.nonzero(iqlearn.env.hidden_states[1][32])
+    assert steps > 150

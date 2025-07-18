@@ -124,14 +124,17 @@ class RecorderWrapper(gym.Wrapper):
         obs, info = super().reset(**kwargs)
         self.last_obs = obs
         self.last_hidden_states = tuple(
-            np.zeros((hidden_state_dim)) for hidden_state_dim in self.hidden_state_dims
+            np.zeros((hidden_state_dim), dtype=np.float32)
+            for hidden_state_dim in self.hidden_state_dims
         )
         _add_collection_entry(
             self.observation_space, self.observations, obs, self.pos % self.buffer_size
         )
         mod_pos = self.pos % self.buffer_size
         for k, hidden_state_dim in enumerate(self.hidden_state_dims):
-            self.hidden_states[k][mod_pos] = np.zeros((hidden_state_dim))
+            self.hidden_states[k][mod_pos] = np.zeros(
+                (hidden_state_dim), dtype=np.float32
+            )
         return obs, info
 
     def _calculate_returns(self):

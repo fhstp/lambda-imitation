@@ -24,6 +24,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from numpy.typing import NDArray
 from torch.distributions.categorical import Categorical
+from torch.nn.modules import LSTMCell
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.rich import tqdm
 
@@ -91,39 +92,83 @@ def layer_init(layer, bias_const=0.0):
 
 
 class SoftQNetwork(nn.Module):
-    def __init__(self, env):
+    def __init__(self, env, hidden_state_dim):
         super().__init__()
+        self.hidden_state_dim = hidden_state_dim
         self.env = env
         if type(self.env.action_space) == gym.spaces.Box:
-            self.fc1 = nn.Linear(
-                env.observation_space.shape[0] + env.action_space.shape[0], 32
-            )
-            self.fc2 = nn.Linear(32, 32)
+            if hidden_state_dim > 0:
+                assert (
+                    hidden_state_dim % 2 == 0
+                ), "hidden_state dimensions have to be even for LSTM"
+                self.lstm = LSTMCell(
+                    env.observation_space.shape[0] + env.action_space.shape[0],
+                    hidden_state_dim // 2,
+                )
+                self.fc2 = nn.Linear(hidden_state_dim // 2, 32)
+
+            else:
+                self.fc1 = nn.Linear(
+                    env.observation_space.shape[0] + env.action_space.shape[0], 32
+                )
+                self.fc2 = nn.Linear(32, 32)
             self.fc3 = nn.Linear(32, 32)
             self.fc4 = nn.Linear(32, 1)
         elif type(self.env.action_space) == gym.spaces.Discrete:
-            self.fc1 = nn.Linear(env.observation_space.shape[0], 32)
-            self.fc2 = nn.Linear(32, 32)
+            if hidden_state_dim > 0:
+                assert (
+                    hidden_state_dim % 2 == 0
+                ), "hidden_state dimensions have to be even for LSTM"
+                self.lstm = LSTMCell(
+                    env.observation_space.shape[0],
+                    hidden_state_dim // 2,
+                )
+                self.fc2 = nn.Linear(hidden_state_dim // 2, 32)
+
+            else:
+                self.fc1 = nn.Linear(env.observation_space.shape[0], 32)
+                self.fc2 = nn.Linear(32, 32)
             self.fc3 = nn.Linear(32, 32)
             self.fc4 = nn.Linear(32, self.env.action_space.n)
 
     def forward(self, x, a, h, gather=True):
+        hidden_state = None
         if type(self.env.action_space) == gym.spaces.Box:
             x = torch.cat([x, a], 1)
-            x = F.relu(self.fc1(x))
+            if self.hidden_state_dim > 0:
+                ht, ct = self.lstm(
+                    x,
+                    (h[:, self.hidden_state_dim // 2], h[self.hidden_state_dim // 2 :]),
+                )
+                x = ht
+                hidden_state = torch.cat((ht, ct), dim=-1)
+                print(hidden_state.shape)
+            else:
+                x = F.relu(self.fc1(x))
             x = F.relu(self.fc2(x))
             x = F.relu(self.fc3(x))
             x = self.fc4(x)
-            return x
+            return x, hidden_state
         else:
-            x = F.relu(self.fc1(x))
+            if self.hidden_state_dim > 0:
+                ht, ct = self.lstm(
+                    x,
+                    (
+                        h[:, : self.hidden_state_dim // 2],
+                        h[:, self.hidden_state_dim // 2 :],
+                    ),
+                )
+                x = ht
+                hidden_state = torch.cat((ht, ct), dim=-1)
+            else:
+                x = F.relu(self.fc1(x))
             x = F.relu(self.fc2(x))
             x = F.relu(self.fc3(x))
             x = self.fc4(x)
             if gather:
-                return x.gather(1, a.unsqueeze(1).long()).view(-1)
+                return x.gather(1, a.unsqueeze(1).long()).view(-1), hidden_state
             else:
-                return x
+                return x, hidden_state
 
 
 LOG_STD_MAX = 2
@@ -131,7 +176,7 @@ LOG_STD_MIN = -5
 
 
 class Actor(nn.Module):
-    def __init__(self, env, iqlearn, net=None):
+    def __init__(self, env, iqlearn, net=None, hidden_state_dim=0):
         super().__init__()
         self.net = None
         self.iqlearn = iqlearn
@@ -216,14 +261,14 @@ class Actor(nn.Module):
     def get_actor_loss(self, observations, hidden_state):
         if type(self.env.action_space) == gym.spaces.Box:
             pi, log_pi, _ = self.get_action(observations, hidden_state[0])
-            qf1_pi = self.iqlearn.qf1(observations, pi, hidden_state[1])
-            qf2_pi = self.iqlearn.qf2(observations, pi, hidden_state[2])
+            qf1_pi, _ = self.iqlearn.qf1(observations, pi, hidden_state[1])
+            qf2_pi, _ = self.iqlearn.qf2(observations, pi, hidden_state[2])
             min_qf_pi = torch.min(qf1_pi, qf2_pi)
             return ((self.iqlearn.alpha * log_pi) - min_qf_pi).mean()
         else:
             _, log_pi, _ = self.get_action(observations, hidden_state[0])
-            qf1_pi = self.iqlearn.qf1(observations, None, hidden_state[1], False)
-            qf2_pi = self.iqlearn.qf2(observations, None, hidden_state[2], False)
+            qf1_pi, _ = self.iqlearn.qf1(observations, None, hidden_state[1], False)
+            qf2_pi, _ = self.iqlearn.qf2(observations, None, hidden_state[2], False)
             min_qf_pi = torch.min(qf1_pi, qf2_pi)
             logits = self(observations, hidden_state[0])
             policy_dist = Categorical(logits=logits)
@@ -252,6 +297,8 @@ class IQLearn:
         actor_net: nn.Module | None = None,
         q_cls: type = SoftQNetwork,
         sac_args: Args | dict[str, Any] | None = None,
+        hidden_state_dims=(0, 0, 0),
+        hidden_state_net=None,
     ):
         if sac_args is None:
             self.args = Args()
@@ -263,7 +310,7 @@ class IQLearn:
         self.online_size = online_size
         self.demonstration_buffer = None
 
-        self.set_env(env)
+        self.hidden_state_dims = hidden_state_dims
 
         if phi is None:
             self.phi = default_phi
@@ -287,38 +334,91 @@ class IQLearn:
                 save_code=True,
             )
 
-        self.setup_writer()
-
         # TRY NOT TO MODIFY: seeding
         random.seed(self.args.seed)
         np.random.seed(self.args.seed)
         torch.manual_seed(self.args.seed)
         torch.backends.cudnn.deterministic = self.args.torch_deterministic
 
-        assert isinstance(self.env.action_space, gym.spaces.Box) or isinstance(
-            self.env.action_space, gym.spaces.Discrete
+        assert isinstance(env.action_space, gym.spaces.Box) or isinstance(
+            env.action_space, gym.spaces.Discrete
         ), "only discrete or continuous action space is supported"
         assert isinstance(
-            self.env.observation_space, gym.spaces.Box
+            env.observation_space, gym.spaces.Box
         ), "only continuous observation space is supported"
 
-        self.actor = Actor(self.env, self, actor_net).to(self.args.device)
-        self.qf1 = q_cls(self.env).to(self.args.device)
-        self.qf2 = q_cls(self.env).to(self.args.device)
+        self.actor = Actor(
+            env, self, actor_net, hidden_state_dim=hidden_state_dims[0]
+        ).to(self.args.device)
+        self.qf1 = q_cls(env, hidden_state_dim=hidden_state_dims[1]).to(
+            self.args.device
+        )
+        self.qf2 = q_cls(env, hidden_state_dim=hidden_state_dims[2]).to(
+            self.args.device
+        )
         if self.args.use_targets:
-            self.qf1_target = q_cls(self.env).to(self.args.device)
-            self.qf2_target = q_cls(self.env).to(self.args.device)
+            self.qf1_target = q_cls(env, hidden_state_dim=hidden_state_dims[1]).to(
+                self.args.device
+            )
+            self.qf2_target = q_cls(env, hidden_state_dim=hidden_state_dims[2]).to(
+                self.args.device
+            )
             self.qf1_target.load_state_dict(self.qf1.state_dict())
             self.qf2_target.load_state_dict(self.qf2.state_dict())
         else:
             self.qf1_target = self.qf1
             self.qf2_target = self.qf2
 
+        if hidden_state_net is None:
+
+            def hidden_state_net(x, a, h):
+                if isinstance(x, torch.Tensor):
+                    x = x.detach().clone()
+                    a = a.detach().clone()
+                    h = tuple(s.detach().clone() for s in h)
+                else:
+                    x = torch.tensor(x)
+                    a = torch.tensor(a)
+                    h = tuple(torch.tensor(s) for s in h)
+
+                def get_hidden_state(lstm, input, hidden_state):
+                    h, c = lstm(
+                        input,
+                        (
+                            hidden_state[: hidden_state.shape[0] // 2],
+                            hidden_state[hidden_state.shape[0] // 2 :],
+                        ),
+                    )
+                    return torch.cat((h, c)).detach().cpu().numpy()
+
+                # TODO: if actor is lstm as well, add here
+                xa = x
+                if self.hidden_state_dims[1] > 0 or self.hidden_state_dims[2] > 0:
+                    if type(self.env.action_space) == gym.spaces.Box:
+                        xa = torch.cat([x, a], 1)
+                return (
+                    np.array((0,)),
+                    (
+                        get_hidden_state(self.qf1_target.lstm, xa, h[1])
+                        if self.hidden_state_dims[1] > 0
+                        else np.array((0,))
+                    ),
+                    (
+                        get_hidden_state(self.qf2_target.lstm, xa, h[2])
+                        if self.hidden_state_dims[2] > 0
+                        else np.array((0,))
+                    ),
+                )
+
+            self.hidden_state_net = hidden_state_net
+        else:
+            self.hidden_state_net = hidden_state_net
+
         # Automatic entropy tuning
         if self.args.autotune:
             if self.args.auto_target_entropy:
                 self.target_entropy = -torch.prod(
-                    torch.Tensor(self.env.action_space.shape).to(self.args.device)
+                    torch.Tensor(env.action_space.shape).to(self.args.device)
                 ).item()
             else:
                 self.target_entropy = self.args.target_entropy
@@ -330,8 +430,10 @@ class IQLearn:
             self.a_optimizer = None
         self.recreate_optimizers()
 
+        self.set_env(env)
+        self.setup_writer()
+
         self.env.observation_space.dtype = np.float32  # type: ignore
-        self.reset_replay_buffer()
         self.start_time = time.time()
 
         self.n_updates = 0
@@ -352,6 +454,7 @@ class IQLearn:
             self.args.gamma,
             self.args.buffer_size,
             self.env.hidden_state_dims,
+            self.env.hidden_state_net,
         )
 
     def setup_writer(self):
@@ -374,7 +477,11 @@ class IQLearn:
         self.env = env
         self.env = gym.wrappers.RecordEpisodeStatistics(self.env)
         self.env = RecorderWrapper(
-            self.env, self.args.gamma, self.args.buffer_size, (0, 0, 0)
+            self.env,
+            self.args.gamma,
+            self.args.buffer_size,
+            self.hidden_state_dims,
+            self.hidden_state_net,
         )
         self.setup_writer()
 
@@ -502,8 +609,8 @@ class IQLearn:
         if actions is None:
             actions, _, _ = self.actor.get_action(observations, hidden_states[0])
 
-        qf1_a_values = self.qf1(observations, actions, hidden_states[1]).view(-1)
-        qf2_a_values = self.qf2(observations, actions, hidden_states[2]).view(-1)
+        qf1_a_values = self.qf1(observations, actions, hidden_states[1])[0].view(-1)
+        qf2_a_values = self.qf2(observations, actions, hidden_states[2])[0].view(-1)
         return torch.min(qf1_a_values, qf2_a_values).unsqueeze(1)
 
     def update_critic(self, data, live_data=None):
@@ -647,12 +754,12 @@ class IQLearn:
                     next_state_actions, next_state_log_pi, _ = self.actor.get_action(
                         data.next_observations, data.hidden_states[0]
                     )
-                    qf1_next_target = self.qf1_target(
+                    qf1_next_target, _ = self.qf1_target(
                         data.next_observations,
                         next_state_actions,
                         data.hidden_states[1],
                     )
-                    qf2_next_target = self.qf2_target(
+                    qf2_next_target, _ = self.qf2_target(
                         data.next_observations,
                         next_state_actions,
                         data.hidden_states[2],
@@ -665,12 +772,16 @@ class IQLearn:
                         1 - data.terminated.float().flatten()
                     ) * self.args.gamma * (min_qf_next_target).view(-1)
 
-                qf1_a_values = self.qf1(
+                qf1_a_values, _ = self.qf1(
                     data.observations, data.actions, data.hidden_states[1]
-                ).view(-1)
-                qf2_a_values = self.qf2(
+                )
+                qf1_a_values = qf1_a_values.view(-1)
+                qf2_a_values, _ = self.qf2(
                     data.observations, data.actions, data.hidden_states[2]
-                ).view(-1)
+                )
+                qf2_a_values = qf2_a_values.view(-1)
+
+                # TODO: enter next hidden state into buffer automatically?
                 qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
                 qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
                 qf_loss = qf1_loss + qf2_loss
