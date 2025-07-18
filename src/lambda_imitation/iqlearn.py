@@ -52,11 +52,11 @@ class Args:
     """where to store tensorboard logs, if None, no tensorboard will be used"""
 
     # Algorithm specific arguments
-    buffer_size: int = 1000
+    buffer_size: int = 10000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
-    use_targets: bool = False
+    use_targets: bool = True
     """Whether or not to use target nets"""
     tau: float = 0.005
     """target smoothing coefficient (default: 0.005)"""
