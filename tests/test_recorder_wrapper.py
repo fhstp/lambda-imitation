@@ -259,12 +259,14 @@ def test_buffer_too_short_for_return():
 def test_hidden_state_calculation():
     # assemble
     def hidden_state_net(state, action, hidden_state):
-        hidden_state = hidden_state.copy()
-        hidden_state[0] += 1
+        hidden_state = (hidden_state[0].copy(),)
+        hidden_state[0][0] += 1
         return hidden_state
 
     gamma = 0.99
-    env = RecorderWrapper(gym.make("MountainCar-v0"), gamma, 100, 2, hidden_state_net)
+    env = RecorderWrapper(
+        gym.make("MountainCar-v0"), gamma, 100, (2,), hidden_state_net
+    )
 
     # act
     env.reset()
@@ -272,31 +274,31 @@ def test_hidden_state_calculation():
     env.step(env.action_space.sample())
 
     # assert
-    assert env.hidden_states[0][0] == 1
-    assert env.hidden_states[0][1] == 0
-    assert env.hidden_states[1][0] == 2
-    assert env.hidden_states[1][1] == 0
-    assert env.hidden_states[2][0] == 0  # not set yet
-    assert env.hidden_states[2][1] == 0
+    assert env.hidden_states[0][0][0] == 1
+    assert env.hidden_states[0][0][1] == 0
+    assert env.hidden_states[0][1][0] == 2
+    assert env.hidden_states[0][1][1] == 0
+    assert env.hidden_states[0][2][0] == 0  # not set yet
+    assert env.hidden_states[0][2][1] == 0
 
     # act again after reset
     env.reset()
     env.step(env.action_space.sample())
 
     # assert nothing gets overwritten
-    assert env.hidden_states[0][0] == 1
-    assert env.hidden_states[0][1] == 0
-    assert env.hidden_states[1][0] == 2
-    assert env.hidden_states[1][1] == 0
-    assert env.hidden_states[2][0] == 1
-    assert env.hidden_states[2][1] == 0
+    assert env.hidden_states[0][0][0] == 1
+    assert env.hidden_states[0][0][1] == 0
+    assert env.hidden_states[0][1][0] == 2
+    assert env.hidden_states[0][1][1] == 0
+    assert env.hidden_states[0][2][0] == 1
+    assert env.hidden_states[0][2][1] == 0
 
 
 def test_hidden_state_recalculation():
     # assemble
     def hidden_state_net(state, action, hidden_state):
-        hidden_state = hidden_state.copy()
-        hidden_state[0] += 1
+        hidden_state = (hidden_state[0].copy(),)
+        hidden_state[0][0] += 1
         return hidden_state
 
     gamma = 0.99
@@ -308,26 +310,29 @@ def test_hidden_state_recalculation():
     env.step(env.action_space.sample())
 
     # assert no hidden states
-    assert env.hidden_states.shape == (100, 0)
+    assert len(env.hidden_states) == 1
+    assert env.hidden_states[0].shape == (100, 0)
 
     # act again - recalculate
-    env.setup_hidden_states(2, hidden_state_net)
+    env.setup_hidden_states((2,), hidden_state_net)
     env.recalculate_hidden_states()
 
     # assert hidden states as above when directly calculating
-    assert env.hidden_states[0][0] == 1
-    assert env.hidden_states[0][1] == 0
-    assert env.hidden_states[1][0] == 2
-    assert env.hidden_states[1][1] == 0
-    assert env.hidden_states[2][0] == 0
-    assert env.hidden_states[2][1] == 0
+    assert len(env.hidden_states) == 1
+    assert env.hidden_states[0].shape == (100, 2)
+    assert env.hidden_states[0][0][0] == 1
+    assert env.hidden_states[0][0][1] == 0
+    assert env.hidden_states[0][1][0] == 2
+    assert env.hidden_states[0][1][1] == 0
+    assert env.hidden_states[0][2][0] == 0
+    assert env.hidden_states[0][2][1] == 0
 
 
 def test_hidden_state_recalculation_two_episodes():
     # assemble
     def hidden_state_net(state, action, hidden_state):
-        hidden_state = hidden_state.copy()
-        hidden_state[0] += 1
+        hidden_state = (hidden_state[0].copy(),)
+        hidden_state[0][0] += 1
         return hidden_state
 
     gamma = 0.99
@@ -342,19 +347,22 @@ def test_hidden_state_recalculation_two_episodes():
     env.step(env.action_space.sample())
 
     # assert no hidden states
-    assert env.hidden_states.shape == (100, 0)
+    assert len(env.hidden_states) == 1
+    assert env.hidden_states[0].shape == (100, 0)
 
     # act again - recalculate
-    env.setup_hidden_states(2, hidden_state_net)
+    env.setup_hidden_states((2,), hidden_state_net)
     env.recalculate_hidden_states()
 
     # assert hidden states as above when directly calculating
-    assert env.hidden_states[0][0] == 1
-    assert env.hidden_states[0][1] == 0
-    assert env.hidden_states[1][0] == 2
-    assert env.hidden_states[1][1] == 0
-    assert env.hidden_states[2][0] == 1
-    assert env.hidden_states[2][1] == 0
+    assert len(env.hidden_states) == 1
+    assert env.hidden_states[0].shape == (100, 2)
+    assert env.hidden_states[0][0][0] == 1
+    assert env.hidden_states[0][0][1] == 0
+    assert env.hidden_states[0][1][0] == 2
+    assert env.hidden_states[0][1][1] == 0
+    assert env.hidden_states[0][2][0] == 1
+    assert env.hidden_states[0][2][1] == 0
 
 
 def test_sample_generate_indices_not_full():
@@ -463,6 +471,8 @@ def test_sample():
     hidden_states = sample.hidden_states
 
     # assert
+    assert len(hidden_states) == 1
+
     assert observations[0] == obs1
     assert next_observations[0] == obs2
     assert actions[0] == action1
@@ -470,7 +480,7 @@ def test_sample():
     assert returns[0] == pytest.approx(gamma**2)
     assert terminated[0] == terminated1
     assert truncated[0] == truncated1
-    assert hidden_states[0].shape == (0,)
+    assert hidden_states[0][0].shape == (0,)
 
     assert observations[1] == obs0
     assert next_observations[1] == obs1
@@ -479,7 +489,7 @@ def test_sample():
     assert returns[1] == pytest.approx(gamma**3)
     assert terminated[1] == terminated0
     assert truncated[1] == truncated0
-    assert hidden_states[1].shape == (0,)
+    assert hidden_states[0][1].shape == (0,)
 
     assert observations[2] == obs2
     assert next_observations[2] == obs3
@@ -488,7 +498,7 @@ def test_sample():
     assert returns[2] == pytest.approx(gamma**1)
     assert terminated[2] == terminated2
     assert truncated[2] == truncated2
-    assert hidden_states[2].shape == (0,)
+    assert hidden_states[0][2].shape == (0,)
 
     assert observations[3] == obs2
     assert next_observations[3] == obs3
@@ -497,7 +507,7 @@ def test_sample():
     assert returns[3] == pytest.approx(gamma**1)
     assert terminated[3] == terminated2
     assert truncated[3] == truncated2
-    assert hidden_states[3].shape == (0,)
+    assert hidden_states[0][3].shape == (0,)
 
     assert observations[4] == obs3
     assert actions[4] == action3
@@ -505,7 +515,7 @@ def test_sample():
     assert returns[4] == reward3
     assert terminated[4] == terminated3
     assert truncated[4] == truncated3
-    assert hidden_states[4].shape == (0,)
+    assert hidden_states[0][4].shape == (0,)
 
 
 def test_sample_torch():
@@ -543,7 +553,9 @@ def test_sample_torch():
     assert type(returns) == torch.Tensor
     assert type(terminated) == torch.Tensor
     assert type(truncated) == torch.Tensor
-    assert type(hidden_states) == torch.Tensor
+    assert type(hidden_states) == tuple
+    assert len(hidden_states) == 1
+    assert type(hidden_states[0]) == torch.Tensor
 
     assert observations[0] == obs1
     assert next_observations[0] == obs2
@@ -552,7 +564,7 @@ def test_sample_torch():
     assert returns[0] == pytest.approx(gamma**2)
     assert terminated[0] == terminated1
     assert truncated[0] == truncated1
-    assert hidden_states[0].shape == (0,)
+    assert hidden_states[0][0].shape == (0,)
 
     assert observations[1] == obs0
     assert next_observations[1] == obs1
@@ -561,7 +573,7 @@ def test_sample_torch():
     assert returns[1] == pytest.approx(gamma**3)
     assert terminated[1] == terminated0
     assert truncated[1] == truncated0
-    assert hidden_states[1].shape == (0,)
+    assert hidden_states[0][1].shape == (0,)
 
     assert observations[2] == obs2
     assert next_observations[2] == obs3
@@ -570,7 +582,7 @@ def test_sample_torch():
     assert returns[2] == pytest.approx(gamma**1)
     assert terminated[2] == terminated2
     assert truncated[2] == truncated2
-    assert hidden_states[2].shape == (0,)
+    assert hidden_states[0][2].shape == (0,)
 
     assert observations[3] == obs2
     assert next_observations[3] == obs3
@@ -579,7 +591,7 @@ def test_sample_torch():
     assert returns[3] == pytest.approx(gamma**1)
     assert terminated[3] == terminated2
     assert truncated[3] == truncated2
-    assert hidden_states[3].shape == (0,)
+    assert hidden_states[0][3].shape == (0,)
 
     assert observations[4] == obs3
     assert actions[4] == action3
@@ -587,4 +599,4 @@ def test_sample_torch():
     assert returns[4] == reward3
     assert terminated[4] == terminated3
     assert truncated[4] == truncated3
-    assert hidden_states[4].shape == (0,)
+    assert hidden_states[0][4].shape == (0,)

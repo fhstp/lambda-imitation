@@ -21,7 +21,7 @@ class RecorderSample(NamedTuple):
 class RecorderWrapper(gym.Wrapper):
 
     def __init__(
-        self, env, gamma, buffer_size, hidden_state_dim=0, hidden_state_net=None
+        self, env, gamma, buffer_size, hidden_state_dims=(0,), hidden_state_net=None
     ):
         """
         Gymnasium Wrapper for automatically logging episodes in a circular buffer. Buffer size has to be big enough for single-episode rollouts! (for return calculation)
@@ -29,8 +29,8 @@ class RecorderWrapper(gym.Wrapper):
         :param env: The environment to wrap.
         :param gamma: the discount factor to be used in the environment.
         :param buffer_size: integer, the amount of transitions the buffer can save.
-        :param hidden_state_dim: optional, default 0, for saving hidden states.
-        :param hidden_state_net: optional, if given, hidden state from the network is saved, should be a callable taking state, action and hidden state and returning a nd-array of dimension `hidden_state_dim`.
+        :param hidden_state_dims: optional, tuple of integers, default (0,), for saving hidden states.
+        :param hidden_state_net: optional, if given, hidden state from the network is saved, should be a callable taking state, action and hidden states tuple and returning a tuple of length `len(hidden_state_dims)`, with each entry an nd-array of respective dimension in `hidden_state_dims`.
         """
         super().__init__(env)
         assert type(env.observation_space) in [
@@ -57,16 +57,17 @@ class RecorderWrapper(gym.Wrapper):
         self.returns = np.zeros(self.buffer_size, dtype=np.float32)
         self.terminated = np.zeros(self.buffer_size, dtype=np.bool_)
         self.truncated = np.zeros(self.buffer_size, dtype=np.bool_)
-        self.setup_hidden_states(hidden_state_dim, hidden_state_net)
+        self.setup_hidden_states(hidden_state_dims, hidden_state_net)
 
         self.pos = 0
         self.last_return_calculation = 0
 
-    def setup_hidden_states(self, hidden_state_dim, hidden_state_net):
-        self.hidden_states = np.zeros(
-            (self.buffer_size, hidden_state_dim), dtype=np.float32
+    def setup_hidden_states(self, hidden_state_dims, hidden_state_net):
+        self.hidden_states = tuple(
+            np.zeros((self.buffer_size, hidden_state_dim), dtype=np.float32)
+            for hidden_state_dim in hidden_state_dims
         )
-        self.hidden_state_dim = hidden_state_dim
+        self.hidden_state_dims = hidden_state_dims
         self.hidden_state_net = hidden_state_net
 
     def recalculate_hidden_states(self):
@@ -76,14 +77,21 @@ class RecorderWrapper(gym.Wrapper):
         assert (
             self.hidden_state_net is not None
         ), "hidden state recalculation only possible for given hidden_state_net!"
-        hidden_state = np.zeros((self.hidden_state_dim), dtype=np.float32)
+        hidden_states = tuple(
+            np.zeros((hidden_state_dim), dtype=np.float32)
+            for hidden_state_dim in self.hidden_state_dims
+        )
         for i in range(self.pos):
             obs = self.get_observation_at(i)
             action = self.get_action_at(i)
-            hidden_state = self.hidden_state_net(obs, action, hidden_state)
-            self.hidden_states[i] = hidden_state
+            hidden_states = self.hidden_state_net(obs, action, hidden_states)
+            for k, hidden_state in enumerate(hidden_states):
+                self.hidden_states[k][i] = hidden_states[k]
             if self.terminated[i] or self.truncated[i]:
-                hidden_state = np.zeros((self.hidden_state_dim), dtype=np.float32)
+                hidden_states = tuple(
+                    np.zeros((hidden_state_dim), dtype=np.float32)
+                    for hidden_state_dim in self.hidden_state_dims
+                )
 
     def reset(self, **kwargs):
         """Resets the environment to an initial internal state, returning an initial observation and info and recording the state..
@@ -115,12 +123,15 @@ class RecorderWrapper(gym.Wrapper):
         self._calculate_returns()
         obs, info = super().reset(**kwargs)
         self.last_obs = obs
-        self.last_hidden_state = np.zeros((self.hidden_state_dim))
+        self.last_hidden_states = tuple(
+            np.zeros((hidden_state_dim)) for hidden_state_dim in self.hidden_state_dims
+        )
         _add_collection_entry(
             self.observation_space, self.observations, obs, self.pos % self.buffer_size
         )
         mod_pos = self.pos % self.buffer_size
-        self.hidden_states[mod_pos] = np.zeros((self.hidden_state_dim))
+        for k, hidden_state_dim in enumerate(self.hidden_state_dims):
+            self.hidden_states[k][mod_pos] = np.zeros((hidden_state_dim))
         return obs, info
 
     def _calculate_returns(self):
@@ -173,10 +184,11 @@ class RecorderWrapper(gym.Wrapper):
         self.terminated[mod_pos] = terminated
         self.truncated[mod_pos] = truncated
         if self.hidden_state_net is not None:
-            self.last_hidden_state = self.hidden_state_net(
-                self.last_obs, action, self.last_hidden_state
+            self.last_hidden_states = self.hidden_state_net(
+                self.last_obs, action, self.last_hidden_states
             )
-            self.hidden_states[mod_pos] = self.last_hidden_state
+            for k, last_hidden_state in enumerate(self.last_hidden_states):
+                self.hidden_states[k][mod_pos] = last_hidden_state
 
         self.pos += 1
         if terminated or truncated:
@@ -259,7 +271,9 @@ class RecorderWrapper(gym.Wrapper):
         returns = self.returns[batch_inds]
         terminated = self.terminated[batch_inds]
         truncated = self.truncated[batch_inds]
-        hidden_states = self.hidden_states[batch_inds]
+        hidden_states = tuple(
+            hidden_state[batch_inds] for hidden_state in self.hidden_states
+        )
 
         if mode != "numpy":
             observations = torch.tensor(observations).to(mode)
@@ -269,7 +283,9 @@ class RecorderWrapper(gym.Wrapper):
             returns = torch.tensor(returns).to(mode)
             terminated = torch.tensor(terminated).to(mode)
             truncated = torch.tensor(truncated).to(mode)
-            hidden_states = torch.tensor(hidden_states).to(mode)
+            hidden_states = tuple(
+                torch.tensor(hidden_state).to(mode) for hidden_state in hidden_states
+            )
 
         return RecorderSample(
             observations=observations,
