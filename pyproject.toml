@@ -9,6 +9,8 @@ dependencies = [
   "tensorboard",
   "tqdm",
   "rich",
+  "stable_baselines3",
+  "huggingface-sb3",
 ]
 requires-python = ">=3.12"
 authors = [

@@ -1,5 +1,6 @@
 ## no tests in classical unit test sense, since RL algos are hard to test that way...
 
+import warnings
 from collections import OrderedDict
 
 import gymnasium as gym
@@ -7,8 +8,11 @@ import numpy as np
 import pytest
 import torch
 from gymnasium.spaces import Box, Dict, Discrete
+from huggingface_sb3 import load_from_hub
+from stable_baselines3 import DQN, PPO
 
 from lambda_imitation import IQLearn
+from lambda_imitation.recorder_wrapper import RecorderWrapper
 
 
 class SimpleGridWorld(gym.Env):
@@ -190,9 +194,127 @@ def test_sac_pendulum():
     while True:
         action = iqlearn.predict(torch.tensor(obs), True)[0]
         obs, reward, terminated, truncated, _ = env.step(action)
-        undiscounted_return += reward
+        undiscounted_return += reward  # type: ignore
         if terminated or truncated:
             break
 
     print(undiscounted_return)
     assert undiscounted_return > -500
+
+
+@pytest.mark.slow
+def test_iqlearn_mountaincar():
+    # assemble
+    checkpoint = load_from_hub(
+        repo_id="sb3/dqn-MountainCar-v0",
+        filename="dqn-MountainCar-v0.zip",
+    )
+    env = gym.make("MountainCar-v0")
+    with warnings.catch_warnings(
+        action="ignore"
+    ):  # UserWarning warning of loading from an old version of SB3
+        model = DQN.load(
+            checkpoint,
+            env=env,
+            device="cpu",
+            custom_objects={
+                "observation_space": env.observation_space,
+                "action_space": env.action_space,
+                "learning_rate": 0.0,
+                "lr_schedule": None,
+                "exploration_schedule": None,
+                "verbose": 0,
+            },
+        )
+    recorder_env = RecorderWrapper(env, 0.99, 1000)
+    for _ in range(5):
+        obs, _ = recorder_env.reset()
+        while True:
+            obs, _, terminated, truncated, _ = recorder_env.step(
+                model.predict(obs, deterministic=True)[0]
+            )
+            if terminated or truncated:
+                break
+
+    iqlearn = IQLearn(env, sac_args={"device": "cpu", "tensorboard_dir": None})
+    iqlearn.set_demonstration_buffer(recorder_env)
+    assert (
+        iqlearn.demonstration_buffer.pos < 550  # type: ignore
+    )  # safety assert, if this one throws, something is wrong with expert
+
+    # act
+    iqlearn.learn(500, progress="none")
+
+    # assert
+    steps = []
+    for _ in range(5):
+        step = 0
+        obs, _ = env.reset()
+        while True:
+            step += 1
+            obs, _, terminated, truncated, _ = env.step(
+                model.predict(obs, deterministic=True)[0]
+            )
+            if terminated or truncated:
+                steps.append(step)
+                break
+
+    assert np.mean(steps) < 120
+
+
+@pytest.mark.slow
+def test_iqlearn_pendulum():
+    # assemble
+    checkpoint = load_from_hub(
+        repo_id="sb3/ppo-Pendulum-v1",
+        filename="ppo-Pendulum-v1.zip",
+    )
+    env = gym.make("Pendulum-v1")
+    with warnings.catch_warnings(
+        action="ignore"
+    ):  # UserWarning warning of loading from an old version of SB3
+        model = PPO.load(
+            checkpoint,
+            env=env,
+            device="cpu",
+            custom_objects={
+                "observation_space": env.observation_space,
+                "action_space": env.action_space,
+                "learning_rate": 0.0,
+                "lr_schedule": None,
+                "exploration_schedule": None,
+                "clip_range": 0.2,
+                "verbose": 0,
+            },
+        )
+    recorder_env = RecorderWrapper(env, 0.99, 5000)
+    for _ in range(5):
+        obs, _ = recorder_env.reset()
+        while True:
+            obs, _, terminated, truncated, _ = recorder_env.step(
+                model.predict(obs, deterministic=True)[0]
+            )
+            if terminated or truncated:
+                break
+
+    iqlearn = IQLearn(env, sac_args={"device": "cpu", "tensorboard_dir": None})
+    iqlearn.set_demonstration_buffer(recorder_env)
+
+    # act
+    iqlearn.learn(1000, progress="none")
+
+    # assert
+    returns = []
+    for _ in range(5):
+        undisc_return = 0
+        obs, _ = env.reset()
+        while True:
+            obs, reward, terminated, truncated, _ = env.step(
+                model.predict(obs, deterministic=True)[0]
+            )
+            undisc_return += reward  # type: ignore
+            if terminated or truncated:
+                returns.append(undisc_return)
+                break
+
+    assert np.mean(returns) > -300
