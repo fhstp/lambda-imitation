@@ -107,7 +107,7 @@ class SoftQNetwork(nn.Module):
             self.fc3 = nn.Linear(32, 32)
             self.fc4 = nn.Linear(32, self.env.action_space.n)
 
-    def forward(self, x, a, gather=True):
+    def forward(self, x, a, h, gather=True):
         if type(self.env.action_space) == gym.spaces.Box:
             x = torch.cat([x, a], 1)
             x = F.relu(self.fc1(x))
@@ -167,7 +167,7 @@ class Actor(nn.Module):
                 ),
             )
 
-    def forward(self, x):
+    def forward(self, x, h):
         if self.net is None:
             x = F.relu(self.fc1(x))
             x = F.relu(self.fc2(x))
@@ -187,9 +187,9 @@ class Actor(nn.Module):
 
         return mean, log_std
 
-    def get_action(self, x):
+    def get_action(self, x, h):
         if type(self.env.action_space) == gym.spaces.Box:
-            mean, log_std = self(x)
+            mean, log_std = self(x, h)
             std = log_std.exp()
             normal = torch.distributions.Normal(mean, std)
             x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
@@ -203,7 +203,7 @@ class Actor(nn.Module):
 
             return action, log_prob, mean
         else:
-            logits = self(x)
+            logits = self(x, h)
             policy_dist = Categorical(logits=logits)
             actions = policy_dist.sample()
             action_probs = policy_dist.probs
@@ -213,19 +213,19 @@ class Actor(nn.Module):
 
             return actions, entropy, greedy_actions
 
-    def get_actor_loss(self, observations):
+    def get_actor_loss(self, observations, hidden_state):
         if type(self.env.action_space) == gym.spaces.Box:
-            pi, log_pi, _ = self.get_action(observations)
-            qf1_pi = self.iqlearn.qf1(observations, pi)
-            qf2_pi = self.iqlearn.qf2(observations, pi)
+            pi, log_pi, _ = self.get_action(observations, hidden_state[0])
+            qf1_pi = self.iqlearn.qf1(observations, pi, hidden_state[1])
+            qf2_pi = self.iqlearn.qf2(observations, pi, hidden_state[2])
             min_qf_pi = torch.min(qf1_pi, qf2_pi)
             return ((self.iqlearn.alpha * log_pi) - min_qf_pi).mean()
         else:
-            _, log_pi, _ = self.get_action(observations)
-            qf1_pi = self.iqlearn.qf1(observations, None, False)
-            qf2_pi = self.iqlearn.qf2(observations, None, False)
+            _, log_pi, _ = self.get_action(observations, hidden_state[0])
+            qf1_pi = self.iqlearn.qf1(observations, None, hidden_state[1], False)
+            qf2_pi = self.iqlearn.qf2(observations, None, hidden_state[2], False)
             min_qf_pi = torch.min(qf1_pi, qf2_pi)
-            logits = self(observations)
+            logits = self(observations, hidden_state[0])
             policy_dist = Categorical(logits=logits)
             action_probs = policy_dist.probs
             log_prob = F.log_softmax(logits, dim=1)
@@ -347,7 +347,12 @@ class IQLearn:
             self.a_optimizer = optim.Adam([self.log_alpha], lr=self.args.q_lr)
 
     def reset_replay_buffer(self):
-        self.env = RecorderWrapper(self.env.env, self.args.gamma, self.args.buffer_size)
+        self.env = RecorderWrapper(
+            self.env.env,
+            self.args.gamma,
+            self.args.buffer_size,
+            self.env.hidden_state_dims,
+        )
 
     def setup_writer(self):
         self.run_name = f"{self.env.spec.id if self.env is not None and self.env.spec is not None else ''}__{self.args.exp_name}__{self.args.seed}__{int(time.time())}"
@@ -368,7 +373,9 @@ class IQLearn:
     def set_env(self, env):
         self.env = env
         self.env = gym.wrappers.RecordEpisodeStatistics(self.env)
-        self.env = RecorderWrapper(self.env, self.args.gamma, self.args.buffer_size)
+        self.env = RecorderWrapper(
+            self.env, self.args.gamma, self.args.buffer_size, (0, 0, 0)
+        )
         self.setup_writer()
 
     def set_demonstration_buffer(self, demonstration_buffer):
@@ -389,7 +396,8 @@ class IQLearn:
                     action = np.array(self.env.action_space.sample())
                 else:
                     action, _, _ = self.actor.get_action(
-                        torch.Tensor(obs).unsqueeze(0).to(self.args.device)
+                        torch.Tensor(obs).unsqueeze(0).to(self.args.device),
+                        None,  # TODO: hidden states
                     )
                     action = action.detach().cpu().numpy()[0]
 
@@ -490,33 +498,42 @@ class IQLearn:
                         )
             self.n_updates += 1
 
-    def get_values(self, observations, actions=None):
+    def get_values(self, observations, hidden_states, actions=None):
         if actions is None:
-            actions, _, _ = self.actor.get_action(observations)
+            actions, _, _ = self.actor.get_action(observations, hidden_states[0])
 
-        qf1_a_values = self.qf1(observations, actions).view(-1)
-        qf2_a_values = self.qf2(observations, actions).view(-1)
+        qf1_a_values = self.qf1(observations, actions, hidden_states[1]).view(-1)
+        qf2_a_values = self.qf2(observations, actions, hidden_states[2]).view(-1)
         return torch.min(qf1_a_values, qf2_a_values).unsqueeze(1)
 
     def update_critic(self, data, live_data=None):
+        next_hidden_states = (
+            self.env.hidden_state_net(
+                data.observations, data.actions, data.hidden_states
+            )
+            if self.env.hidden_state_net is not None
+            else (None, None, None)
+        )
         demonstration_loss = (
-            self.get_values(data.observations, data.actions)
+            self.get_values(data.observations, data.hidden_states, data.actions)
             - (1 - data.terminated.float())
             * self.args.gamma
-            * self.get_values(data.next_observations).detach()
+            * self.get_values(data.next_observations, next_hidden_states).detach()
         )
         mixed_loss = (
-            self.get_values(data.observations)
+            self.get_values(data.observations, data.hidden_states)
             - (1 - data.terminated.float())
             * self.args.gamma
-            * self.get_values(data.next_observations).detach()
+            * self.get_values(data.next_observations, next_hidden_states).detach()
         )
         if live_data is not None:
             live_loss = (
-                self.get_values(live_data.observations)
+                self.get_values(live_data.observations, data.hidden_states)
                 - (1 - live_data.terminated.float())
                 * self.args.gamma
-                * self.get_values(live_data.next_observations).detach()
+                * self.get_values(
+                    live_data.next_observations, next_hidden_states
+                ).detach()
             )
         else:
             live_loss = []  # hack so live_loss has len()
@@ -550,7 +567,9 @@ class IQLearn:
         for _ in range(
             self.args.policy_frequency
         ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-            actor_loss = self.actor.get_actor_loss(data.observations)
+            actor_loss = self.actor.get_actor_loss(
+                data.observations, data.hidden_states
+            )
 
             self.actor_optimizer.zero_grad()
             actor_loss.backward()
@@ -558,7 +577,9 @@ class IQLearn:
 
             if self.args.autotune:
                 with torch.no_grad():
-                    _, log_pi, _ = self.actor.get_action(data.observations)
+                    _, log_pi, _ = self.actor.get_action(
+                        data.observations, data.hidden_states[0]
+                    )
                 alpha_loss = (
                     -self.log_alpha.exp() * (log_pi + self.target_entropy)
                 ).mean()
@@ -569,11 +590,16 @@ class IQLearn:
                 self.alpha = self.log_alpha.exp().item()
         return actor_loss, alpha_loss
 
-    def predict(self, obs: torch.Tensor | np.ndarray, deterministic: bool = False):
+    def predict(
+        self,
+        obs: torch.Tensor | np.ndarray,
+        hidden_state=None,
+        deterministic: bool = False,
+    ):
         if type(obs) == np.ndarray:
             obs = torch.tensor(obs, dtype=torch.float32, device=self.args.device)
         obs = obs.unsqueeze(0)  # type: ignore
-        action, _, mean = self.actor.get_action(obs)
+        action, _, mean = self.actor.get_action(obs, hidden_state)
         prediction = mean if deterministic else action
         prediction = prediction.detach().cpu().numpy()
         prediction = prediction[0]
@@ -591,7 +617,8 @@ class IQLearn:
             #     action = np.array(self.env.action_space.sample())
             # else:
             action, _, _ = self.actor.get_action(
-                torch.Tensor(obs).unsqueeze(0).to(self.args.device)
+                torch.Tensor(obs).unsqueeze(0).to(self.args.device),
+                None,  # TODO: hidden states
             )
             action = action.detach().cpu().numpy()[0]
 
@@ -618,13 +645,17 @@ class IQLearn:
                 data = self.env.sample(self.args.batch_size, self.args.device)
                 with torch.no_grad():
                     next_state_actions, next_state_log_pi, _ = self.actor.get_action(
-                        data.next_observations
+                        data.next_observations, data.hidden_states[0]
                     )
                     qf1_next_target = self.qf1_target(
-                        data.next_observations, next_state_actions
+                        data.next_observations,
+                        next_state_actions,
+                        data.hidden_states[1],
                     )
                     qf2_next_target = self.qf2_target(
-                        data.next_observations, next_state_actions
+                        data.next_observations,
+                        next_state_actions,
+                        data.hidden_states[2],
                     )
                     min_qf_next_target = (
                         torch.min(qf1_next_target, qf2_next_target)
@@ -634,8 +665,12 @@ class IQLearn:
                         1 - data.terminated.float().flatten()
                     ) * self.args.gamma * (min_qf_next_target).view(-1)
 
-                qf1_a_values = self.qf1(data.observations, data.actions).view(-1)
-                qf2_a_values = self.qf2(data.observations, data.actions).view(-1)
+                qf1_a_values = self.qf1(
+                    data.observations, data.actions, data.hidden_states[1]
+                ).view(-1)
+                qf2_a_values = self.qf2(
+                    data.observations, data.actions, data.hidden_states[2]
+                ).view(-1)
                 qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
                 qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
                 qf_loss = qf1_loss + qf2_loss
@@ -652,14 +687,18 @@ class IQLearn:
                         self.args.policy_frequency
                     ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
 
-                        actor_loss = self.actor.get_actor_loss(data.observations)
+                        actor_loss = self.actor.get_actor_loss(
+                            data.observations, data.hidden_states
+                        )
                         self.actor_optimizer.zero_grad()
                         actor_loss.backward()
                         self.actor_optimizer.step()
 
                         if self.args.autotune:
                             with torch.no_grad():
-                                _, log_pi, _ = self.actor.get_action(data.observations)
+                                _, log_pi, _ = self.actor.get_action(
+                                    data.observations, data.hidden_states[0]
+                                )
                             alpha_loss = (
                                 -self.log_alpha.exp() * (log_pi + self.target_entropy)
                             ).mean()

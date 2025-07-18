@@ -226,7 +226,7 @@ def test_iqlearn_mountaincar():
                 "verbose": 0,
             },
         )
-    recorder_env = RecorderWrapper(env, 0.99, 1000)
+    recorder_env = RecorderWrapper(env, 0.99, 1000, (0, 0, 0))
     for _ in range(5):
         obs, _ = recorder_env.reset()
         while True:
@@ -287,7 +287,7 @@ def test_iqlearn_pendulum():
                 "verbose": 0,
             },
         )
-    recorder_env = RecorderWrapper(env, 0.99, 5000)
+    recorder_env = RecorderWrapper(env, 0.99, 5000, (0, 0, 0))
     for _ in range(5):
         obs, _ = recorder_env.reset()
         while True:
