@@ -40,3 +40,4 @@ For imitation learning, there are also tests of algorithm functionality, which a
 ```bash
 python -m pytest --runslow
 ```
+Note that these may fail every once in a while, as those algorithms are stochastic and a stochastic test would explode the runtime even more. (and seeding somewhat goes against the idea of the test.)

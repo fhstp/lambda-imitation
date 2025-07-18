@@ -112,8 +112,10 @@ def test_sac_simple_gridworld():
         env,
         sac_args={
             "device": "cpu",
+            "use_targets": False,
             "policy_lr": 0.1,
             "q_lr": 0.1,
+            "target_entropy": 0.2,
             "tensorboard_dir": None,
         },
     )
@@ -135,3 +137,62 @@ def test_sac_simple_gridworld():
 
     assert reward == 1
     assert steps == 2
+
+
+@pytest.mark.slow
+def test_sac_cartpole():
+    # assemble
+    env = gym.make("CartPole-v1")
+    iqlearn = IQLearn(
+        env,
+        sac_args={
+            "device": "cpu",
+            "target_entropy": 0.2,
+            "tensorboard_dir": None,
+        },
+    )
+
+    # act
+    iqlearn.sac_learn(15000, progress="none")
+
+    # assert
+    steps = 0
+    obs, info = env.reset()
+    while True:
+        action = iqlearn.predict(torch.tensor(obs), True)[0]
+        obs, _, terminated, truncated, _ = env.step(action)
+        steps += 1
+        if terminated or truncated:
+            break
+
+    assert steps > 150
+
+
+@pytest.mark.slow
+def test_sac_pendulum():
+    # assemble
+    env = gym.make("Pendulum-v1")
+    iqlearn = IQLearn(
+        env,
+        sac_args={
+            "device": "cpu",
+            "target_entropy": 0.2,
+            "tensorboard_dir": None,
+        },
+    )
+
+    # act
+    iqlearn.sac_learn(15000, progress="none")
+
+    # assert
+    undiscounted_return = 0
+    obs, info = env.reset()
+    while True:
+        action = iqlearn.predict(torch.tensor(obs), True)[0]
+        obs, reward, terminated, truncated, _ = env.step(action)
+        undiscounted_return += reward
+        if terminated or truncated:
+            break
+
+    print(undiscounted_return)
+    assert undiscounted_return > -500
