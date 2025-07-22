@@ -360,3 +360,399 @@ def test_sac_cartpole_q_lstm():
     assert np.nonzero(iqlearn.env.hidden_states[0][32])
     assert np.nonzero(iqlearn.env.hidden_states[1][32])
     assert steps > 150
+
+
+@pytest.mark.slow
+def test_sac_pendulum_q_lstm():
+    # assemble
+    env = gym.make("Pendulum-v1")
+    iqlearn = IQLearn(
+        env,
+        sac_args={
+            "device": "cpu",
+            "target_entropy": 0.2,
+            "tensorboard_dir": None,
+        },
+        hidden_state_dims=(0, 10, 10),
+    )
+
+    # act
+    iqlearn.sac_learn(15000, progress="none")
+
+    # assert
+    undiscounted_return = 0
+    obs, info = env.reset()
+    while True:
+        action = iqlearn.predict(torch.tensor(obs), deterministic=True)[0]
+        obs, reward, terminated, truncated, _ = env.step(action)
+        undiscounted_return += reward  # type: ignore
+        if terminated or truncated:
+            break
+
+    assert undiscounted_return > -500
+
+
+@pytest.mark.slow
+def test_sac_cartpole_actor_lstm():
+    # assemble
+    env = gym.make("CartPole-v1")
+    iqlearn = IQLearn(
+        env,
+        sac_args={
+            "device": "cpu",
+            "target_entropy": 0.2,
+            "tensorboard_dir": None,
+        },
+        hidden_state_dims=(10, 0, 0),
+    )
+
+    # act
+    iqlearn.sac_learn(15000, progress="none")
+
+    # assert
+    steps = 0
+    obs, info = env.reset()
+    hidden_state = np.zeros(10, dtype=np.float32)
+    while True:
+        action, hidden_state = iqlearn.predict(obs, hidden_state, True)
+        obs, _, terminated, truncated, _ = env.step(action)
+        steps += 1
+        if terminated or truncated:
+            break
+
+    assert np.nonzero(iqlearn.env.hidden_states[0][32])
+    assert np.nonzero(iqlearn.env.hidden_states[1][32])
+    assert steps > 150
+
+
+@pytest.mark.slow
+def test_sac_pendulum_actor_lstm():
+    # assemble
+    env = gym.make("Pendulum-v1")
+    iqlearn = IQLearn(
+        env,
+        sac_args={
+            "device": "cpu",
+            "target_entropy": 0.2,
+            "tensorboard_dir": None,
+        },
+        hidden_state_dims=(10, 0, 0),
+    )
+
+    # act
+    iqlearn.sac_learn(15000, progress="none")
+
+    # assert
+    undiscounted_return = 0
+    obs, info = env.reset()
+    hidden_state = np.zeros(10, dtype=np.float32)
+    while True:
+        action, hidden_state = iqlearn.predict(obs, hidden_state, True)
+        obs, reward, terminated, truncated, _ = env.step(action)
+        undiscounted_return += reward  # type: ignore
+        if terminated or truncated:
+            break
+
+    assert undiscounted_return > -500
+
+
+@pytest.mark.slow
+def test_iqlearn_mountaincar_lstm_wrong_buffer_dims():
+    # assemble
+    checkpoint = load_from_hub(
+        repo_id="sb3/dqn-MountainCar-v0",
+        filename="dqn-MountainCar-v0.zip",
+    )
+    env = gym.make("MountainCar-v0")
+    with warnings.catch_warnings(
+        action="ignore"
+    ):  # UserWarning warning of loading from an old version of SB3
+        model = DQN.load(
+            checkpoint,
+            env=env,
+            device="cpu",
+            custom_objects={
+                "observation_space": env.observation_space,
+                "action_space": env.action_space,
+                "learning_rate": 0.0,
+                "lr_schedule": None,
+                "exploration_schedule": None,
+                "verbose": 0,
+            },
+        )
+    recorder_env = RecorderWrapper(env, 0.99, 1000, (0, 0, 0))
+    for _ in range(5):
+        obs, _ = recorder_env.reset()
+        while True:
+            obs, _, terminated, truncated, _ = recorder_env.step(
+                model.predict(obs, deterministic=True)[0]
+            )
+            if terminated or truncated:
+                break
+
+    iqlearn = IQLearn(
+        env,
+        sac_args={"device": "cpu", "tensorboard_dir": None},
+        hidden_state_dims=(0, 10, 10),
+    )
+
+    # act % assert
+    with pytest.raises(AssertionError):
+        iqlearn.set_demonstration_buffer(recorder_env)
+
+
+@pytest.mark.slow
+def test_iqlearn_mountaincar_q_lstm():
+    # assemble
+    checkpoint = load_from_hub(
+        repo_id="sb3/dqn-MountainCar-v0",
+        filename="dqn-MountainCar-v0.zip",
+    )
+    env = gym.make("MountainCar-v0")
+    with warnings.catch_warnings(
+        action="ignore"
+    ):  # UserWarning warning of loading from an old version of SB3
+        model = DQN.load(
+            checkpoint,
+            env=env,
+            device="cpu",
+            custom_objects={
+                "observation_space": env.observation_space,
+                "action_space": env.action_space,
+                "learning_rate": 0.0,
+                "lr_schedule": None,
+                "exploration_schedule": None,
+                "verbose": 0,
+            },
+        )
+    recorder_env = RecorderWrapper(env, 0.99, 1000, (0, 10, 10))
+    for _ in range(5):
+        obs, _ = recorder_env.reset()
+        while True:
+            obs, _, terminated, truncated, _ = recorder_env.step(
+                model.predict(obs, deterministic=True)[0]
+            )
+            if terminated or truncated:
+                break
+
+    iqlearn = IQLearn(
+        env,
+        regularizer=lambda x: x**2 / 4,
+        sac_args={"device": "cpu", "tensorboard_dir": None},
+        hidden_state_dims=(0, 10, 10),
+    )
+    iqlearn.set_demonstration_buffer(recorder_env)
+    assert (
+        iqlearn.demonstration_buffer.pos < 550  # type: ignore
+    )  # safety assert, if this one throws, something is wrong with expert
+
+    # act
+    iqlearn.learn(5000, progress="none")
+
+    # assert
+    steps = []
+    for _ in range(5):
+        step = 0
+        obs, _ = env.reset()
+        while True:
+            step += 1
+            obs, _, terminated, truncated, _ = env.step(
+                iqlearn.predict(obs, deterministic=True)[0]
+            )
+            if terminated or truncated:
+                steps.append(step)
+                break
+
+    print(np.mean(steps))
+    assert np.mean(steps) < 130
+
+
+@pytest.mark.slow
+def test_iqlearn_pendulum_q_lstm():
+    # assemble
+    checkpoint = load_from_hub(
+        repo_id="sb3/ppo-Pendulum-v1",
+        filename="ppo-Pendulum-v1.zip",
+    )
+    env = gym.make("Pendulum-v1")
+    with warnings.catch_warnings(
+        action="ignore"
+    ):  # UserWarning warning of loading from an old version of SB3
+        model = PPO.load(
+            checkpoint,
+            env=env,
+            device="cpu",
+            custom_objects={
+                "observation_space": env.observation_space,
+                "action_space": env.action_space,
+                "learning_rate": 0.0,
+                "lr_schedule": None,
+                "exploration_schedule": None,
+                "clip_range": 0.2,
+                "verbose": 0,
+            },
+        )
+    recorder_env = RecorderWrapper(env, 0.99, 5000, (0, 10, 10))
+    for _ in range(5):
+        obs, _ = recorder_env.reset()
+        while True:
+            obs, _, terminated, truncated, _ = recorder_env.step(
+                model.predict(obs, deterministic=True)[0]
+            )
+            if terminated or truncated:
+                break
+
+    iqlearn = IQLearn(
+        env,
+        sac_args={"device": "cpu", "tensorboard_dir": None},
+        hidden_state_dims=(0, 10, 10),
+    )
+    iqlearn.set_demonstration_buffer(recorder_env)
+
+    # act
+    iqlearn.learn(1000, progress="none")
+
+    # assert
+    returns = []
+    for _ in range(5):
+        undisc_return = 0
+        obs, _ = env.reset()
+        while True:
+            obs, reward, terminated, truncated, _ = env.step(
+                iqlearn.predict(obs, deterministic=True)[0]
+            )
+            undisc_return += reward  # type: ignore
+            if terminated or truncated:
+                returns.append(undisc_return)
+                break
+
+    assert np.mean(returns) > -300
+
+
+@pytest.mark.slow
+def test_iqlearn_mountaincar_actor_lstm():
+    # assemble
+    checkpoint = load_from_hub(
+        repo_id="sb3/dqn-MountainCar-v0",
+        filename="dqn-MountainCar-v0.zip",
+    )
+    env = gym.make("MountainCar-v0")
+    with warnings.catch_warnings(
+        action="ignore"
+    ):  # UserWarning warning of loading from an old version of SB3
+        model = DQN.load(
+            checkpoint,
+            env=env,
+            device="cpu",
+            custom_objects={
+                "observation_space": env.observation_space,
+                "action_space": env.action_space,
+                "learning_rate": 0.0,
+                "lr_schedule": None,
+                "exploration_schedule": None,
+                "verbose": 0,
+            },
+        )
+    recorder_env = RecorderWrapper(env, 0.99, 1000, (10, 0, 0))
+    for _ in range(5):
+        obs, _ = recorder_env.reset()
+        while True:
+            obs, _, terminated, truncated, _ = recorder_env.step(
+                model.predict(obs, deterministic=True)[0]
+            )
+            if terminated or truncated:
+                break
+
+    iqlearn = IQLearn(
+        env,
+        sac_args={"device": "cpu", "tensorboard_dir": None},
+        hidden_state_dims=(10, 0, 0),
+    )
+    iqlearn.set_demonstration_buffer(recorder_env)
+    assert (
+        iqlearn.demonstration_buffer.pos < 550  # type: ignore
+    )  # safety assert, if this one throws, something is wrong with expert
+
+    # act
+    iqlearn.learn(500, progress="none")
+
+    # assert
+    steps = []
+    for _ in range(5):
+        step = 0
+        obs, _ = env.reset()
+        hidden_state = np.zeros(10, dtype=np.float32)
+        while True:
+            action, _ = iqlearn.predict(obs, deterministic=True)
+            step += 1
+            obs, _, terminated, truncated, _ = env.step(action)
+            if terminated or truncated:
+                steps.append(step)
+                break
+
+    assert np.mean(steps) < 120
+
+
+@pytest.mark.slow
+def test_iqlearn_pendulum_actor_lstm():
+    # assemble
+    checkpoint = load_from_hub(
+        repo_id="sb3/ppo-Pendulum-v1",
+        filename="ppo-Pendulum-v1.zip",
+    )
+    env = gym.make("Pendulum-v1")
+    with warnings.catch_warnings(
+        action="ignore"
+    ):  # UserWarning warning of loading from an old version of SB3
+        model = PPO.load(
+            checkpoint,
+            env=env,
+            device="cpu",
+            custom_objects={
+                "observation_space": env.observation_space,
+                "action_space": env.action_space,
+                "learning_rate": 0.0,
+                "lr_schedule": None,
+                "exploration_schedule": None,
+                "clip_range": 0.2,
+                "verbose": 0,
+            },
+        )
+    recorder_env = RecorderWrapper(env, 0.99, 5000, (10, 0, 0))
+    for _ in range(5):
+        obs, _ = recorder_env.reset()
+        while True:
+            obs, _, terminated, truncated, _ = recorder_env.step(
+                model.predict(obs, deterministic=True)[0]
+            )
+            if terminated or truncated:
+                break
+
+    iqlearn = IQLearn(
+        env,
+        sac_args={"device": "cpu", "tensorboard_dir": None},
+        hidden_state_dims=(10, 0, 0),
+    )
+    iqlearn.set_demonstration_buffer(recorder_env)
+
+    # act
+    iqlearn.learn(1000, progress="none")
+
+    # assert
+    returns = []
+    for _ in range(5):
+        undisc_return = 0
+        obs, _ = env.reset()
+        hidden_state = np.zeros(10, dtype=np.float32)
+        while True:
+            action, hidden_state = iqlearn.predict(obs, hidden_state, True)
+            obs, reward, terminated, truncated, _ = env.step(action)
+            undisc_return += reward  # type: ignore
+            if terminated or truncated:
+                returns.append(undisc_return)
+                break
+
+    assert np.mean(returns) > -300
+
+
+test_iqlearn_mountaincar_q_lstm()

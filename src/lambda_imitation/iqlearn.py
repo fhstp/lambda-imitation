@@ -138,11 +138,10 @@ class SoftQNetwork(nn.Module):
             if self.hidden_state_dim > 0:
                 ht, ct = self.lstm(
                     x,
-                    (h[:, self.hidden_state_dim // 2], h[self.hidden_state_dim // 2 :]),
+                    (h[:, :self.hidden_state_dim // 2], h[:, self.hidden_state_dim // 2 :]),
                 )
                 x = ht
                 hidden_state = torch.cat((ht, ct), dim=-1)
-                print(hidden_state.shape)
             else:
                 x = F.relu(self.fc1(x))
             x = F.relu(self.fc2(x))
@@ -181,16 +180,39 @@ class Actor(nn.Module):
         self.net = None
         self.iqlearn = iqlearn
         self.env = env
+        self.hidden_state_dim = hidden_state_dim
         if net is None:
             if type(self.env.action_space) == gym.spaces.Box:
-                self.fc1 = nn.Linear(env.observation_space.shape[0], 32)
-                self.fc2 = nn.Linear(32, 32)
+                if hidden_state_dim > 0:
+                    assert (
+                        hidden_state_dim % 2 == 0
+                    ), "hidden_state dimensions have to be even for LSTM"
+                    self.lstm = LSTMCell(
+                        env.observation_space.shape[0],
+                        hidden_state_dim // 2,
+                    )
+                    self.fc2 = nn.Linear(hidden_state_dim // 2, 32)
+
+                else:
+                    self.fc1 = nn.Linear(env.observation_space.shape[0], 32)
+                    self.fc2 = nn.Linear(32, 32)
                 self.fc3 = nn.Linear(32, 32)
                 self.fc_mean = nn.Linear(32, np.prod(env.action_space.shape))
                 self.fc_logstd = nn.Linear(32, np.prod(env.action_space.shape))
             elif type(self.env.action_space) == gym.spaces.Discrete:
-                self.fc1 = nn.Linear(env.observation_space.shape[0], 32)
-                self.fc2 = nn.Linear(32, 32)
+                if hidden_state_dim > 0:
+                    assert (
+                        hidden_state_dim % 2 == 0
+                    ), "hidden_state dimensions have to be even for LSTM"
+                    self.lstm = LSTMCell(
+                        env.observation_space.shape[0],
+                        hidden_state_dim // 2,
+                    )
+                    self.fc2 = nn.Linear(hidden_state_dim // 2, 32)
+
+                else:
+                    self.fc1 = nn.Linear(env.observation_space.shape[0], 32)
+                    self.fc2 = nn.Linear(32, 32)
                 self.fc3 = nn.Linear(32, 32)
                 self.fc4 = nn.Linear(32, env.action_space.n)
         else:
@@ -213,8 +235,17 @@ class Actor(nn.Module):
             )
 
     def forward(self, x, h):
+        hidden_state = None
         if self.net is None:
-            x = F.relu(self.fc1(x))
+            if self.hidden_state_dim > 0:
+                ht, ct = self.lstm(
+                    x,
+                    (h[..., :self.hidden_state_dim // 2], h[..., self.hidden_state_dim // 2 :]),
+                )
+                x = ht
+                hidden_state = torch.cat((ht, ct), dim=-1)
+            else:
+                x = F.relu(self.fc1(x))
             x = F.relu(self.fc2(x))
             x = F.relu(self.fc3(x))
             if type(self.env.action_space) == gym.spaces.Box:
@@ -226,15 +257,15 @@ class Actor(nn.Module):
                 )  # From SpinUp / Denis Yarats
             else:
                 logits = self.fc4(x)
-                return logits
+                return logits, hidden_state
         else:
             mean, log_std = self.net(x)
 
-        return mean, log_std
+        return mean, log_std, hidden_state
 
     def get_action(self, x, h):
         if type(self.env.action_space) == gym.spaces.Box:
-            mean, log_std = self(x, h)
+            mean, log_std, hidden_state = self(x, h)
             std = log_std.exp()
             normal = torch.distributions.Normal(mean, std)
             x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
@@ -246,9 +277,9 @@ class Actor(nn.Module):
             log_prob = log_prob.sum(1, keepdim=True)
             mean = torch.tanh(mean) * self.action_scale + self.action_bias
 
-            return action, log_prob, mean
+            return action, log_prob, mean, hidden_state
         else:
-            logits = self(x, h)
+            logits, hidden_state = self(x, h)
             policy_dist = Categorical(logits=logits)
             actions = policy_dist.sample()
             action_probs = policy_dist.probs
@@ -256,21 +287,21 @@ class Actor(nn.Module):
             entropy = torch.sum(action_probs * log_prob, dim=-1)
             greedy_actions = torch.argmax(action_probs, dim=-1)
 
-            return actions, entropy, greedy_actions
+            return actions, entropy, greedy_actions, hidden_state
 
     def get_actor_loss(self, observations, hidden_state):
         if type(self.env.action_space) == gym.spaces.Box:
-            pi, log_pi, _ = self.get_action(observations, hidden_state[0])
+            pi, log_pi, _, _ = self.get_action(observations, hidden_state[0])
             qf1_pi, _ = self.iqlearn.qf1(observations, pi, hidden_state[1])
             qf2_pi, _ = self.iqlearn.qf2(observations, pi, hidden_state[2])
             min_qf_pi = torch.min(qf1_pi, qf2_pi)
             return ((self.iqlearn.alpha * log_pi) - min_qf_pi).mean()
         else:
-            _, log_pi, _ = self.get_action(observations, hidden_state[0])
+            _, log_pi, _, _ = self.get_action(observations, hidden_state[0])
             qf1_pi, _ = self.iqlearn.qf1(observations, None, hidden_state[1], False)
             qf2_pi, _ = self.iqlearn.qf2(observations, None, hidden_state[2], False)
             min_qf_pi = torch.min(qf1_pi, qf2_pi)
-            logits = self(observations, hidden_state[0])
+            logits, _ = self(observations, hidden_state[0])
             policy_dist = Categorical(logits=logits)
             action_probs = policy_dist.probs
             log_prob = F.log_softmax(logits, dim=1)
@@ -385,19 +416,23 @@ class IQLearn:
                     h, c = lstm(
                         input,
                         (
-                            hidden_state[: hidden_state.shape[0] // 2],
-                            hidden_state[hidden_state.shape[0] // 2 :],
+                            hidden_state[..., :hidden_state.shape[-1] // 2],
+                            hidden_state[..., hidden_state.shape[-1] // 2:],
                         ),
                     )
-                    return torch.cat((h, c)).detach().cpu().numpy()
+                    return torch.cat((h, c), dim=-1).detach().cpu().numpy()
 
-                # TODO: if actor is lstm as well, add here
                 xa = x
                 if self.hidden_state_dims[1] > 0 or self.hidden_state_dims[2] > 0:
                     if type(self.env.action_space) == gym.spaces.Box:
-                        xa = torch.cat([x, a], 1)
+                        xa = torch.cat([x, a], -1)
+
                 return (
-                    np.array((0,)),
+                    (
+                        get_hidden_state(self.actor.lstm, x, h[0])
+                        if self.hidden_state_dims[0] > 0
+                        else np.array((0,))
+                    ),
                     (
                         get_hidden_state(self.qf1_target.lstm, xa, h[1])
                         if self.hidden_state_dims[1] > 0
@@ -487,11 +522,13 @@ class IQLearn:
 
     def set_demonstration_buffer(self, demonstration_buffer):
         self.demonstration_buffer = demonstration_buffer
+        assert self.demonstration_buffer.hidden_state_dims == self.hidden_state_dims, "demonstration buffer has feature same hidden state dims as training"
 
     def learn(self, timesteps: int, progress="tqdm"):
         # ALGO LOGIC: put action logic here
         if self.online_size > 0:
             obs, _ = self.env.reset(seed=np.random.randint(2147483647))
+            hidden_state = torch.zeros((1,self.hidden_state_dims[0]), dtype=torch.float32).to(self.args.device)
 
         if progress == "tqdm":
             it = tqdm(range(timesteps))
@@ -502,9 +539,9 @@ class IQLearn:
                 if self.n_updates < self.args.learning_starts:
                     action = np.array(self.env.action_space.sample())
                 else:
-                    action, _, _ = self.actor.get_action(
+                    action, _, _, hidden_state = self.actor.get_action(
                         torch.Tensor(obs).unsqueeze(0).to(self.args.device),
-                        None,  # TODO: hidden states
+                        hidden_state,
                     )
                     action = action.detach().cpu().numpy()[0]
 
@@ -533,6 +570,7 @@ class IQLearn:
                 obs = next_obs
                 if termination or truncated:
                     obs, _ = self.env.reset(seed=np.random.randint(2147483647))
+                    hidden_state = torch.zeros((1,self.hidden_state_dims[0]), dtype=torch.float32).to(self.args.device)
 
             # ALGO LOGIC: training.
             if self.n_updates > self.args.learning_starts:
@@ -607,39 +645,57 @@ class IQLearn:
 
     def get_values(self, observations, hidden_states, actions=None):
         if actions is None:
-            actions, _, _ = self.actor.get_action(observations, hidden_states[0])
+            actions, _, _, _ = self.actor.get_action(observations, hidden_states[0])
 
         qf1_a_values = self.qf1(observations, actions, hidden_states[1])[0].view(-1)
         qf2_a_values = self.qf2(observations, actions, hidden_states[2])[0].view(-1)
         return torch.min(qf1_a_values, qf2_a_values).unsqueeze(1)
 
     def update_critic(self, data, live_data=None):
+        next_actions, _, _, _ = self.actor.get_action(data.next_observations, data.hidden_states[0])
         next_hidden_states = (
-            self.env.hidden_state_net(
-                data.observations, data.actions, data.hidden_states
-            )
+            tuple(torch.tensor(h).to(self.args.device) for h in self.env.hidden_state_net(
+                data.next_observations, next_actions, data.hidden_states
+            ))
             if self.env.hidden_state_net is not None
             else (None, None, None)
         )
+
         demonstration_loss = (
             self.get_values(data.observations, data.hidden_states, data.actions)
             - (1 - data.terminated.float())
             * self.args.gamma
             * self.get_values(data.next_observations, next_hidden_states).detach()
         )
+        next_actions, _, _, _ = self.actor.get_action(data.next_observations, data.hidden_states[0])
+        next_hidden_states = (
+            tuple(torch.tensor(h).to(self.args.device) for h in self.env.hidden_state_net(
+                data.next_observations, next_actions, data.hidden_states
+            ))
+            if self.env.hidden_state_net is not None
+            else (None, None, None)
+        )
         mixed_loss = (
             self.get_values(data.observations, data.hidden_states)
             - (1 - data.terminated.float())
             * self.args.gamma
-            * self.get_values(data.next_observations, next_hidden_states).detach()
+            * self.get_values(data.next_observations, next_hidden_states, next_actions).detach()
         )
         if live_data is not None:
+            next_actions_live, _, _, _ = self.actor.get_action(live_data.next_observations, live_data.hidden_states[0])
+            next_hidden_states_live = (
+                tuple(torch.tensor(h).to(self.args.device) for h in self.env.hidden_state_net(
+                    live_data.next_observations, next_actions_live, live_data.hidden_states
+                ))
+            if self.env.hidden_state_net is not None
+            else (None, None, None)
+        )
             live_loss = (
                 self.get_values(live_data.observations, data.hidden_states)
                 - (1 - live_data.terminated.float())
                 * self.args.gamma
                 * self.get_values(
-                    live_data.next_observations, next_hidden_states
+                    live_data.next_observations, next_hidden_states_live, next_actions_live
                 ).detach()
             )
         else:
@@ -684,7 +740,7 @@ class IQLearn:
 
             if self.args.autotune:
                 with torch.no_grad():
-                    _, log_pi, _ = self.actor.get_action(
+                    _, log_pi, _, _ = self.actor.get_action(
                         data.observations, data.hidden_states[0]
                     )
                 alpha_loss = (
@@ -703,17 +759,27 @@ class IQLearn:
         hidden_state=None,
         deterministic: bool = False,
     ):
+        nd = False
         if type(obs) == np.ndarray:
             obs = torch.tensor(obs, dtype=torch.float32, device=self.args.device)
+        if type(hidden_state) == np.ndarray:
+            nd=True
+            hidden_state = torch.tensor(hidden_state, dtype=torch.float32, device=self.args.device)
         obs = obs.unsqueeze(0)  # type: ignore
-        action, _, mean = self.actor.get_action(obs, hidden_state)
+        if hidden_state is not None:
+            hidden_state = hidden_state.unsqueeze(0)  # type: ignore
+        action, _, mean, hidden_state = self.actor.get_action(obs, hidden_state)
         prediction = mean if deterministic else action
         prediction = prediction.detach().cpu().numpy()
         prediction = prediction[0]
-        return prediction, None  # return None for consistency with sb3
+        if hidden_state is not None:
+            hidden_state = hidden_state.detach().cpu().numpy()
+            hidden_state = hidden_state[0]
+        return prediction, hidden_state
 
     def sac_learn(self, steps, progress="tqdm"):
         obs, _ = self.env.reset()
+        hidden_state = torch.zeros((1,self.hidden_state_dims[0]), dtype=torch.float32).to(self.args.device)
         if progress == "tqdm":
             it = tqdm(range(steps))
         else:
@@ -723,9 +789,9 @@ class IQLearn:
             # if self.n_updates < self.args.learning_starts:
             #     action = np.array(self.env.action_space.sample())
             # else:
-            action, _, _ = self.actor.get_action(
+            action, _, _, hidden_state = self.actor.get_action(
                 torch.Tensor(obs).unsqueeze(0).to(self.args.device),
-                None,  # TODO: hidden states
+                hidden_state,
             )
             action = action.detach().cpu().numpy()[0]
 
@@ -751,7 +817,7 @@ class IQLearn:
             if self.n_updates > self.args.learning_starts:
                 data = self.env.sample(self.args.batch_size, self.args.device)
                 with torch.no_grad():
-                    next_state_actions, next_state_log_pi, _ = self.actor.get_action(
+                    next_state_actions, next_state_log_pi, _, _ = self.actor.get_action(
                         data.next_observations, data.hidden_states[0]
                     )
                     qf1_next_target, _ = self.qf1_target(
@@ -807,7 +873,7 @@ class IQLearn:
 
                         if self.args.autotune:
                             with torch.no_grad():
-                                _, log_pi, _ = self.actor.get_action(
+                                _, log_pi, _, _ = self.actor.get_action(
                                     data.observations, data.hidden_states[0]
                                 )
                             alpha_loss = (
