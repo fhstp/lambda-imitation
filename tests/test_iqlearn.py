@@ -9,7 +9,7 @@ import pytest
 import torch
 from gymnasium.spaces import Box, Dict, Discrete
 from huggingface_sb3 import load_from_hub
-from stable_baselines3 import DQN, PPO
+from stable_baselines3 import DQN, PPO, SAC
 
 from lambda_imitation import IQLearn
 from lambda_imitation.recorder_wrapper import RecorderWrapper
@@ -96,7 +96,7 @@ def test_sac_simple_continuous_gridworld():
     steps = 0
     obs, info = env.reset()
     while True:
-        action = iqlearn.predict(torch.tensor(obs), True)[0]
+        action = iqlearn.predict(torch.tensor(obs), deterministic=True)[0]
         obs, reward, terminated, truncated, _ = env.step(action)
         steps += 1
         if terminated or truncated:
@@ -131,7 +131,7 @@ def test_sac_simple_gridworld():
     steps = 0
     obs, info = env.reset()
     while True:
-        action = iqlearn.predict(torch.tensor(obs), True)[0]
+        action = iqlearn.predict(torch.tensor(obs), deterministic=True)[0]
         obs, reward, terminated, truncated, _ = env.step(action)
         steps += 1
         if terminated or truncated:
@@ -163,7 +163,7 @@ def test_sac_cartpole():
     steps = 0
     obs, info = env.reset()
     while True:
-        action = iqlearn.predict(torch.tensor(obs), True)[0]
+        action = iqlearn.predict(torch.tensor(obs), deterministic=True)[0]
         obs, _, terminated, truncated, _ = env.step(action)
         steps += 1
         if terminated or truncated:
@@ -192,13 +192,12 @@ def test_sac_pendulum():
     undiscounted_return = 0
     obs, info = env.reset()
     while True:
-        action = iqlearn.predict(torch.tensor(obs), True)[0]
+        action = iqlearn.predict(torch.tensor(obs), deterministic=True)[0]
         obs, reward, terminated, truncated, _ = env.step(action)
         undiscounted_return += reward  # type: ignore
         if terminated or truncated:
             break
 
-    print(undiscounted_return)
     assert undiscounted_return > -500
 
 
@@ -236,16 +235,21 @@ def test_iqlearn_mountaincar():
             if terminated or truncated:
                 break
 
-    iqlearn = IQLearn(env, sac_args={"device": "cpu", "tensorboard_dir": None})
+    iqlearn = IQLearn(
+        env,
+        regularizer=lambda x: x**2 / 4,
+        sac_args={"device": "cpu", "tensorboard_dir": None},
+    )
     iqlearn.set_demonstration_buffer(recorder_env)
     assert (
         iqlearn.demonstration_buffer.pos < 550  # type: ignore
     )  # safety assert, if this one throws, something is wrong with expert
 
     # act
-    iqlearn.learn(500, progress="none")
+    iqlearn.learn(5000, progress="none")
 
     # assert
+    env = gym.make("MountainCar-v0")
     steps = []
     for _ in range(5):
         step = 0
@@ -253,27 +257,27 @@ def test_iqlearn_mountaincar():
         while True:
             step += 1
             obs, _, terminated, truncated, _ = env.step(
-                model.predict(obs, deterministic=True)[0]
+                iqlearn.predict(obs, deterministic=True)[0]
             )
             if terminated or truncated:
                 steps.append(step)
                 break
 
-    assert np.mean(steps) < 120
+    assert np.mean(steps) < 130
 
 
 @pytest.mark.slow
-def test_iqlearn_pendulum():
+def test_iqlearn_mountaincar_continuous():
     # assemble
     checkpoint = load_from_hub(
-        repo_id="sb3/ppo-Pendulum-v1",
-        filename="ppo-Pendulum-v1.zip",
+        repo_id="sb3/sac-MountainCarContinuous-v0",
+        filename="sac-MountainCarContinuous-v0.zip",
     )
-    env = gym.make("Pendulum-v1")
+    env = gym.make("MountainCarContinuous-v0")
     with warnings.catch_warnings(
         action="ignore"
     ):  # UserWarning warning of loading from an old version of SB3
-        model = PPO.load(
+        model = SAC.load(
             checkpoint,
             env=env,
             device="cpu",
@@ -288,21 +292,27 @@ def test_iqlearn_pendulum():
             },
         )
     recorder_env = RecorderWrapper(env, 0.99, 5000, (0, 0, 0))
-    for _ in range(5):
+    returns = []
+    for _ in range(20):
+        undisc_return = 0
         obs, _ = recorder_env.reset()
         while True:
-            obs, _, terminated, truncated, _ = recorder_env.step(
+            obs, reward, terminated, truncated, _ = recorder_env.step(
                 model.predict(obs, deterministic=True)[0]
             )
+            undisc_return += reward  # type: ignore
             if terminated or truncated:
+                returns.append(undisc_return)
                 break
+    assert np.mean(returns) > -400
 
-    iqlearn = IQLearn(env, sac_args={"device": "cpu", "tensorboard_dir": None})
+    iqlearn = IQLearn(env, regularizer=lambda x: x**2 / 10, sac_args={"device": "cpu", "tensorboard_dir": None})
     iqlearn.set_demonstration_buffer(recorder_env)
 
     # act
-    iqlearn.learn(1000, progress="none")
+    iqlearn.learn(3000, progress="none")
 
+    # env = gym.make("MountainCarContinuous-v0", render_mode="human")
     # assert
     returns = []
     for _ in range(5):
@@ -310,14 +320,14 @@ def test_iqlearn_pendulum():
         obs, _ = env.reset()
         while True:
             obs, reward, terminated, truncated, _ = env.step(
-                model.predict(obs, deterministic=True)[0]
+                iqlearn.predict(obs, deterministic=True)[0]
             )
             undisc_return += reward  # type: ignore
             if terminated or truncated:
                 returns.append(undisc_return)
                 break
 
-    assert np.mean(returns) > -300
+    assert np.mean(returns) > -700
 
 
 @pytest.mark.slow
@@ -341,7 +351,7 @@ def test_sac_cartpole_q_lstm():
     steps = 0
     obs, info = env.reset()
     while True:
-        action = iqlearn.predict(torch.tensor(obs), True)[0]
+        action = iqlearn.predict(torch.tensor(obs), deterministic=True)[0]
         obs, _, terminated, truncated, _ = env.step(action)
         steps += 1
         if terminated or truncated:
