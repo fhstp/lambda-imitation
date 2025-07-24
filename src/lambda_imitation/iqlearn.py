@@ -307,7 +307,6 @@ class Actor(nn.Module):
         log_prob = F.log_softmax(logits, dim=1)
         return action_probs, log_prob
 
-
     def get_actor_loss(self, observations, hidden_state):
         if type(self.env.action_space) == gym.spaces.Box:
             pi, log_pi, _, _ = self.get_action(observations, hidden_state[0])
@@ -423,9 +422,9 @@ class IQLearn:
                     a = a.detach().clone()
                     h = tuple(s.detach().clone() for s in h)
                 else:
-                    x = torch.tensor(x)
-                    a = torch.tensor(a)
-                    h = tuple(torch.tensor(s) for s in h)
+                    x = torch.tensor(x).to(self.args.device)
+                    a = torch.tensor(a).to(self.args.device)
+                    h = tuple(torch.tensor(s).to(self.args.device) for s in h)
 
                 def get_hidden_state(lstm, input, hidden_state):
                     h, c = lstm(
