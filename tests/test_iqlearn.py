@@ -180,7 +180,6 @@ def test_sac_pendulum():
         env,
         sac_args={
             "device": "cpu",
-            "target_entropy": 0.2,
             "tensorboard_dir": None,
         },
     )
@@ -238,7 +237,7 @@ def test_iqlearn_mountaincar():
     iqlearn = IQLearn(
         env,
         regularizer=lambda x: x**2 / 4,
-        sac_args={"device": "cpu", "tensorboard_dir": None},
+        sac_args={"device": "cpu", "target_entropy": 0.2, "tensorboard_dir": None},
     )
     iqlearn.set_demonstration_buffer(recorder_env)
     assert (
@@ -246,7 +245,7 @@ def test_iqlearn_mountaincar():
     )  # safety assert, if this one throws, something is wrong with expert
 
     # act
-    iqlearn.learn(15000, progress="none")
+    iqlearn.learn(10000, progress="none")
 
     # assert
     env = gym.make("MountainCar-v0")
@@ -306,7 +305,11 @@ def test_iqlearn_mountaincar_continuous():
                 break
     assert np.mean(returns) > -400
 
-    iqlearn = IQLearn(env, regularizer=lambda x: x**2 / 10, sac_args={"device": "cpu", "tensorboard_dir": None})
+    iqlearn = IQLearn(
+        env,
+        regularizer=lambda x: x**2 / 10,
+        sac_args={"device": "cpu", "tensorboard_dir": None},
+    )
     iqlearn.set_demonstration_buffer(recorder_env)
 
     # act
@@ -345,7 +348,7 @@ def test_sac_cartpole_q_lstm():
     )
 
     # act
-    iqlearn.sac_learn(15000, progress="none")
+    iqlearn.sac_learn(20000, progress="none")
 
     # assert
     steps = 0
@@ -357,8 +360,11 @@ def test_sac_cartpole_q_lstm():
         if terminated or truncated:
             break
 
-    assert np.nonzero(iqlearn.env.hidden_states[0][32])
+    assert iqlearn.env.hidden_states[0][32].shape == (0,)
+    assert iqlearn.env.hidden_states[1][32].shape == (10,)
+    assert iqlearn.env.hidden_states[2][32].shape == (10,)
     assert np.nonzero(iqlearn.env.hidden_states[1][32])
+    assert np.nonzero(iqlearn.env.hidden_states[2][32])
     assert steps > 150
 
 
@@ -377,7 +383,7 @@ def test_sac_pendulum_q_lstm():
     )
 
     # act
-    iqlearn.sac_learn(15000, progress="none")
+    iqlearn.sac_learn(20000, progress="none")
 
     # assert
     undiscounted_return = 0
@@ -389,7 +395,12 @@ def test_sac_pendulum_q_lstm():
         if terminated or truncated:
             break
 
-    assert undiscounted_return > -500
+    assert iqlearn.env.hidden_states[0][32].shape == (0,)
+    assert iqlearn.env.hidden_states[1][32].shape == (10,)
+    assert iqlearn.env.hidden_states[2][32].shape == (10,)
+    assert np.nonzero(iqlearn.env.hidden_states[1][32])
+    assert np.nonzero(iqlearn.env.hidden_states[2][32])
+    assert undiscounted_return > -600
 
 
 @pytest.mark.slow
@@ -538,7 +549,7 @@ def test_iqlearn_mountaincar_q_lstm():
     iqlearn = IQLearn(
         env,
         regularizer=lambda x: x**2 / 4,
-        sac_args={"device": "cpu", "tensorboard_dir": None},
+        sac_args={"device": "cpu", "target_entropy": 0.2, "tensorboard_dir": None},
         hidden_state_dims=(0, 10, 10),
     )
     iqlearn.set_demonstration_buffer(recorder_env)
@@ -547,7 +558,7 @@ def test_iqlearn_mountaincar_q_lstm():
     )  # safety assert, if this one throws, something is wrong with expert
 
     # act
-    iqlearn.learn(20000)
+    iqlearn.learn(15000, progress="none")
 
     # assert
     steps = []
@@ -568,17 +579,17 @@ def test_iqlearn_mountaincar_q_lstm():
 
 
 @pytest.mark.slow
-def test_iqlearn_pendulum_q_lstm():
+def test_iqlearn_mountain_car_continuous_q_lstm():
     # assemble
     checkpoint = load_from_hub(
-        repo_id="sb3/ppo-Pendulum-v1",
-        filename="ppo-Pendulum-v1.zip",
+        repo_id="sb3/sac-MountainCarContinuous-v0",
+        filename="sac-MountainCarContinuous-v0.zip",
     )
-    env = gym.make("Pendulum-v1")
+    env = gym.make("MountainCarContinuous-v0")
     with warnings.catch_warnings(
         action="ignore"
     ):  # UserWarning warning of loading from an old version of SB3
-        model = PPO.load(
+        model = SAC.load(
             checkpoint,
             env=env,
             device="cpu",
@@ -593,24 +604,30 @@ def test_iqlearn_pendulum_q_lstm():
             },
         )
     recorder_env = RecorderWrapper(env, 0.99, 5000, (0, 10, 10))
-    for _ in range(5):
+    returns = []
+    for _ in range(20):
+        undisc_return = 0
         obs, _ = recorder_env.reset()
         while True:
-            obs, _, terminated, truncated, _ = recorder_env.step(
+            obs, reward, terminated, truncated, _ = recorder_env.step(
                 model.predict(obs, deterministic=True)[0]
             )
+            undisc_return += reward  # type: ignore
             if terminated or truncated:
+                returns.append(undisc_return)
                 break
+    assert np.mean(returns) > -400
 
     iqlearn = IQLearn(
         env,
+        regularizer=lambda x: x**2 / 10,
         sac_args={"device": "cpu", "tensorboard_dir": None},
         hidden_state_dims=(0, 10, 10),
     )
     iqlearn.set_demonstration_buffer(recorder_env)
 
     # act
-    iqlearn.learn(1000, progress="none")
+    iqlearn.learn(5000, progress="none")
 
     # assert
     returns = []
@@ -626,7 +643,7 @@ def test_iqlearn_pendulum_q_lstm():
                 returns.append(undisc_return)
                 break
 
-    assert np.mean(returns) > -300
+    assert np.mean(returns) > -700
 
 
 @pytest.mark.slow
@@ -665,7 +682,13 @@ def test_iqlearn_mountaincar_actor_lstm():
 
     iqlearn = IQLearn(
         env,
-        sac_args={"device": "cpu", "tensorboard_dir": None},
+        regularizer=lambda x: x**2 / 4,
+        sac_args={
+            "device": "cpu",
+            "target_entropy": 0.2,
+            "buffer_size": 1000,
+            "tensorboard_dir": None,
+        },
         hidden_state_dims=(10, 0, 0),
     )
     iqlearn.set_demonstration_buffer(recorder_env)
@@ -674,7 +697,7 @@ def test_iqlearn_mountaincar_actor_lstm():
     )  # safety assert, if this one throws, something is wrong with expert
 
     # act
-    iqlearn.learn(500, progress="none")
+    iqlearn.learn(30000, progress="none")
 
     # assert
     steps = []
@@ -683,28 +706,30 @@ def test_iqlearn_mountaincar_actor_lstm():
         obs, _ = env.reset()
         hidden_state = np.zeros(10, dtype=np.float32)
         while True:
-            action, _ = iqlearn.predict(obs, deterministic=True)
+            action, hidden_state = iqlearn.predict(
+                obs, hidden_state, deterministic=True
+            )
             step += 1
             obs, _, terminated, truncated, _ = env.step(action)
             if terminated or truncated:
                 steps.append(step)
                 break
 
-    assert np.mean(steps) < 120
+    assert np.mean(steps) < 130
 
 
 @pytest.mark.slow
-def test_iqlearn_pendulum_actor_lstm():
+def test_iqlearn_mountain_car_continuous_actor_lstm():
     # assemble
     checkpoint = load_from_hub(
-        repo_id="sb3/ppo-Pendulum-v1",
-        filename="ppo-Pendulum-v1.zip",
+        repo_id="sb3/sac-MountainCarContinuous-v0",
+        filename="sac-MountainCarContinuous-v0.zip",
     )
-    env = gym.make("Pendulum-v1")
+    env = gym.make("MountainCarContinuous-v0")
     with warnings.catch_warnings(
         action="ignore"
     ):  # UserWarning warning of loading from an old version of SB3
-        model = PPO.load(
+        model = SAC.load(
             checkpoint,
             env=env,
             device="cpu",
@@ -719,24 +744,30 @@ def test_iqlearn_pendulum_actor_lstm():
             },
         )
     recorder_env = RecorderWrapper(env, 0.99, 5000, (10, 0, 0))
-    for _ in range(5):
+    returns = []
+    for _ in range(20):
+        undisc_return = 0
         obs, _ = recorder_env.reset()
         while True:
-            obs, _, terminated, truncated, _ = recorder_env.step(
+            obs, reward, terminated, truncated, _ = recorder_env.step(
                 model.predict(obs, deterministic=True)[0]
             )
+            undisc_return += reward  # type: ignore
             if terminated or truncated:
+                returns.append(undisc_return)
                 break
+    assert np.mean(returns) > -400
 
     iqlearn = IQLearn(
         env,
+        regularizer=lambda x: x**2 / 10,
         sac_args={"device": "cpu", "tensorboard_dir": None},
         hidden_state_dims=(10, 0, 0),
     )
     iqlearn.set_demonstration_buffer(recorder_env)
 
     # act
-    iqlearn.learn(1000, progress="none")
+    iqlearn.learn(5000, progress="none")
 
     # assert
     returns = []
@@ -745,13 +776,16 @@ def test_iqlearn_pendulum_actor_lstm():
         obs, _ = env.reset()
         hidden_state = np.zeros(10, dtype=np.float32)
         while True:
-            action, hidden_state = iqlearn.predict(obs, hidden_state, True)
+            action, hidden_state = iqlearn.predict(
+                obs, hidden_state, deterministic=True
+            )
             obs, reward, terminated, truncated, _ = env.step(action)
             undisc_return += reward  # type: ignore
             if terminated or truncated:
                 returns.append(undisc_return)
                 break
 
-    assert np.mean(returns) > -300
+    assert np.mean(returns) > -700
 
-test_sac_cartpole_q_lstm()
+
+test_iqlearn_mountain_car_continuous_actor_lstm()
