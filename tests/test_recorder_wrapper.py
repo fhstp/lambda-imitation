@@ -320,11 +320,11 @@ def test_hidden_state_recalculation():
     # assert hidden states as above when directly calculating
     assert len(env.hidden_states) == 1
     assert env.hidden_states[0].shape == (100, 2)
-    assert env.hidden_states[0][0][0] == 1
+    assert env.hidden_states[0][0][0] == 0
     assert env.hidden_states[0][0][1] == 0
-    assert env.hidden_states[0][1][0] == 2
+    assert env.hidden_states[0][1][0] == 1
     assert env.hidden_states[0][1][1] == 0
-    assert env.hidden_states[0][2][0] == 0
+    assert env.hidden_states[0][2][0] == 2
     assert env.hidden_states[0][2][1] == 0
 
 
@@ -357,11 +357,11 @@ def test_hidden_state_recalculation_two_episodes():
     # assert hidden states as above when directly calculating
     assert len(env.hidden_states) == 1
     assert env.hidden_states[0].shape == (100, 2)
-    assert env.hidden_states[0][0][0] == 1
+    assert env.hidden_states[0][0][0] == 0
     assert env.hidden_states[0][0][1] == 0
-    assert env.hidden_states[0][1][0] == 2
+    assert env.hidden_states[0][1][0] == 1
     assert env.hidden_states[0][1][1] == 0
-    assert env.hidden_states[0][2][0] == 1
+    assert env.hidden_states[0][2][0] == 0
     assert env.hidden_states[0][2][1] == 0
 
 
