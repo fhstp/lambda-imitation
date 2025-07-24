@@ -289,6 +289,16 @@ class Actor(nn.Module):
 
             return actions, entropy, greedy_actions, hidden_state
 
+    def get_prob_log(self, x, h):
+        assert isinstance(self.env.action_space, gym.spaces.Discrete), "probabilities and log prob only supported for discrete action spaces!"
+
+        logits, _ = self(x, h)
+        policy_dist = Categorical(logits=logits)
+        action_probs = policy_dist.probs
+        log_prob = F.log_softmax(logits, dim=1)
+        return action_probs, log_prob
+
+
     def get_actor_loss(self, observations, hidden_state):
         if type(self.env.action_space) == gym.spaces.Box:
             pi, log_pi, _, _ = self.get_action(observations, hidden_state[0])
@@ -297,14 +307,10 @@ class Actor(nn.Module):
             min_qf_pi = torch.min(qf1_pi, qf2_pi)
             return ((self.iqlearn.alpha * log_pi) - min_qf_pi).mean()
         else:
-            _, log_pi, _, _ = self.get_action(observations, hidden_state[0])
             qf1_pi, _ = self.iqlearn.qf1(observations, None, hidden_state[1], False)
             qf2_pi, _ = self.iqlearn.qf2(observations, None, hidden_state[2], False)
             min_qf_pi = torch.min(qf1_pi, qf2_pi)
-            logits, _ = self(observations, hidden_state[0])
-            policy_dist = Categorical(logits=logits)
-            action_probs = policy_dist.probs
-            log_prob = F.log_softmax(logits, dim=1)
+            action_probs, log_prob = self.get_prob_log(observations, hidden_state[0])
             return (
                 (action_probs * ((self.iqlearn.alpha * log_prob) - min_qf_pi)).sum(-1)
             ).mean()
@@ -645,6 +651,15 @@ class IQLearn:
 
     def get_values(self, observations, hidden_states, actions=None):
         if actions is None:
+            if isinstance(self.env.action_space, gym.spaces.Discrete):
+                qf1_pi, _ = self.qf1(observations, None, hidden_states[1], False)
+                qf2_pi, _ = self.qf2(observations, None, hidden_states[2], False)
+                min_qf_pi = torch.min(qf1_pi, qf2_pi)
+                action_probs, _ = self.actor.get_prob_log(observations, hidden_states[0])
+                return (
+                    (action_probs * min_qf_pi).sum(-1)
+                )
+
             actions, _, _, _ = self.actor.get_action(observations, hidden_states[0])
 
         qf1_a_values = self.qf1(observations, actions, hidden_states[1])[0].view(-1)
@@ -652,50 +667,26 @@ class IQLearn:
         return torch.min(qf1_a_values, qf2_a_values).unsqueeze(1)
 
     def update_critic(self, data, live_data=None):
-        next_actions, _, _, _ = self.actor.get_action(data.next_observations, data.hidden_states[0])
-        next_hidden_states = (
-            tuple(torch.tensor(h).to(self.args.device) for h in self.env.hidden_state_net(
-                data.next_observations, next_actions, data.hidden_states
-            ))
-            if self.env.hidden_state_net is not None
-            else (None, None, None)
-        )
-
         demonstration_loss = (
             self.get_values(data.observations, data.hidden_states, data.actions)
             - (1 - data.terminated.float())
             * self.args.gamma
-            * self.get_values(data.next_observations, next_hidden_states).detach()
+            * self.get_values(data.next_observations, data.next_hidden_states).detach()
         )
-        next_actions, _, _, _ = self.actor.get_action(data.next_observations, data.hidden_states[0])
-        next_hidden_states = (
-            tuple(torch.tensor(h).to(self.args.device) for h in self.env.hidden_state_net(
-                data.next_observations, next_actions, data.hidden_states
-            ))
-            if self.env.hidden_state_net is not None
-            else (None, None, None)
-        )
+
         mixed_loss = (
             self.get_values(data.observations, data.hidden_states)
             - (1 - data.terminated.float())
             * self.args.gamma
-            * self.get_values(data.next_observations, next_hidden_states, next_actions).detach()
+            * self.get_values(data.next_observations, data.next_hidden_states).detach()
         )
         if live_data is not None:
-            next_actions_live, _, _, _ = self.actor.get_action(live_data.next_observations, live_data.hidden_states[0])
-            next_hidden_states_live = (
-                tuple(torch.tensor(h).to(self.args.device) for h in self.env.hidden_state_net(
-                    live_data.next_observations, next_actions_live, live_data.hidden_states
-                ))
-            if self.env.hidden_state_net is not None
-            else (None, None, None)
-        )
             live_loss = (
-                self.get_values(live_data.observations, data.hidden_states)
+                self.get_values(live_data.observations, live_data.hidden_states)
                 - (1 - live_data.terminated.float())
                 * self.args.gamma
                 * self.get_values(
-                    live_data.next_observations, next_hidden_states_live, next_actions_live
+                    live_data.next_observations, live_data.next_hidden_states
                 ).detach()
             )
         else:

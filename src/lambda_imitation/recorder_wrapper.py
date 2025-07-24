@@ -16,6 +16,7 @@ class RecorderSample(NamedTuple):
     terminated: Any
     truncated: Any
     hidden_states: Any
+    next_hidden_states: Any
 
 
 class RecorderWrapper(gym.Wrapper):
@@ -86,7 +87,7 @@ class RecorderWrapper(gym.Wrapper):
             action = self.get_action_at(i)
             hidden_states = self.hidden_state_net(obs, action, hidden_states)
             for k, hidden_state in enumerate(hidden_states):
-                self.hidden_states[k][i] = hidden_states[k]
+                self.hidden_states[k][i + 1] = hidden_state
             if self.terminated[i] or self.truncated[i]:
                 hidden_states = tuple(
                     np.zeros((hidden_state_dim), dtype=np.float32)
@@ -127,10 +128,8 @@ class RecorderWrapper(gym.Wrapper):
             np.zeros((hidden_state_dim), dtype=np.float32)
             for hidden_state_dim in self.hidden_state_dims
         )
-        _add_collection_entry(
-            self.observation_space, self.observations, obs, self.pos % self.buffer_size
-        )
         mod_pos = self.pos % self.buffer_size
+        _add_collection_entry(self.observation_space, self.observations, obs, mod_pos)
         for k, hidden_state_dim in enumerate(self.hidden_state_dims):
             self.hidden_states[k][mod_pos] = np.zeros(
                 (hidden_state_dim), dtype=np.float32
@@ -186,6 +185,7 @@ class RecorderWrapper(gym.Wrapper):
         self.rewards[mod_pos] = reward
         self.terminated[mod_pos] = terminated
         self.truncated[mod_pos] = truncated
+        self.pos += 1
         if self.hidden_state_net is not None:
             self.last_hidden_states = self.hidden_state_net(
                 self.last_obs, action, self.last_hidden_states
@@ -193,7 +193,6 @@ class RecorderWrapper(gym.Wrapper):
             for k, last_hidden_state in enumerate(self.last_hidden_states):
                 self.hidden_states[k][mod_pos] = last_hidden_state
 
-        self.pos += 1
         if terminated or truncated:
             self._calculate_returns()
         self.last_obs = obs
@@ -277,6 +276,10 @@ class RecorderWrapper(gym.Wrapper):
         hidden_states = tuple(
             hidden_state[batch_inds] for hidden_state in self.hidden_states
         )
+        next_hidden_states = tuple(
+            hidden_state[(batch_inds + 1) % self.buffer_size]
+            for hidden_state in self.hidden_states
+        )
 
         if mode != "numpy":
             observations = torch.tensor(observations).to(mode)
@@ -289,6 +292,10 @@ class RecorderWrapper(gym.Wrapper):
             hidden_states = tuple(
                 torch.tensor(hidden_state).to(mode) for hidden_state in hidden_states
             )
+            next_hidden_states = tuple(
+                torch.tensor(hidden_state).to(mode)
+                for hidden_state in next_hidden_states
+            )
 
         return RecorderSample(
             observations=observations,
@@ -299,6 +306,7 @@ class RecorderWrapper(gym.Wrapper):
             terminated=terminated,
             truncated=truncated,
             hidden_states=hidden_states,
+            next_hidden_states=next_hidden_states,
         )
 
     def get_sb3_buffer(self, device="auto"):

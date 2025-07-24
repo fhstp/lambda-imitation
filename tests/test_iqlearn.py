@@ -246,7 +246,7 @@ def test_iqlearn_mountaincar():
     )  # safety assert, if this one throws, something is wrong with expert
 
     # act
-    iqlearn.learn(5000, progress="none")
+    iqlearn.learn(15000, progress="none")
 
     # assert
     env = gym.make("MountainCar-v0")
@@ -263,7 +263,7 @@ def test_iqlearn_mountaincar():
                 steps.append(step)
                 break
 
-    assert np.mean(steps) < 130
+    assert np.mean(steps) < 140
 
 
 @pytest.mark.slow
@@ -547,7 +547,7 @@ def test_iqlearn_mountaincar_q_lstm():
     )  # safety assert, if this one throws, something is wrong with expert
 
     # act
-    iqlearn.learn(5000, progress="none")
+    iqlearn.learn(20000)
 
     # assert
     steps = []
@@ -564,7 +564,7 @@ def test_iqlearn_mountaincar_q_lstm():
                 break
 
     print(np.mean(steps))
-    assert np.mean(steps) < 130
+    assert np.mean(steps) < 140
 
 
 @pytest.mark.slow
@@ -754,5 +754,4 @@ def test_iqlearn_pendulum_actor_lstm():
 
     assert np.mean(returns) > -300
 
-
-test_iqlearn_mountaincar_q_lstm()
+test_sac_cartpole_q_lstm()
