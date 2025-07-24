@@ -93,6 +93,8 @@ class RecorderWrapper(gym.Wrapper):
                     np.zeros((hidden_state_dim), dtype=np.float32)
                     for hidden_state_dim in self.hidden_state_dims
                 )
+                for k, hidden_state in enumerate(hidden_states):
+                    self.hidden_states[k][i + 1] = hidden_state
 
     def reset(self, **kwargs):
         """Resets the environment to an initial internal state, returning an initial observation and info and recording the state..
