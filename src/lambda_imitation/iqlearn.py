@@ -83,6 +83,7 @@ class Args:
     """whether or not to choose the target entropy automatically"""
     target_entropy: float = -1.0
     """The target entropy when not chosen automatically"""
+    hidden_state_recalculation_interval = 500
 
 
 def layer_init(layer, bias_const=0.0):
@@ -138,7 +139,10 @@ class SoftQNetwork(nn.Module):
             if self.hidden_state_dim > 0:
                 ht, ct = self.lstm(
                     x,
-                    (h[:, :self.hidden_state_dim // 2], h[:, self.hidden_state_dim // 2 :]),
+                    (
+                        h[:, : self.hidden_state_dim // 2],
+                        h[:, self.hidden_state_dim // 2 :],
+                    ),
                 )
                 x = ht
                 hidden_state = torch.cat((ht, ct), dim=-1)
@@ -240,7 +244,10 @@ class Actor(nn.Module):
             if self.hidden_state_dim > 0:
                 ht, ct = self.lstm(
                     x,
-                    (h[..., :self.hidden_state_dim // 2], h[..., self.hidden_state_dim // 2 :]),
+                    (
+                        h[..., : self.hidden_state_dim // 2],
+                        h[..., self.hidden_state_dim // 2 :],
+                    ),
                 )
                 x = ht
                 hidden_state = torch.cat((ht, ct), dim=-1)
@@ -290,7 +297,9 @@ class Actor(nn.Module):
             return actions, entropy, greedy_actions, hidden_state
 
     def get_prob_log(self, x, h):
-        assert isinstance(self.env.action_space, gym.spaces.Discrete), "probabilities and log prob only supported for discrete action spaces!"
+        assert isinstance(
+            self.env.action_space, gym.spaces.Discrete
+        ), "probabilities and log prob only supported for discrete action spaces!"
 
         logits, _ = self(x, h)
         policy_dist = Categorical(logits=logits)
@@ -422,8 +431,8 @@ class IQLearn:
                     h, c = lstm(
                         input,
                         (
-                            hidden_state[..., :hidden_state.shape[-1] // 2],
-                            hidden_state[..., hidden_state.shape[-1] // 2:],
+                            hidden_state[..., : hidden_state.shape[-1] // 2],
+                            hidden_state[..., hidden_state.shape[-1] // 2 :],
                         ),
                     )
                     return torch.cat((h, c), dim=-1).detach().cpu().numpy()
@@ -528,13 +537,18 @@ class IQLearn:
 
     def set_demonstration_buffer(self, demonstration_buffer):
         self.demonstration_buffer = demonstration_buffer
-        assert self.demonstration_buffer.hidden_state_dims == self.hidden_state_dims, "demonstration buffer has feature same hidden state dims as training"
+        self.demonstration_buffer.hidden_state_net = self.hidden_state_net
+        assert (
+            self.demonstration_buffer.hidden_state_dims == self.hidden_state_dims
+        ), "demonstration buffer has feature same hidden state dims as training"
 
     def learn(self, timesteps: int, progress="tqdm"):
         # ALGO LOGIC: put action logic here
         if self.online_size > 0:
             obs, _ = self.env.reset(seed=np.random.randint(2147483647))
-            hidden_state = torch.zeros((1,self.hidden_state_dims[0]), dtype=torch.float32).to(self.args.device)
+            hidden_state = torch.zeros(
+                (1, self.hidden_state_dims[0]), dtype=torch.float32
+            ).to(self.args.device)
 
         if progress == "tqdm":
             it = tqdm(range(timesteps))
@@ -576,10 +590,14 @@ class IQLearn:
                 obs = next_obs
                 if termination or truncated:
                     obs, _ = self.env.reset(seed=np.random.randint(2147483647))
-                    hidden_state = torch.zeros((1,self.hidden_state_dims[0]), dtype=torch.float32).to(self.args.device)
+                    hidden_state = torch.zeros(
+                        (1, self.hidden_state_dims[0]), dtype=torch.float32
+                    ).to(self.args.device)
 
             # ALGO LOGIC: training.
             if self.n_updates > self.args.learning_starts:
+                if self.n_updates % self.args.hidden_state_recalculation_interval == 0:
+                    self.demonstration_buffer.recalculate_hidden_states()
                 data = self.demonstration_buffer.sample(
                     self.args.batch_size, self.args.device
                 )
@@ -655,10 +673,10 @@ class IQLearn:
                 qf1_pi, _ = self.qf1(observations, None, hidden_states[1], False)
                 qf2_pi, _ = self.qf2(observations, None, hidden_states[2], False)
                 min_qf_pi = torch.min(qf1_pi, qf2_pi)
-                action_probs, _ = self.actor.get_prob_log(observations, hidden_states[0])
-                return (
-                    (action_probs * min_qf_pi).sum(-1)
+                action_probs, _ = self.actor.get_prob_log(
+                    observations, hidden_states[0]
                 )
+                return (action_probs * min_qf_pi).sum(-1)
 
             actions, _, _, _ = self.actor.get_action(observations, hidden_states[0])
 
@@ -754,8 +772,10 @@ class IQLearn:
         if type(obs) == np.ndarray:
             obs = torch.tensor(obs, dtype=torch.float32, device=self.args.device)
         if type(hidden_state) == np.ndarray:
-            nd=True
-            hidden_state = torch.tensor(hidden_state, dtype=torch.float32, device=self.args.device)
+            nd = True
+            hidden_state = torch.tensor(
+                hidden_state, dtype=torch.float32, device=self.args.device
+            )
         obs = obs.unsqueeze(0)  # type: ignore
         if hidden_state is not None:
             hidden_state = hidden_state.unsqueeze(0)  # type: ignore
@@ -770,7 +790,9 @@ class IQLearn:
 
     def sac_learn(self, steps, progress="tqdm"):
         obs, _ = self.env.reset()
-        hidden_state = torch.zeros((1,self.hidden_state_dims[0]), dtype=torch.float32).to(self.args.device)
+        hidden_state = torch.zeros(
+            (1, self.hidden_state_dims[0]), dtype=torch.float32
+        ).to(self.args.device)
         if progress == "tqdm":
             it = tqdm(range(steps))
         else:
