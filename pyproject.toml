@@ -11,6 +11,8 @@ dependencies = [
   "rich",
   "stable_baselines3",
   "huggingface-sb3",
+  "seaborn",
+  "scipy"
 ]
 requires-python = ">=3.12"
 authors = [
