@@ -786,6 +786,3 @@ def test_iqlearn_mountain_car_continuous_actor_lstm():
                 break
 
     assert np.mean(returns) > -700
-
-
-test_iqlearn_mountain_car_continuous_actor_lstm()
