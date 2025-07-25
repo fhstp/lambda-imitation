@@ -28,7 +28,7 @@ from torch.nn.modules import LSTMCell
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.rich import tqdm
 
-from lambda_imitation.recorder_wrapper import RecorderWrapper
+from lambda_imitation.recorder_wrapper import RecorderSample, RecorderWrapper
 
 
 @dataclass
@@ -83,7 +83,10 @@ class Args:
     """whether or not to choose the target entropy automatically"""
     target_entropy: float = -1.0
     """The target entropy when not chosen automatically"""
-    hidden_state_recalculation_interval = 500
+    hidden_state_recalculation_interval: int = 500
+    """How often the hidden states of the demonstration buffer are recalculated"""
+    recalculate_hidden_states_in_update: bool = False
+    """Whether or not to recalculate hidden states at every step for sample"""
 
 
 def layer_init(layer, bias_const=0.0):
@@ -600,6 +603,14 @@ class IQLearn:
                 data = self.demonstration_buffer.sample(
                     self.args.batch_size, self.args.device
                 )
+                if self.args.recalculate_hidden_states_in_update:
+                    next_hidden_states = self.hidden_state_net(data.observations, data.actions, data.hidden_states)
+                    next_hidden_states = tuple( # unelegant, but hidden_state_net returns numpy array
+                        torch.tensor(hidden_state).to(self.args.device)
+                        for hidden_state in next_hidden_states
+                    )
+                    data = RecorderSample( data.observations, data.next_observations, data.actions, data.rewards, data.returns, data.terminated, data.truncated, data.hidden_states, next_hidden_states)
+                    self.demonstration_buffer.override_next_hidden_states_last_sample(data.next_hidden_states)
 
                 loss, demonstration_loss, mixed_loss, regularizer_loss = (
                     self.update_critic(data)
