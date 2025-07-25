@@ -600,3 +600,41 @@ def test_sample_torch():
     assert terminated[4] == terminated3
     assert truncated[4] == truncated3
     assert hidden_states[0][4].shape == (0,)
+
+
+def test_hidden_state_overriding():
+    # assemble
+    def hidden_state_net(state, action, hidden_state):
+        hidden_state = (hidden_state[0].copy(),)
+        hidden_state[0][0] += 1
+        return hidden_state
+
+    gamma = 0.99
+    env = RecorderWrapper(gym.make("MountainCar-v0"), gamma, 10)
+
+    env.reset()
+    env.step(env.action_space.sample())
+    env.step(env.action_space.sample())
+    env.reset()
+    env.step(env.action_space.sample())
+    env.step(env.action_space.sample())
+    env.terminated[2] = True
+    env.terminated[5] = True
+
+    env.setup_hidden_states((2,), hidden_state_net)
+    env.recalculate_hidden_states()
+
+    # act
+    data = env._sample(np.array([0, 2, 3, 4]))
+    hidden_states = (-np.ones_like(hidden_state) for hidden_state in data.hidden_states)
+    env.override_next_hidden_states_last_sample(hidden_states)
+
+    # assert hidden states as above when directly calculating
+    assert env.hidden_states[0][1][0] == -1
+    assert env.hidden_states[0][1][1] == -1
+    assert env.hidden_states[0][3][0] == 0
+    assert env.hidden_states[0][3][1] == 0
+    assert env.hidden_states[0][4][0] == -1
+    assert env.hidden_states[0][4][1] == -1
+    assert env.hidden_states[0][5][0] == -1
+    assert env.hidden_states[0][5][1] == -1

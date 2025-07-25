@@ -62,6 +62,7 @@ class RecorderWrapper(gym.Wrapper):
 
         self.pos = 0
         self.last_return_calculation = 0
+        self.last_sampled_indices = None
 
     def setup_hidden_states(self, hidden_state_dims, hidden_state_net):
         self.hidden_states = tuple(
@@ -254,6 +255,15 @@ class RecorderWrapper(gym.Wrapper):
         """
         return self._sample(self._generate_indices(batch_size), mode)
 
+    def override_next_hidden_states_last_sample(self, hidden_states):
+        ignore_mask = ~(
+            self.terminated[self.last_sampled_indices]
+            | self.truncated[self.last_sampled_indices]
+        )  # ignore states where current state was terminal
+        next_inds = (self.last_sampled_indices + 1) % self.buffer_size
+        for k, hidden_state in enumerate(hidden_states):
+            self.hidden_states[k][next_inds[ignore_mask]] = hidden_state[ignore_mask]
+
     def _generate_indices(self, batch_size):
         if self.pos >= self.buffer_size:
             upper_bound = self.buffer_size - 1
@@ -268,6 +278,7 @@ class RecorderWrapper(gym.Wrapper):
         return batch_inds
 
     def _sample(self, batch_inds, mode="numpy"):
+        self.last_sampled_indices = batch_inds
         observations = self.get_observation_at(batch_inds)
         next_observations = self.get_observation_at((batch_inds + 1) % self.buffer_size)
         actions = self.get_action_at(batch_inds)
