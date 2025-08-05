@@ -414,6 +414,69 @@ def test_sample_generate_indices_over_full():
         assert (env.pos % env.buffer_size) not in inds
 
 
+def test_sample_generate_indices_full_episodes_only_buffer_not_full():
+    # assemble
+    env = RecorderWrapper(gym.make("MountainCar-v0"), 0.99, 400)
+    env.reset()
+    for i in range(350):
+        _, _, terminated, truncated, _ = env.step(1)
+        if terminated or truncated:
+            env.reset()
+    # safety asserts
+    assert env.pos == 350
+    assert env.last_return_calculation == 200
+
+    # act assert in loop for probabilistic testing
+    for _ in range(100):
+        # act
+        inds = env._generate_indices(10, True)
+
+        # assert
+        assert np.max(inds) < 200
+
+
+def test_sample_generate_indices_full_episodes_only_buffer_full_case1():
+    # assemble
+    env = RecorderWrapper(gym.make("MountainCar-v0"), 0.99, 450)
+    env.reset()
+    for i in range(500):
+        _, _, terminated, truncated, _ = env.step(1)
+        if terminated or truncated:
+            env.reset()
+    # safety asserts
+    assert env.pos == 500
+    assert env.last_return_calculation == 400
+
+    # act assert in loop for probabilistic testing
+    for _ in range(100):
+        # act
+        inds = env._generate_indices(10, True)
+
+        # assert
+        assert ((inds > 50) & (inds <= 400)).all()
+
+
+def test_sample_generate_indices_full_episodes_only_buffer_full_case2():
+    # assemble
+    env = RecorderWrapper(gym.make("MountainCar-v0"), 0.99, 450)
+    env.reset()
+    for i in range(700):
+        _, _, terminated, truncated, _ = env.step(1)
+        if terminated or truncated:
+            env.reset()
+    # safety asserts
+    assert env.pos == 700
+    assert env.last_return_calculation == 600
+
+    # act assert in loop for probabilistic testing
+    for _ in range(100):
+        # act
+        inds = env._generate_indices(10, True)
+
+        # assert
+        assert ((inds <= 150) | (inds > 250)).all()
+
+
 class SimpleGridWorld(gym.Env):
     def __init__(self):
         super().__init__()

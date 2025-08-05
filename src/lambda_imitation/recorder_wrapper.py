@@ -13,6 +13,7 @@ class RecorderSample(NamedTuple):
     actions: Any
     rewards: Any
     returns: Any
+    importance_factors: Any
     terminated: Any
     truncated: Any
     hidden_states: Any
@@ -56,6 +57,9 @@ class RecorderWrapper(gym.Wrapper):
         self.actions = _generate_collection(self.action_space, self.buffer_size)
         self.rewards = np.zeros(self.buffer_size, dtype=np.float32)
         self.returns = np.zeros(self.buffer_size, dtype=np.float32)
+        self.behavior_probabilities = np.ones(self.buffer_size, dtype=np.float32)
+        self.policy_probabilities = np.zeros(self.buffer_size, dtype=np.float32)
+        self.importance_factors = np.zeros(self.buffer_size, dtype=np.float32)
         self.terminated = np.zeros(self.buffer_size, dtype=np.bool_)
         self.truncated = np.zeros(self.buffer_size, dtype=np.bool_)
         self.setup_hidden_states(hidden_state_dims, hidden_state_net)
@@ -139,13 +143,36 @@ class RecorderWrapper(gym.Wrapper):
             )
         return obs, info
 
+    def recalculate_episodes(self):
+        ret = 0
+        factor = 1
+        if self.pos >= self.buffer_size:
+            indices = reversed(range(self.pos + 1, self.pos + self.buffer_size))
+        else:
+            indices = reversed(range(self.pos))
+        for i in indices:
+            ret = self.rewards[i % self.buffer_size] + self.gamma * ret
+            self.returns[i % self.buffer_size] = ret
+            factor *= (
+                self.policy_probabilities[i % self.buffer_size]
+                / self.behavior_probabilities[i % self.buffer_size]
+            )
+            self.importance_factors[i % self.buffer_size] = factor
+            if (
+                self.terminated[(i - 1) % self.buffer_size]
+                or self.truncated[(i - 1) % self.buffer_size]
+            ):
+                ret = 0
+                factor = 1
+
     def _calculate_returns(self):
         if self.pos > self.last_return_calculation:
             assert (
                 self.pos - self.last_return_calculation < self.buffer_size
             ), f"Episode was longer than buffer size, return calculation not possible, {self.pos=}, {self.last_return_calculation=}, {self.pos-self.last_return_calculation}, {self.buffer_size}"
             ret = 0
-            for i in reversed(range(self.last_return_calculation, self.pos + 1)):
+            factor = 1
+            for i in reversed(range(self.last_return_calculation, self.pos)):
                 ret = self.rewards[i % self.buffer_size] + self.gamma * ret
                 self.returns[i % self.buffer_size] = ret
             self.last_return_calculation = self.pos
@@ -205,6 +232,10 @@ class RecorderWrapper(gym.Wrapper):
 
         return obs, reward, terminated, truncated, info
 
+    def set_probabilities_of_last_action(self, prob):
+        self.behavior_probabilities[(self.pos - 1) % self.buffer_size] = prob
+        self.policy_probabilities[(self.pos - 1) % self.buffer_size] = prob
+
     def get_observation_at(self, pos):
         obs = _get_collection_entry(self.observation_space, self.observations, pos)
         return obs
@@ -249,11 +280,13 @@ class RecorderWrapper(gym.Wrapper):
             self.truncated = np.load(f)
             self.hidden_states = np.load(f)
 
-    def sample(self, batch_size, mode="numpy"):
+    def sample(self, batch_size, mode="numpy", full_episodes_only=False):
         """
         Sample `batch_size` items from the buffer, mode can be either "numpy" or a torch device, e.g. "cpu", "cuda", "auto"
         """
-        return self._sample(self._generate_indices(batch_size), mode)
+        return self._sample(
+            self._generate_indices(batch_size, full_episodes_only), mode
+        )
 
     def override_next_hidden_states_last_sample(self, hidden_states):
         ignore_mask = ~(
@@ -264,16 +297,57 @@ class RecorderWrapper(gym.Wrapper):
         for k, hidden_state in enumerate(hidden_states):
             self.hidden_states[k][next_inds[ignore_mask]] = hidden_state[ignore_mask]
 
-    def _generate_indices(self, batch_size):
+    def override_policy_probabilities_last_sample(self, prob):
+        self.policy_probabilities[self.last_sampled_indices] = prob
+        term_trunc = (
+            self.terminated[self.last_sampled_indices]
+            | self.truncated[self.last_sampled_indices]
+        )
+        self.importance_factors[self.last_sampled_indices] = (
+            self.importance_factors[(self.last_sampled_indices + 1) % self.buffer_size]
+            * (1 - term_trunc)
+            + term_trunc
+        ) * (
+            self.policy_probabilities[self.last_sampled_indices]
+            / self.behavior_probabilities[self.last_sampled_indices]
+        )
+        # print(f"{self.policy_probabilities[self.last_sampled_indices]=}")
+        # print(f"{self.behavior_probabilities[self.last_sampled_indices]=}")
+        # print(
+        #     f"{self.policy_probabilities[self.last_sampled_indices]/self.behavior_probabilities[self.last_sampled_indices]=}"
+        # )
+
+    def _generate_indices(self, batch_size, full_episodes_only=False):
         if self.pos >= self.buffer_size:
-            upper_bound = self.buffer_size - 1
+            upper_exclusion = self.pos
+            lower_exclusion = (
+                self.last_return_calculation - 1 if full_episodes_only else self.pos - 1
+            )
+            exclusion_len = upper_exclusion - lower_exclusion
+            assert (
+                exclusion_len < self.buffer_size
+            ), "Last/Current episode was longer than buffer size!"
+            upper_bound = self.buffer_size - exclusion_len
             batch_inds = np.random.randint(0, upper_bound, size=batch_size)
-            # batch_inds = (
-            #     batch_inds + self.pos + 1
-            # ) % self.buffer_size  # shift so pos never gets sampled
-            batch_inds[batch_inds >= (self.pos % self.buffer_size)] += 1
+
+            upper_exclusion_ind = upper_exclusion % self.buffer_size
+            lower_exclusion_ind = lower_exclusion % self.buffer_size
+            if upper_exclusion_ind > lower_exclusion_ind:
+                # print("upper > lower")
+                # print(upper_exclusion_ind)
+                # print(lower_exclusion_ind)
+                # print(exclusion_len)
+                batch_inds[batch_inds > lower_exclusion_ind] += exclusion_len
+            else:
+                # print("upper < lower")
+                # print(upper_exclusion_ind)
+                # print(lower_exclusion_ind)
+                # print(exclusion_len)
+                batch_inds += upper_exclusion_ind + 1
         else:
-            upper_bound = self.pos
+            upper_bound = (
+                self.last_return_calculation if full_episodes_only else self.pos
+            )
             batch_inds = np.random.randint(0, upper_bound, size=batch_size)
         return batch_inds
 
@@ -284,6 +358,7 @@ class RecorderWrapper(gym.Wrapper):
         actions = self.get_action_at(batch_inds)
         rewards = self.rewards[batch_inds]
         returns = self.returns[batch_inds]
+        importance_factors = self.importance_factors[batch_inds]
         terminated = self.terminated[batch_inds]
         truncated = self.truncated[batch_inds]
         hidden_states = tuple(
@@ -300,6 +375,7 @@ class RecorderWrapper(gym.Wrapper):
             actions = torch.tensor(actions).to(mode)
             rewards = torch.tensor(rewards).to(mode)
             returns = torch.tensor(returns).to(mode)
+            importance_factors = torch.tensor(importance_factors).to(mode)
             terminated = torch.tensor(terminated).to(mode)
             truncated = torch.tensor(truncated).to(mode)
             hidden_states = tuple(
@@ -316,6 +392,7 @@ class RecorderWrapper(gym.Wrapper):
             actions=actions,
             rewards=rewards,
             returns=returns,
+            importance_factors=importance_factors,
             terminated=terminated,
             truncated=truncated,
             hidden_states=hidden_states,

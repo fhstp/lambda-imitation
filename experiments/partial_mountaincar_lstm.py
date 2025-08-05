@@ -84,9 +84,12 @@ iqlearn = IQLearn(
         "target_entropy": 0.2,
         "buffer_size": 1000,
         "hidden_state_recalculation_interval": int(sys.argv[1]),
-        "recalculate_hidden_states_in_update": bool(sys.argv[2]),
+        "recalculate_hidden_states_in_update": sys.argv[2] == "True",
     },
     hidden_state_dims=(10, 10, 10),
+)
+print(
+    f"running with {iqlearn.args.hidden_state_recalculation_interval} and {iqlearn.args.recalculate_hidden_states_in_update}"
 )
 iqlearn.set_demonstration_buffer(recorder_env)
 assert (
