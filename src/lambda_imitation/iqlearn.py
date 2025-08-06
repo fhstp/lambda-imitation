@@ -578,6 +578,7 @@ class IQLearn:
             q_parameters += list(self.mc_qf1.parameters()) + list(
                 self.mc_qf2.parameters()
             )
+            self.lambda_optimizer = optim.Adam(self.actor.lstm.parameters(), lr=self.args.policy_lr)
 
         self.q_optimizer = optim.Adam(q_parameters, lr=self.args.q_lr)
         self.actor_optimizer = optim.Adam(
@@ -1035,7 +1036,7 @@ class IQLearn:
                     mc_qf2_loss = F.mse_loss(
                         mc_qf2_a_values, data.returns, reduction='none'
                     )
-                    qf_loss += (data.importance_factors*(mc_qf1_loss + mc_qf2_loss)).mean()# + lambda_discrepancy
+                    qf_loss += (data.importance_factors*(mc_qf1_loss + mc_qf2_loss)).mean()
 
                     if self.n_updates % 100 == 0 and self.writer is not None:
                         self.writer.add_scalar(
@@ -1103,7 +1104,12 @@ class IQLearn:
                 # optimize the model
                 self.q_optimizer.zero_grad()
                 self.actor_optimizer.zero_grad()
+                if self.args.use_lambda_discrepancy:
+                    self.lambda_optimizer.zero_grad()
+                    lambda_discrepancy.backward(retain_graph=True)
                 qf_loss.backward()
+                if self.args.use_lambda_discrepancy:
+                    self.lambda_optimizer.step()
                 self.actor_optimizer.step()
                 self.q_optimizer.step()
 

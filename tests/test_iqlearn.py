@@ -1055,7 +1055,7 @@ class PartialCartpoleWrapper(gym.Wrapper):
 @pytest.mark.slow
 def test_sac_cartpole_shared_lstm():
     # assemble
-    env = PartialCartpoleWrapper(gym.make("CartPole-v1"))
+    env = gym.make("CartPole-v1")
     iqlearn = IQLearn(
         env,
         sac_args={
@@ -1066,6 +1066,9 @@ def test_sac_cartpole_shared_lstm():
             "recalculate_hidden_states_in_update": True,
             "buffer_size": 10000,
             "learning_starts": 500,
+            "q_lr": 0.0001,
+            "policy_lr": 0.0001,
+            "tau": 0.0005,
         },
         hidden_state_dims=(10,),
     )
