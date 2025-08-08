@@ -59,6 +59,7 @@ for i in range(train_steps // eval_interval):
     print(f"running training {i}/{train_steps//eval_interval}")
     iqlearn.sac_learn(eval_interval)
     print("evaluating...")
+
     steps_runs = []
     for _ in range(10):
         steps = 0
@@ -73,6 +74,7 @@ for i in range(train_steps // eval_interval):
             if terminated or truncated:
                 break
         steps_runs.append(steps)
+
     iqlearn.writer.add_scalar(
         "charts/eval_return",
         np.mean(steps_runs),

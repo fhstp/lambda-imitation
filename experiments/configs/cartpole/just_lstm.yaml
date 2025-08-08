@@ -1,5 +1,5 @@
 ---
-exp_name: no_lstm
+exp_name: just_lstm
 alpha: 0.6
 auto_target_entropy: false
 autotune: true
