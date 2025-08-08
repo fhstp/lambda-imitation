@@ -280,12 +280,21 @@ class RecorderWrapper(gym.Wrapper):
             self.truncated = np.load(f)
             self.hidden_states = np.load(f)
 
-    def sample(self, batch_size, mode="numpy", full_episodes_only=False):
+    def sample(
+        self,
+        batch_size,
+        mode="numpy",
+        full_episodes_only=False,
+        sample_by_importance=False,
+    ):
         """
         Sample `batch_size` items from the buffer, mode can be either "numpy" or a torch device, e.g. "cpu", "cuda", "auto"
         """
         return self._sample(
-            self._generate_indices(batch_size, full_episodes_only), mode
+            self._generate_indices(
+                batch_size, full_episodes_only, sample_by_importance
+            ),
+            mode,
         )
 
     def override_next_hidden_states_last_sample(self, hidden_states):
@@ -317,38 +326,52 @@ class RecorderWrapper(gym.Wrapper):
         #     f"{self.policy_probabilities[self.last_sampled_indices]/self.behavior_probabilities[self.last_sampled_indices]=}"
         # )
 
-    def _generate_indices(self, batch_size, full_episodes_only=False):
+    def _generate_indices(
+        self, batch_size, full_episodes_only=False, sample_by_importance=False
+    ):
         if self.pos >= self.buffer_size:
             upper_exclusion = self.pos
             lower_exclusion = (
                 self.last_return_calculation - 1 if full_episodes_only else self.pos - 1
             )
+            upper_exclusion_ind = upper_exclusion % self.buffer_size
+            lower_exclusion_ind = lower_exclusion % self.buffer_size
             exclusion_len = upper_exclusion - lower_exclusion
             assert (
                 exclusion_len < self.buffer_size
             ), "Last/Current episode was longer than buffer size!"
             upper_bound = self.buffer_size - exclusion_len
-            batch_inds = np.random.randint(0, upper_bound, size=batch_size)
-
-            upper_exclusion_ind = upper_exclusion % self.buffer_size
-            lower_exclusion_ind = lower_exclusion % self.buffer_size
+            indices = np.array(range(upper_bound))
             if upper_exclusion_ind > lower_exclusion_ind:
-                # print("upper > lower")
-                # print(upper_exclusion_ind)
-                # print(lower_exclusion_ind)
-                # print(exclusion_len)
-                batch_inds[batch_inds > lower_exclusion_ind] += exclusion_len
+                indices[lower_exclusion_ind + 1 :] += exclusion_len
             else:
-                # print("upper < lower")
-                # print(upper_exclusion_ind)
-                # print(lower_exclusion_ind)
-                # print(exclusion_len)
-                batch_inds += upper_exclusion_ind + 1
+                indices += upper_exclusion_ind + 1
+            # batch_inds = np.random.randint(0, upper_bound, size=batch_size)
+
+            # if upper_exclusion_ind > lower_exclusion_ind:
+            #     # print("upper > lower")
+            #     # print(upper_exclusion_ind)
+            #     # print(lower_exclusion_ind)
+            #     # print(exclusion_len)
+            #     batch_inds[batch_inds > lower_exclusion_ind] += exclusion_len
+            # else:
+            #     # print("upper < lower")
+            #     # print(upper_exclusion_ind)
+            #     # print(lower_exclusion_ind)
+            #     # print(exclusion_len)
+            #     batch_inds += upper_exclusion_ind + 1
         else:
             upper_bound = (
                 self.last_return_calculation if full_episodes_only else self.pos
             )
-            batch_inds = np.random.randint(0, upper_bound, size=batch_size)
+            indices = np.array(range(upper_bound))
+            # batch_inds = np.random.randint(0, upper_bound, size=batch_size)
+        if sample_by_importance:
+            prob = self.importance_factors[indices]
+            prob = prob / np.sum(prob)
+            batch_inds = np.random.choice(indices, batch_size, p=prob)
+        else:
+            batch_inds = np.random.choice(indices, batch_size)
         return batch_inds
 
     def _sample(self, batch_inds, mode="numpy"):

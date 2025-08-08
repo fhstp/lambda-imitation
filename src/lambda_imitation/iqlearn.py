@@ -39,7 +39,7 @@ class Args:
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    device: str = "auto"
+    device: str = "cpu"
     """device to be used"""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
@@ -47,8 +47,6 @@ class Args:
     """the wandb's project name"""
     wandb_entity: object = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = False
-    """whether to capture videos of the agent performances (check out `videos` folder)"""
     tensorboard_dir: str | None = "runs"
     """where to store tensorboard logs, if None, no tensorboard will be used"""
 
@@ -73,8 +71,6 @@ class Args:
     """the frequency of training policy (delayed)"""
     target_network_frequency: int = 1  # Denis Yarats' implementation delays this by 2.
     """the frequency of updates for the target nerworks"""
-    noise_clip: float = 0.5
-    """noise clip parameter of the Target Policy Smoothing Regularization"""
     alpha: float = 0.6
     """Entropy regularization coefficient."""
     autotune: bool = True
@@ -83,12 +79,20 @@ class Args:
     """whether or not to choose the target entropy automatically"""
     target_entropy: float = -1.0
     """The target entropy when not chosen automatically"""
+    hidden_state_dim: int = 0
+    """Dimension of hidden states, has to be even, if 0, no LSTM will be used"""
     hidden_state_recalculation_interval: int = 500
     """How often the hidden states of the demonstration buffer are recalculated"""
     recalculate_hidden_states_in_update: bool = False
     """Whether or not to recalculate hidden states at every step for sample"""
     use_lambda_discrepancy: bool = False
     """Whether or not to also approximate the value function via MC estimation and use lambda discrepancy to optimize memory"""
+    use_action_recalculation: bool = False
+    """Whether or not to re-calculate actions in calculation of lambda-discrepancy"""
+    update_feature_extractor_with_losses: bool = False
+    """Whether or not the feature extractor gets updated with standard losses or just by lambda-discrepancy. If `use_lambda_discrepancy` is False, this will always be True"""
+    use_importance_sampling: bool = True
+    """Whether or not to use importance sampling for MC approximation"""
 
 
 def layer_init(layer, bias_const=0.0):
@@ -98,136 +102,73 @@ def layer_init(layer, bias_const=0.0):
 
 
 class SoftQNetwork(nn.Module):
-    def __init__(self, env, hidden_state_dim):
+    def __init__(self, input_dim, output_dim):
         super().__init__()
-        self.hidden_state_dim = hidden_state_dim
-        self.env = env
-        if type(self.env.action_space) == gym.spaces.Box:
-            if hidden_state_dim > 0:
-                assert (
-                    hidden_state_dim % 2 == 0
-                ), "hidden_state dimensions have to be even for LSTM"
-                self.lstm = LSTMCell(
-                    env.observation_space.shape[0] + env.action_space.shape[0],
-                    hidden_state_dim // 2,
-                )
-                self.fc2 = nn.Linear(hidden_state_dim // 2, 32)
+        self.fc1 = nn.Linear(input_dim, 32)
+        self.fc2 = nn.Linear(32, 32)
+        self.fc3 = nn.Linear(32, 32)
+        self.fc4 = nn.Linear(32, output_dim)
 
-            else:
-                self.fc1 = nn.Linear(
-                    env.observation_space.shape[0] + env.action_space.shape[0], 32
-                )
-                self.fc2 = nn.Linear(32, 32)
-            self.fc3 = nn.Linear(32, 32)
-            self.fc4 = nn.Linear(32, 1)
-        elif type(self.env.action_space) == gym.spaces.Discrete:
-            if hidden_state_dim > 0:
-                assert (
-                    hidden_state_dim % 2 == 0
-                ), "hidden_state dimensions have to be even for LSTM"
-                self.lstm = LSTMCell(
-                    env.observation_space.shape[0],
-                    hidden_state_dim // 2,
-                )
-                self.fc2 = nn.Linear(hidden_state_dim // 2, 32)
-
-            else:
-                self.fc1 = nn.Linear(env.observation_space.shape[0], 32)
-                self.fc2 = nn.Linear(32, 32)
-            self.fc3 = nn.Linear(32, 32)
-            self.fc4 = nn.Linear(32, self.env.action_space.n)
-
-    def forward(self, x, a, h, gather=True):
-        hidden_state = None
-        if type(self.env.action_space) == gym.spaces.Box:
-            x = torch.cat([x, a], 1)
-            if self.hidden_state_dim > 0:
-                ht, ct = self.lstm(
-                    x,
-                    (
-                        h[:, : self.hidden_state_dim // 2],
-                        h[:, self.hidden_state_dim // 2 :],
-                    ),
-                )
-                x = ht
-                hidden_state = torch.cat((ht, ct), dim=-1)
-            else:
-                x = F.relu(self.fc1(x))
-            x = F.relu(self.fc2(x))
-            x = F.relu(self.fc3(x))
-            x = self.fc4(x)
-            return x, hidden_state
-        else:
-            if self.hidden_state_dim > 0:
-                ht, ct = self.lstm(
-                    x,
-                    (
-                        h[:, : self.hidden_state_dim // 2],
-                        h[:, self.hidden_state_dim // 2 :],
-                    ),
-                )
-                x = ht
-                hidden_state = torch.cat((ht, ct), dim=-1)
-            else:
-                x = F.relu(self.fc1(x))
-            x = F.relu(self.fc2(x))
-            x = F.relu(self.fc3(x))
-            x = self.fc4(x)
-            if gather:
-                return x.gather(1, a.unsqueeze(1).long()).view(-1), hidden_state
-            else:
-                return x, hidden_state
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        x = self.fc4(x)
+        return x
 
 
 LOG_STD_MAX = 2
 LOG_STD_MIN = -5
 
 
-class Actor(nn.Module):
-    def __init__(self, env, iqlearn, net=None, hidden_state_dim=0):
+class ActorNet(nn.Module):
+    def __init__(self, input_dim, output_dim, logits=False):
+        super().__init__()
+        self.logits = logits
+        self.fc1 = nn.Linear(input_dim, 32)
+        self.fc2 = nn.Linear(32, 32)
+        self.fc3 = nn.Linear(32, 32)
+        if self.logits:
+            self.fc4 = nn.Linear(32, output_dim)
+        else:
+            self.fc_mean = nn.Linear(32, output_dim)
+            self.fc_logstd = nn.Linear(32, output_dim)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        if self.logits:
+            logits = self.fc4(x)
+            return logits
+        else:
+            mean = self.fc_mean(x)
+            log_std = self.fc_logstd(x)
+            log_std = torch.tanh(log_std)
+            log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (
+                log_std + 1
+            )  # From SpinUp / Denis Yarats
+            return mean, log_std
+
+
+class Actor:
+    def __init__(self, env, iqlearn, input_dim, net_cls=ActorNet):
         super().__init__()
         self.net = None
         self.iqlearn = iqlearn
         self.env = env
-        self.hidden_state_dim = hidden_state_dim
-        if net is None:
-            if type(self.env.action_space) == gym.spaces.Box:
-                if hidden_state_dim > 0:
-                    assert (
-                        hidden_state_dim % 2 == 0
-                    ), "hidden_state dimensions have to be even for LSTM"
-                    self.lstm = LSTMCell(
-                        env.observation_space.shape[0],
-                        hidden_state_dim // 2,
-                    )
-                    self.fc2 = nn.Linear(hidden_state_dim // 2, 32)
+        self.continuous = isinstance(self.env.action_space, gym.spaces.Box)
+        self.net = net_cls(
+            input_dim,
+            (
+                np.prod(self.env.action_space.shape)
+                if self.continuous
+                else self.env.action_space.n
+            ),
+            logits=not self.continuous,
+        ).to(iqlearn.args.device)
 
-                else:
-                    self.fc1 = nn.Linear(env.observation_space.shape[0], 32)
-                    self.fc2 = nn.Linear(32, 32)
-                self.fc3 = nn.Linear(32, 32)
-                self.fc_mean = nn.Linear(32, np.prod(env.action_space.shape))
-                self.fc_logstd = nn.Linear(32, np.prod(env.action_space.shape))
-            elif type(self.env.action_space) == gym.spaces.Discrete:
-                if hidden_state_dim > 0:
-                    assert (
-                        hidden_state_dim % 2 == 0
-                    ), "hidden_state dimensions have to be even for LSTM"
-                    self.lstm = LSTMCell(
-                        env.observation_space.shape[0],
-                        hidden_state_dim // 2,
-                    )
-                    self.fc2 = nn.Linear(hidden_state_dim // 2, 32)
-
-                else:
-                    self.fc1 = nn.Linear(env.observation_space.shape[0], 32)
-                    self.fc2 = nn.Linear(32, 32)
-                self.fc3 = nn.Linear(32, 32)
-                self.fc4 = nn.Linear(32, env.action_space.n)
-        else:
-            self.net = net
-
-        if type(self.env.action_space) == gym.spaces.Box:
+        if isinstance(self.env.action_space, gym.spaces.Box):
             self.register_buffer(
                 "action_scale",
                 torch.tensor(
@@ -243,41 +184,9 @@ class Actor(nn.Module):
                 ),
             )
 
-    def forward(self, x, h):
-        hidden_state = None
-        if self.net is None:
-            if self.hidden_state_dim > 0:
-                ht, ct = self.lstm(
-                    x,
-                    (
-                        h[..., : self.hidden_state_dim // 2],
-                        h[..., self.hidden_state_dim // 2 :],
-                    ),
-                )
-                x = ht
-                hidden_state = torch.cat((ht, ct), dim=-1)
-            else:
-                x = F.relu(self.fc1(x))
-            x = F.relu(self.fc2(x))
-            x = F.relu(self.fc3(x))
-            if type(self.env.action_space) == gym.spaces.Box:
-                mean = self.fc_mean(x)
-                log_std = self.fc_logstd(x)
-                log_std = torch.tanh(log_std)
-                log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (
-                    log_std + 1
-                )  # From SpinUp / Denis Yarats
-            else:
-                logits = self.fc4(x)
-                return logits, hidden_state
-        else:
+    def get_action(self, x):
+        if self.continuous:
             mean, log_std = self.net(x)
-
-        return mean, log_std, hidden_state
-
-    def get_action(self, x, h):
-        if type(self.env.action_space) == gym.spaces.Box:
-            mean, log_std, hidden_state = self(x, h)
             std = log_std.exp()
             normal = torch.distributions.Normal(mean, std)
             x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
@@ -289,9 +198,9 @@ class Actor(nn.Module):
             log_prob = log_prob.sum(1, keepdim=True)
             mean = torch.tanh(mean) * self.action_scale + self.action_bias
 
-            return action, log_prob, mean, hidden_state
+            return action, log_prob, mean
         else:
-            logits, hidden_state = self(x, h)
+            logits = self.net(x)
             policy_dist = Categorical(logits=logits)
             actions = policy_dist.sample()
             action_probs = policy_dist.probs
@@ -299,64 +208,47 @@ class Actor(nn.Module):
             entropy = torch.sum(action_probs * log_prob, dim=-1)
             greedy_actions = torch.argmax(action_probs, dim=-1)
 
-            return actions, entropy, greedy_actions, hidden_state
+            return actions, entropy, greedy_actions
 
-    def get_action_probs(self, x, a, h):
-        if type(self.env.action_space) == gym.spaces.Box:
-            mean, log_std, _ = self(x, h)
+    def get_action_probs(self, x, a):
+        if self.continuous:
+            mean, log_std = self.net(x)
             std = log_std.exp()
             normal = torch.distributions.Normal(mean, std)
             x_t = torch.atanh((a - self.action_bias) / self.action_scale)
 
             return normal.prob(x_t)
         else:
-            logits, _ = self(x, h)
+            logits = self.net(x)
             policy_dist = Categorical(logits=logits)
             action_probs = policy_dist.probs
 
             return action_probs.gather(1, a.unsqueeze(1).long()).view(-1)
 
-    def get_prob_log(self, x, h):
+    def get_prob_log(self, x):
         assert isinstance(
             self.env.action_space, gym.spaces.Discrete
         ), "probabilities and log prob only supported for discrete action spaces!"
 
-        logits, _ = self(x, h)
+        logits = self.net(x)
         policy_dist = Categorical(logits=logits)
         action_probs = policy_dist.probs
         log_prob = F.log_softmax(logits, dim=1)
         return action_probs, log_prob
 
-    def get_actor_loss(self, observations, hidden_state):
-        if type(self.env.action_space) == gym.spaces.Box:
-            pi, log_pi, _, _ = self.get_action(
-                observations, self.iqlearn.get_actor_hidden_state(hidden_state)
-            )
-            qf1_pi, _ = self.iqlearn.qf1(
-                observations, pi, self.iqlearn.get_qf1_hidden_state(hidden_state)
-            )
-            qf2_pi, _ = self.iqlearn.qf2(
-                observations, pi, self.iqlearn.get_qf2_hidden_state(hidden_state)
-            )
+    def get_actor_loss(self, x):
+        if self.continuous:
+            pi, log_pi, _ = self.get_action(x)
+            xa = torch.cat([x, pi])
+            qf1_pi, _ = self.iqlearn.qf1(xa)
+            qf2_pi, _ = self.iqlearn.qf2(xa)
             min_qf_pi = torch.min(qf1_pi, qf2_pi)
             return ((self.iqlearn.alpha * log_pi) - min_qf_pi).mean()
         else:
-            qf1_pi, _ = self.iqlearn.qf1(
-                observations,
-                None,
-                self.iqlearn.get_qf1_hidden_state(hidden_state),
-                False,
-            )
-            qf2_pi, _ = self.iqlearn.qf2(
-                observations,
-                None,
-                self.iqlearn.get_qf2_hidden_state(hidden_state),
-                False,
-            )
+            qf1_pi = self.iqlearn.qf1(x)
+            qf2_pi = self.iqlearn.qf2(x)
             min_qf_pi = torch.min(qf1_pi, qf2_pi)
-            action_probs, log_prob = self.get_prob_log(
-                observations, self.iqlearn.get_actor_hidden_state(hidden_state)
-            )
+            action_probs, log_prob = self.get_prob_log(x)
             return (
                 (action_probs * ((self.iqlearn.alpha * log_prob) - min_qf_pi)).sum(-1)
             ).mean()
@@ -370,6 +262,37 @@ def default_regularizer(x):
     return x**2 / 10
 
 
+class IdentityExtractor(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def forward(self, x, h):
+        return x, h
+
+
+class LSTMExtractor(nn.Module):
+    def __init__(self, input_dim, output_dim, hidden_state_dim):
+        super().__init__()
+        self.hidden_state_dim = hidden_state_dim
+        self.lstm = LSTMCell(
+            input_dim,
+            hidden_state_dim // 2,
+        )
+        self.output_dim = input_dim + hidden_state_dim // 2
+
+    def forward(self, x, h):
+        ht, ct = self.lstm(
+            x,
+            (
+                h[..., : self.hidden_state_dim // 2],
+                h[..., self.hidden_state_dim // 2 :],
+            ),
+        )
+        x = torch.cat((x, ht), dim=-1)
+        hidden_state = torch.cat((ht, ct), dim=-1)
+        return x, hidden_state
+
+
 class IQLearn:
     def __init__(
         self,
@@ -377,11 +300,10 @@ class IQLearn:
         phi: Callable[[torch.Tensor], torch.Tensor] | None = None,
         regularizer: Callable[[torch.Tensor], torch.Tensor] | None = None,
         online_size: int = 256,
-        actor_net: nn.Module | None = None,
+        actor_net: type = ActorNet,
+        feature_extractor: type | None = None,
         q_cls: type = SoftQNetwork,
         sac_args: Args | dict[str, Any] | None = None,
-        hidden_state_dims=(0, 0, 0),
-        hidden_state_net=None,
     ):
         if sac_args is None:
             self.args = Args()
@@ -393,22 +315,7 @@ class IQLearn:
         self.online_size = online_size
         self.demonstration_buffer = None
 
-        self.hidden_state_dims = hidden_state_dims
-        self.shared_hidden_states = len(self.hidden_state_dims) == 1
-        if self.shared_hidden_states:
-            self.actor_hidden_state_dim = self.hidden_state_dims[0]
-            self.qf1_hidden_state_dim = self.hidden_state_dims[0]
-            self.qf2_hidden_state_dim = self.hidden_state_dims[0]
-            self.get_actor_hidden_state = lambda x: x[0]
-            self.get_qf1_hidden_state = lambda x: x[0]
-            self.get_qf2_hidden_state = lambda x: x[0]
-        else:
-            self.actor_hidden_state_dim = self.hidden_state_dims[0]
-            self.qf1_hidden_state_dim = self.hidden_state_dims[1]
-            self.qf2_hidden_state_dim = self.hidden_state_dims[2]
-            self.get_actor_hidden_state = lambda x: x[0]
-            self.get_qf1_hidden_state = lambda x: x[1]
-            self.get_qf2_hidden_state = lambda x: x[2]
+        self.hidden_state_dim = self.args.hidden_state_dim
 
         if phi is None:
             self.phi = default_phi
@@ -445,108 +352,48 @@ class IQLearn:
             env.observation_space, gym.spaces.Box
         ), "only continuous observation space is supported"
 
-        self.actor = Actor(
-            env, self, actor_net, hidden_state_dim=self.actor_hidden_state_dim
+        self.set_env(env)
+        self.obs = None
+        self.continuous = isinstance(self.env.action_space, gym.spaces.Box)
+
+        if feature_extractor is None:
+            feature_extractor = (
+                IdentityExtractor if self.hidden_state_dim == 0 else LSTMExtractor
+            )
+
+        self.feature_extractor = feature_extractor(
+            np.prod(self.env.observation_space.shape), 32, self.hidden_state_dim
         ).to(self.args.device)
-        self.qf1 = q_cls(env, hidden_state_dim=self.qf1_hidden_state_dim).to(
-            self.args.device
-        )
-        self.qf2 = q_cls(env, hidden_state_dim=self.qf2_hidden_state_dim).to(
-            self.args.device
-        )
+
+        if self.hidden_state_dim == 0:
+            input_dim = np.prod(self.env.observation_space.shape)
+        else:
+            input_dim = self.feature_extractor.output_dim
+
+        self.actor = Actor(env, self, input_dim, actor_net)
+
+        if self.continuous:
+            input_dim += np.prod(self.env.action_space.shape)
+            q_output_dim = 1
+        else:
+            q_output_dim = self.env.action_space.n
+
+        self.qf1 = q_cls(input_dim, q_output_dim).to(self.args.device)
+        self.qf2 = q_cls(input_dim, q_output_dim).to(self.args.device)
+
         self.mc_qf1 = None
         self.mc_qf2 = None
         if self.args.use_lambda_discrepancy:
-            self.mc_qf1 = q_cls(env, hidden_state_dim=self.qf1_hidden_state_dim).to(
-                self.args.device
-            )
-            self.mc_qf2 = q_cls(env, hidden_state_dim=self.qf2_hidden_state_dim).to(
-                self.args.device
-            )
-        if self.shared_hidden_states:
-            self.qf1.lstm = self.actor.lstm
-            self.qf2.lstm = self.actor.lstm
-            if self.args.use_lambda_discrepancy:
-                self.mc_qf1.lstm = self.actor.lstm
-                self.mc_qf2.lstm = self.actor.lstm
+            self.mc_qf1 = q_cls(input_dim, q_output_dim).to(self.args.device)
+            self.mc_qf2 = q_cls(input_dim, q_output_dim).to(self.args.device)
         if self.args.use_targets:
-            self.qf1_target = q_cls(env, hidden_state_dim=self.qf1_hidden_state_dim).to(
-                self.args.device
-            )
-            self.qf2_target = q_cls(env, hidden_state_dim=self.qf2_hidden_state_dim).to(
-                self.args.device
-            )
+            self.qf1_target = q_cls(input_dim, q_output_dim).to(self.args.device)
+            self.qf2_target = q_cls(input_dim, q_output_dim).to(self.args.device)
             self.qf1_target.load_state_dict(self.qf1.state_dict())
             self.qf2_target.load_state_dict(self.qf2.state_dict())
         else:
             self.qf1_target = self.qf1
             self.qf2_target = self.qf2
-
-        if hidden_state_net is None:
-
-            def hidden_state_net(x, a, h):
-                if isinstance(x, torch.Tensor):
-                    x = x.detach().clone()
-                    a = a.detach().clone()
-                    h = tuple(s.detach().clone() for s in h)
-                else:
-                    x = torch.tensor(x).to(self.args.device)
-                    a = torch.tensor(a).to(self.args.device)
-                    h = tuple(torch.tensor(s).to(self.args.device) for s in h)
-
-                def get_hidden_state(lstm, input, hidden_state):
-                    h, c = lstm(
-                        input,
-                        (
-                            hidden_state[..., : hidden_state.shape[-1] // 2],
-                            hidden_state[..., hidden_state.shape[-1] // 2 :],
-                        ),
-                    )
-                    return torch.cat((h, c), dim=-1).detach().cpu().numpy()
-
-                xa = x
-                if self.qf1_hidden_state_dim > 0 or self.qf2_hidden_state_dim > 0:
-                    if type(self.env.action_space) == gym.spaces.Box:
-                        xa = torch.cat([x, a], -1)
-
-                if not self.shared_hidden_states:
-                    return (
-                        (
-                            get_hidden_state(
-                                self.actor.lstm, x, self.get_actor_hidden_state(h)
-                            )
-                            if self.hidden_state_dims[0] > 0
-                            else np.array((0,))
-                        ),
-                        (
-                            get_hidden_state(
-                                self.qf1_target.lstm, xa, self.get_qf1_hidden_state(h)
-                            )
-                            if self.hidden_state_dims[1] > 0
-                            else np.array((0,))
-                        ),
-                        (
-                            get_hidden_state(
-                                self.qf2_target.lstm, xa, self.get_qf2_hidden_state(h)
-                            )
-                            if self.hidden_state_dims[2] > 0
-                            else np.array((0,))
-                        ),
-                    )
-                else:
-                    return (
-                        (
-                            get_hidden_state(
-                                self.actor.lstm, x, self.get_actor_hidden_state(h)
-                            )
-                            if self.hidden_state_dims[0] > 0
-                            else np.array((0,))
-                        ),
-                    )
-
-            self.hidden_state_net = hidden_state_net
-        else:
-            self.hidden_state_net = hidden_state_net
 
         # Automatic entropy tuning
         if self.args.autotune:
@@ -562,9 +409,9 @@ class IQLearn:
         else:
             self.alpha = self.args.alpha
             self.a_optimizer = None
+
         self.recreate_optimizers()
 
-        self.set_env(env)
         self.setup_writer()
 
         self.env.observation_space.dtype = np.float32  # type: ignore
@@ -574,30 +421,44 @@ class IQLearn:
 
     def recreate_optimizers(self):
         q_parameters = list(self.qf1.parameters()) + list(self.qf2.parameters())
+        actor_parameters = list(self.actor.net.parameters())
         if self.args.use_lambda_discrepancy:
             q_parameters += list(self.mc_qf1.parameters()) + list(
                 self.mc_qf2.parameters()
             )
-            self.lambda_optimizer = optim.Adam(self.actor.lstm.parameters(), lr=self.args.policy_lr)
+            self.lambda_optimizer = optim.Adam(
+                self.feature_extractor.parameters(), lr=self.args.policy_lr
+            )
+        if (
+            self.args.update_feature_extractor_with_losses
+            or not self.args.use_lambda_discrepancy
+        ):
+            q_parameters += list(self.feature_extractor.parameters())
 
         self.q_optimizer = optim.Adam(q_parameters, lr=self.args.q_lr)
-        self.actor_optimizer = optim.Adam(
-            list(self.actor.parameters()), lr=self.args.policy_lr
-        )
+
+        self.actor_optimizer = optim.Adam(actor_parameters, lr=self.args.policy_lr)
         if self.args.autotune:
             self.a_optimizer = optim.Adam([self.log_alpha], lr=self.args.q_lr)
 
     def reset_replay_buffer(self):
+        def hidden_state_net(x, a, h):
+            x = torch.tensor(x).to(self.args.device)
+            h = tuple(torch.tensor(s).to(self.args.device) for s in h)
+
+            h, c = self.feature_extractor(x, h)
+            return (torch.cat((h, c), dim=-1).detach().cpu().numpy(),)
+
         self.env = RecorderWrapper(
             self.env.env,
             self.args.gamma,
             self.args.buffer_size,
-            self.env.hidden_state_dims,
-            self.env.hidden_state_net,
+            (self.env.hidden_state_dim,),
+            hidden_state_net,
         )
 
     def setup_writer(self):
-        self.run_name = f"{self.env.spec.id if self.env is not None and self.env.spec is not None else ''}__{self.args.exp_name}__{self.args.seed}__{int(time.time())}"
+        self.run_name = f"{self.args.exp_name}__{self.env.spec.id if self.env is not None and self.env.spec is not None else ''}__{self.args.seed}__{int(time.time())}"
         if self.args.tensorboard_dir is None:
             self.writer = None
         else:
@@ -615,20 +476,34 @@ class IQLearn:
     def set_env(self, env):
         self.env = env
         self.env = gym.wrappers.RecordEpisodeStatistics(self.env)
+
+        def hidden_state_net(x, a, h):
+            x = torch.tensor(x).to(self.args.device)
+            h = torch.tensor(h[0]).to(self.args.device)
+
+            x, h = self.feature_extractor(x, h)
+            return (h.detach().cpu().numpy(),)
+
         self.env = RecorderWrapper(
             self.env,
             self.args.gamma,
             self.args.buffer_size,
-            self.hidden_state_dims,
-            self.hidden_state_net,
+            (self.hidden_state_dim,),
+            hidden_state_net,
         )
-        self.setup_writer()
 
     def set_demonstration_buffer(self, demonstration_buffer):
+        def hidden_state_net(x, a, h):
+            x = torch.tensor(x).to(self.args.device)
+            h = torch.tensor(h[0]).to(self.args.device)
+
+            x, h = self.feature_extractor(x, h)
+            return (h.detach().cpu().numpy(),)
+
         self.demonstration_buffer = demonstration_buffer
-        self.demonstration_buffer.hidden_state_net = self.hidden_state_net
-        assert (
-            self.demonstration_buffer.hidden_state_dims == self.hidden_state_dims
+        self.demonstration_buffer.hidden_state_net = hidden_state_net
+        assert self.demonstration_buffer.hidden_state_dims == (
+            self.hidden_state_dim,
         ), "demonstration buffer has feature same hidden state dims as training"
 
     def learn(self, timesteps: int, progress="tqdm"):
@@ -782,32 +657,31 @@ class IQLearn:
                         )
             self.n_updates += 1
 
-    def get_values(self, observations, hidden_states, actions=None):
+    def get_values(self, observations, actions=None):
         if actions is None:
             if isinstance(self.env.action_space, gym.spaces.Discrete):
-                qf1_pi, _ = self.qf1(
-                    observations, None, self.get_qf1_hidden_state(hidden_states), False
-                )
-                qf2_pi, _ = self.qf2(
-                    observations, None, self.get_qf2_hidden_state(hidden_states), False
-                )
+                qf1_pi = self.qf1(observations)
+                qf2_pi = self.qf2(observations)
                 min_qf_pi = torch.min(qf1_pi, qf2_pi)
-                action_probs, _ = self.actor.get_prob_log(
-                    observations, hidden_states[0]
-                )
+                action_probs, _ = self.actor.get_prob_log(observations)
                 return (action_probs * min_qf_pi).sum(-1)
 
-            actions, _, _, _ = self.actor.get_action(
-                observations, self.get_actor_hidden_state(hidden_states)
-            )
+            actions, _, _ = self.actor.get_action(observations)
 
-        qf1_a_values = self.qf1(
-            observations, actions, self.get_qf1_hidden_state(hidden_states)
-        )[0].view(-1)
-        qf2_a_values = self.qf2(
-            observations, actions, self.get_qf2_hidden_state(hidden_states)
-        )[0].view(-1)
+        qf1_a_values = self._get_q_values(self.qf1, observations, actions)
+        qf2_a_values = self._get_q_values(self.qf2, observations, actions)
+
         return torch.min(qf1_a_values, qf2_a_values).unsqueeze(1)
+
+    def _get_q_values(self, net, observations, actions):
+        if isinstance(self.env.action_space, gym.spaces.Discrete):
+            qf_a_values = (
+                net(observations).gather(1, actions.unsqueeze(1).long()).view(-1)
+            )
+        else:
+            qf_a_values = net(torch.cat((observations, actions), dim=-1)).view(-1)
+
+        return qf_a_values
 
     def update_critic(self, data, live_data=None):
         demonstration_loss = (
@@ -911,20 +785,21 @@ class IQLearn:
         obs = obs.unsqueeze(0)  # type: ignore
         if hidden_state is not None:
             hidden_state = hidden_state.unsqueeze(0)  # type: ignore
-        action, _, mean, hidden_state = self.actor.get_action(obs, hidden_state)
+        feature_obs, hidden_state = self.feature_extractor(obs, hidden_state)
+        action, _, mean = self.actor.get_action(feature_obs)
         prediction = mean if deterministic else action
         prediction = prediction.detach().cpu().numpy()
         prediction = prediction[0]
         if hidden_state is not None:
-            hidden_state = hidden_state.detach().cpu().numpy()
-            hidden_state = self.get_actor_hidden_state(hidden_state)
+            hidden_state = hidden_state[0].detach().cpu().numpy()
         return prediction, hidden_state
 
     def sac_learn(self, steps, progress="tqdm"):
-        obs, _ = self.env.reset()
-        hidden_state = torch.zeros(
-            (1, self.actor_hidden_state_dim), dtype=torch.float32
-        ).to(self.args.device)
+        if self.obs is None:
+            self.obs, _ = self.env.reset()
+            self.hidden_state = torch.zeros(
+                (1, self.hidden_state_dim), dtype=torch.float32
+            ).to(self.args.device)
         if progress == "tqdm":
             it = tqdm(range(steps))
         else:
@@ -934,12 +809,15 @@ class IQLearn:
             # if self.n_updates < self.args.learning_starts:
             #     action = np.array(self.env.action_space.sample())
             # else:
-            torch_obs = torch.Tensor(obs).unsqueeze(0).to(self.args.device)
-            action, _, _, hidden_state = self.actor.get_action(
-                torch_obs,
-                hidden_state,
+            torch_obs = torch.Tensor(self.obs).unsqueeze(0).to(self.args.device)
+            feature_obs, hidden_state = self.feature_extractor(
+                torch_obs, self.hidden_state
             )
-            probs = self.actor.get_action_probs(torch_obs, action, hidden_state)
+
+            action, _, _ = self.actor.get_action(
+                feature_obs,
+            )
+            probs = self.actor.get_action_probs(feature_obs, action)
             action = action.detach().cpu().numpy()[0]
 
             # TRY NOT TO MODIFY: execute the game and log data.
@@ -958,31 +836,43 @@ class IQLearn:
                     )
 
             # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
-            obs = next_obs
+            self.obs = next_obs
             if termination or truncated:
-                obs, _ = self.env.reset()
+                self.obs, _ = self.env.reset()
+                self.hidden_state = torch.zeros(
+                    (1, self.hidden_state_dim), dtype=torch.float32
+                ).to(self.args.device)
 
             # ALGO LOGIC: training.
             if self.n_updates > self.args.learning_starts:
                 data = self.env.sample(
                     self.args.batch_size,
                     self.args.device,
-                    full_episodes_only=self.args.use_lambda_discrepancy,
+                    # full_episodes_only=self.args.use_lambda_discrepancy,
+                )
+                feature_obs = torch.cat(
+                    (
+                        data.observations,
+                        data.hidden_states[0][..., : self.hidden_state_dim // 2],
+                    ),
+                    dim=-1,
+                )
+                next_feature_obs, _ = self.feature_extractor(
+                    data.next_observations, data.hidden_states[0]
                 )
                 with torch.no_grad():
-                    next_state_actions, next_state_log_pi, _, _ = self.actor.get_action(
-                        data.next_observations,
-                        self.get_actor_hidden_state(data.hidden_states),
+                    next_state_actions, next_state_log_pi, _ = self.actor.get_action(
+                        next_feature_obs,
                     )
-                    qf1_next_target, _ = self.qf1_target(
-                        data.next_observations,
+                    qf1_next_target = self._get_q_values(
+                        self.qf1_target,
+                        next_feature_obs,
                         next_state_actions,
-                        self.get_qf1_hidden_state(data.hidden_states),
                     )
-                    qf2_next_target, _ = self.qf2_target(
-                        data.next_observations,
+                    qf2_next_target = self._get_q_values(
+                        self.qf2_target,
+                        next_feature_obs,
                         next_state_actions,
-                        self.get_qf2_hidden_state(data.hidden_states),
                     )
                     min_qf_next_target = (
                         torch.min(qf1_next_target, qf2_next_target)
@@ -992,16 +882,12 @@ class IQLearn:
                         1 - data.terminated.float().flatten()
                     ) * self.args.gamma * (min_qf_next_target).view(-1)
 
-                qf1_a_values, _ = self.qf1(
-                    data.observations,
-                    data.actions,
-                    self.get_qf1_hidden_state(data.hidden_states),
+                qf1_a_values = self._get_q_values(
+                    self.qf1, feature_obs.detach(), data.actions
                 )
                 qf1_a_values = qf1_a_values.view(-1)
-                qf2_a_values, _ = self.qf2(
-                    data.observations,
-                    data.actions,
-                    self.get_qf2_hidden_state(data.hidden_states),
+                qf2_a_values = self._get_q_values(
+                    self.qf2, feature_obs.detach(), data.actions
                 )
                 qf2_a_values = qf2_a_values.view(-1)
 
@@ -1010,16 +896,56 @@ class IQLearn:
                 qf_loss = qf1_loss + qf2_loss
 
                 if self.args.use_lambda_discrepancy:
-                    mc_qf1_a_values, _ = self.mc_qf1(
-                        data.observations,
-                        data.actions,
-                        self.get_qf1_hidden_state(data.hidden_states),
+                    mc_data = self.env.sample(
+                        self.args.batch_size,
+                        self.args.device,
+                        full_episodes_only=True,
+                        sample_by_importance=self.args.use_importance_sampling,
+                    )
+                    mc_feature_obs = torch.cat(
+                        (
+                            mc_data.observations,
+                            mc_data.hidden_states[0][..., : self.hidden_state_dim // 2],
+                        ),
+                        dim=-1,
+                    )
+
+                    mc_qf1_a_values = self._get_q_values(
+                        self.mc_qf1, mc_feature_obs.detach(), mc_data.actions
                     )
                     mc_qf1_a_values = mc_qf1_a_values.view(-1)
-                    mc_qf2_a_values, _ = self.mc_qf2(
-                        data.observations,
-                        data.actions,
-                        self.get_qf2_hidden_state(data.hidden_states),
+                    mc_qf2_a_values = self._get_q_values(
+                        self.mc_qf2, mc_feature_obs.detach(), mc_data.actions
+                    )
+                    mc_qf2_a_values = mc_qf2_a_values.view(-1)
+
+                    mc_qf1_loss = F.mse_loss(
+                        mc_qf1_a_values, mc_data.returns, reduction="none"
+                    )
+                    mc_qf2_loss = F.mse_loss(
+                        mc_qf2_a_values, mc_data.returns, reduction="none"
+                    )
+                    qf_loss += (
+                        mc_data.importance_factors * (mc_qf1_loss + mc_qf2_loss)
+                    ).mean()
+
+                    # re-calculate q values to incorporate gradients from lstm
+                    if self.args.use_action_recalculation:
+                        actions, _, _ = self.actor.get_action(feature_obs)
+                        actions = actions.detach()
+                    else:
+                        actions = data.actions
+                    qf1_a_values = self._get_q_values(self.qf1, feature_obs, actions)
+                    qf1_a_values = qf1_a_values.view(-1)
+                    qf2_a_values = self._get_q_values(self.qf2, feature_obs, actions)
+                    qf2_a_values = qf2_a_values.view(-1)
+
+                    mc_qf1_a_values = self._get_q_values(
+                        self.mc_qf1, feature_obs, actions
+                    )
+                    mc_qf1_a_values = mc_qf1_a_values.view(-1)
+                    mc_qf2_a_values = self._get_q_values(
+                        self.mc_qf2, feature_obs, actions
                     )
                     mc_qf2_a_values = mc_qf2_a_values.view(-1)
 
@@ -1028,20 +954,21 @@ class IQLearn:
                         - torch.min(mc_qf1_a_values, mc_qf2_a_values)
                     ) ** 2
                     lambda_discrepancy = lambda_discrepancy.mean()
-
-                    print(data.importance_factors.mean())
-                    mc_qf1_loss = F.mse_loss(
-                        mc_qf1_a_values, data.returns, reduction='none'
-                    )
-                    mc_qf2_loss = F.mse_loss(
-                        mc_qf2_a_values, data.returns, reduction='none'
-                    )
-                    qf_loss += (data.importance_factors*(mc_qf1_loss + mc_qf2_loss)).mean()
+                    qf_loss = 0.9 * qf_loss + 0.1 * lambda_discrepancy
 
                     if self.n_updates % 100 == 0 and self.writer is not None:
                         self.writer.add_scalar(
                             "charts/returns",
                             data.returns.mean().detach().cpu().numpy().item(),
+                            self.n_updates,
+                        )
+                        self.writer.add_scalar(
+                            "charts/importance_factors",
+                            mc_data.importance_factors.mean()
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .item(),
                             self.n_updates,
                         )
                         self.writer.add_scalar(
@@ -1055,10 +982,14 @@ class IQLearn:
                             self.n_updates,
                         )
                         self.writer.add_scalar(
-                            "losses/mc_qf1_loss", mc_qf1_loss.mean().item(), self.n_updates
+                            "losses/mc_qf1_loss",
+                            mc_qf1_loss.mean().item(),
+                            self.n_updates,
                         )
                         self.writer.add_scalar(
-                            "losses/mc_qf2_loss", mc_qf2_loss.mean().item(), self.n_updates
+                            "losses/mc_qf2_loss",
+                            mc_qf2_loss.mean().item(),
+                            self.n_updates,
                         )
                         self.writer.add_scalar(
                             "charts/lambda-discrepancy",
@@ -1073,21 +1004,15 @@ class IQLearn:
                         self.args.policy_frequency
                     ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
 
-                        actor_loss = self.actor.get_actor_loss(
-                            data.observations, data.hidden_states
-                        )
+                        actor_loss = self.actor.get_actor_loss(feature_obs)
 
                         qf_loss += actor_loss
                         if self.args.autotune:
                             with torch.no_grad():
-                                _, log_pi, _, _ = self.actor.get_action(
-                                    data.observations,
-                                    self.get_actor_hidden_state(data.hidden_states),
-                                )
+                                _, log_pi, _ = self.actor.get_action(feature_obs)
                                 probs = self.actor.get_action_probs(
-                                    data.observations,
+                                    feature_obs,
                                     data.actions,
-                                    self.get_actor_hidden_state(data.hidden_states),
                                 )
                                 self.env.override_policy_probabilities_last_sample(
                                     probs.detach().cpu().numpy()
@@ -1106,7 +1031,6 @@ class IQLearn:
                 self.actor_optimizer.zero_grad()
                 if self.args.use_lambda_discrepancy:
                     self.lambda_optimizer.zero_grad()
-                    lambda_discrepancy.backward(retain_graph=True)
                 qf_loss.backward()
                 if self.args.use_lambda_discrepancy:
                     self.lambda_optimizer.step()

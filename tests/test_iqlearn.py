@@ -1055,7 +1055,7 @@ class PartialCartpoleWrapper(gym.Wrapper):
 @pytest.mark.slow
 def test_sac_cartpole_shared_lstm():
     # assemble
-    env = gym.make("CartPole-v1")
+    env = PartialCartpoleWrapper(gym.make("CartPole-v1"))
     iqlearn = IQLearn(
         env,
         sac_args={
@@ -1064,24 +1064,25 @@ def test_sac_cartpole_shared_lstm():
             # "tensorboard_dir": None,
             "use_lambda_discrepancy": True,
             "recalculate_hidden_states_in_update": True,
+            "hidden_state_recalculation_interval": 1,
             "buffer_size": 10000,
             "learning_starts": 500,
-            "q_lr": 0.0001,
-            "policy_lr": 0.0001,
-            "tau": 0.0005,
+            # "q_lr": 0.0001,
+            # "policy_lr": 0.0001,
+            # "tau": 0.0005,
         },
-        hidden_state_dims=(10,),
+        hidden_state_dim=100,
     )
 
     # act
-    iqlearn.sac_learn(150000)
+    iqlearn.sac_learn(1500000)
 
     # assert
     steps = 0
     obs, info = env.reset()
-    hidden_state = np.zeros(10, dtype=np.float32)
+    hidden_state = np.zeros(100, dtype=np.float32)
     while True:
-        action, hidden_state = iqlearn.predict(obs, hidden_state, True)
+        action, hidden_state = iqlearn.predict(obs, hidden_state, deterministic=True)
         obs, _, terminated, truncated, _ = env.step(action)
         steps += 1
         if terminated or truncated:

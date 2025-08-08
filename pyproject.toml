@@ -12,7 +12,8 @@ dependencies = [
   "stable_baselines3",
   "huggingface-sb3",
   "seaborn",
-  "scipy"
+  "scipy",
+  "pyyaml",
 ]
 requires-python = ">=3.12"
 authors = [
