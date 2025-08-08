@@ -44,8 +44,7 @@ with open(sys.argv[1]) as file:
 
 ## override some args
 np.random.seed(None)
-seed = np.random.randint(200000)
-seed = 18393
+seed = np.random.randint(2000000)
 sac_args["seed"] = seed
 sac_args["device"] = device
 
