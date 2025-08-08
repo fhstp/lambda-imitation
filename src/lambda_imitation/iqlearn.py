@@ -343,6 +343,9 @@ class IQLearn:
         random.seed(self.args.seed)
         np.random.seed(self.args.seed)
         torch.manual_seed(self.args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(self.args.seed)
+            torch.cuda.manual_seed_all(self.args.seed)
         torch.backends.cudnn.deterministic = self.args.torch_deterministic
 
         assert isinstance(env.action_space, gym.spaces.Box) or isinstance(
@@ -796,7 +799,7 @@ class IQLearn:
 
     def sac_learn(self, steps, progress="tqdm"):
         if self.obs is None:
-            self.obs, _ = self.env.reset()
+            self.obs, _ = self.env.reset(seed=np.random.randint(2147483647))
             self.hidden_state = torch.zeros(
                 (1, self.hidden_state_dim), dtype=torch.float32
             ).to(self.args.device)
@@ -838,7 +841,7 @@ class IQLearn:
             # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
             self.obs = next_obs
             if termination or truncated:
-                self.obs, _ = self.env.reset()
+                self.obs, _ = self.env.reset(seed=np.random.randint(2147483647))
                 self.hidden_state = torch.zeros(
                     (1, self.hidden_state_dim), dtype=torch.float32
                 ).to(self.args.device)

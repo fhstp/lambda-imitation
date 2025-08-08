@@ -45,6 +45,7 @@ with open(sys.argv[1]) as file:
 ## override some args
 np.random.seed(None)
 seed = np.random.randint(200000)
+seed = 18393
 sac_args["seed"] = seed
 sac_args["device"] = device
 
@@ -63,7 +64,7 @@ for i in range(train_steps // eval_interval):
     steps_runs = []
     for _ in range(10):
         steps = 0
-        obs, info = eval_env.reset()
+        obs, info = eval_env.reset(seed=np.random.randint(2147483647))
         hidden_state = np.zeros(iqlearn.args.hidden_state_dim, dtype=np.float32)
         while True:
             action, hidden_state = iqlearn.predict(
