@@ -15,7 +15,7 @@ policy_lr: 0.0003
 q_lr: 0.0003
 recalculate_hidden_states_in_update: true
 seed: 1
-target_entropy: -1.0
+target_entropy: 0.2
 target_network_frequency: 1
 tau: 0.005
 tensorboard_dir: runs
