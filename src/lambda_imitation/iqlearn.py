@@ -458,6 +458,7 @@ class IQLearn:
             self.args.buffer_size,
             (self.env.hidden_state_dim,),
             hidden_state_net,
+            device=self.args.device
         )
 
     def setup_writer(self):
@@ -493,6 +494,7 @@ class IQLearn:
             self.args.buffer_size,
             (self.hidden_state_dim,),
             hidden_state_net,
+            device=self.args.device
         )
 
     def set_demonstration_buffer(self, demonstration_buffer):

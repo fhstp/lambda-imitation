@@ -23,7 +23,7 @@ class RecorderSample(NamedTuple):
 class RecorderWrapper(gym.Wrapper):
 
     def __init__(
-        self, env, gamma, buffer_size, hidden_state_dims=(0,), hidden_state_net=None
+        self, env, gamma, buffer_size, hidden_state_dims=(0,), hidden_state_net=None, device='cpu'
     ):
         """
         Gymnasium Wrapper for automatically logging episodes in a circular buffer. Buffer size has to be big enough for single-episode rollouts! (for return calculation)
@@ -52,25 +52,25 @@ class RecorderWrapper(gym.Wrapper):
         self.action_space = env.action_space
 
         self.observations = _generate_collection(
-            self.observation_space, self.buffer_size
+            self.observation_space, self.buffer_size, device
         )
-        self.actions = _generate_collection(self.action_space, self.buffer_size)
-        self.rewards = torch.zeros(self.buffer_size, dtype=torch.float32)
-        self.returns = torch.zeros(self.buffer_size, dtype=torch.float32)
-        self.behavior_probabilities = torch.ones(self.buffer_size, dtype=torch.float32)
-        self.policy_probabilities = torch.zeros(self.buffer_size, dtype=torch.float32)
-        self.importance_factors = torch.zeros(self.buffer_size, dtype=torch.float32)
-        self.terminated = torch.zeros(self.buffer_size, dtype=torch.bool)
-        self.truncated = torch.zeros(self.buffer_size, dtype=torch.bool)
-        self.setup_hidden_states(hidden_state_dims, hidden_state_net)
+        self.actions = _generate_collection(self.action_space, self.buffer_size, device)
+        self.rewards = torch.zeros(self.buffer_size, dtype=torch.float32).to(device)
+        self.returns = torch.zeros(self.buffer_size, dtype=torch.float32).to(device)
+        self.behavior_probabilities = torch.ones(self.buffer_size, dtype=torch.float32).to(device)
+        self.policy_probabilities = torch.zeros(self.buffer_size, dtype=torch.float32).to(device)
+        self.importance_factors = torch.zeros(self.buffer_size, dtype=torch.float32).to(device)
+        self.terminated = torch.zeros(self.buffer_size, dtype=torch.bool).to(device)
+        self.truncated = torch.zeros(self.buffer_size, dtype=torch.bool).to(device)
+        self.setup_hidden_states(hidden_state_dims, hidden_state_net, device)
 
         self.pos = 0
         self.last_return_calculation = 0
         self.last_sampled_indices = None
 
-    def setup_hidden_states(self, hidden_state_dims, hidden_state_net):
+    def setup_hidden_states(self, hidden_state_dims, hidden_state_net, device):
         self.hidden_states = tuple(
-            torch.zeros((self.buffer_size, hidden_state_dim), dtype=torch.float32)
+            torch.zeros((self.buffer_size, hidden_state_dim), dtype=torch.float32).to(device)
             for hidden_state_dim in hidden_state_dims
         )
         self.hidden_state_dims = hidden_state_dims
@@ -524,11 +524,11 @@ def _add_collection_entry(space, collection, entry, pos):
         _add_collection_entry(space[key], collection[key], entry[key], pos)
 
 
-def _generate_collection(space, buffer_size):
+def _generate_collection(space, buffer_size, device):
     if type(space) == Box:
-        return torch.zeros((buffer_size, *space.shape), dtype=torch.float32)
+        return torch.zeros((buffer_size, *space.shape), dtype=torch.float32).to(device)
     if type(space) == Discrete:
-        return torch.zeros(buffer_size, dtype=torch.int32)
+        return torch.zeros(buffer_size, dtype=torch.int32).to(device)
     if type(space) == Dict:
         collection = {}
         for key in space:
