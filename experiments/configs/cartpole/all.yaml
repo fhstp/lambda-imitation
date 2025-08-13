@@ -19,7 +19,7 @@ seed: 1
 target_entropy: 0.2
 target_network_frequency: 1
 tau: 0.005
-tensorboard_dir: null
+tensorboard_dir: runs
 torch_deterministic: true
 track: false
 update_feature_extractor_with_losses: true
