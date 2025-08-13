@@ -6,6 +6,7 @@ autotune: true
 batch_size: 256
 buffer_size: 10000
 device: cpu
+episode_recalculation_interval: 500
 gamma: 0.99
 hidden_state_dim: 100
 hidden_state_recalculation_interval: 1
@@ -18,7 +19,7 @@ seed: 1
 target_entropy: 0.2
 target_network_frequency: 1
 tau: 0.005
-tensorboard_dir: runs
+tensorboard_dir: null
 torch_deterministic: true
 track: false
 update_feature_extractor_with_losses: true
