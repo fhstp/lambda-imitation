@@ -91,9 +91,11 @@ class RecorderWrapper(gym.Wrapper):
 
     def setup_hidden_states(self, hidden_state_dims, hidden_state_net, device):
         self.hidden_states = tuple(
-            torch.zeros((self.buffer_size, hidden_state_dim), dtype=torch.float32).to(
-                device
-            )
+            torch.zeros(
+                (self.buffer_size, hidden_state_dim),
+                requires_grad=False,
+                dtype=torch.float32,
+            ).to(device)
             for hidden_state_dim in hidden_state_dims
         )
         self.hidden_state_dims = hidden_state_dims
@@ -106,23 +108,24 @@ class RecorderWrapper(gym.Wrapper):
         assert (
             self.hidden_state_net is not None
         ), "hidden state recalculation only possible for given hidden_state_net!"
-        hidden_states = tuple(
-            torch.zeros((hidden_state_dim), dtype=torch.float32)
-            for hidden_state_dim in self.hidden_state_dims
-        )
-        for i in range(self.pos):
-            obs = self.get_observation_at(i)
-            action = self.get_action_at(i)
-            hidden_states = self.hidden_state_net(obs, action, hidden_states)
-            for k, hidden_state in enumerate(hidden_states):
-                self.hidden_states[k][i + 1] = hidden_state
-            if self.terminated[i] or self.truncated[i]:
-                hidden_states = tuple(
-                    torch.zeros((hidden_state_dim), dtype=torch.float32)
-                    for hidden_state_dim in self.hidden_state_dims
-                )
+        with torch.no_grad():
+            hidden_states = tuple(
+                torch.zeros((hidden_state_dim), dtype=torch.float32)
+                for hidden_state_dim in self.hidden_state_dims
+            )
+            for i in range(self.pos):
+                obs = self.get_observation_at(i)
+                action = self.get_action_at(i)
+                hidden_states = self.hidden_state_net(obs, action, hidden_states)
                 for k, hidden_state in enumerate(hidden_states):
                     self.hidden_states[k][i + 1] = hidden_state
+                if self.terminated[i] or self.truncated[i]:
+                    hidden_states = tuple(
+                        torch.zeros((hidden_state_dim), dtype=torch.float32)
+                        for hidden_state_dim in self.hidden_state_dims
+                    )
+                    for k, hidden_state in enumerate(hidden_states):
+                        self.hidden_states[k][i + 1] = hidden_state
 
     def reset(self, **kwargs):
         """Resets the environment to an initial internal state, returning an initial observation and info and recording the state..
@@ -451,8 +454,7 @@ class RecorderWrapper(gym.Wrapper):
     def get_sb3_buffer(self, device="auto"):
         """Converts the data to a sb3 usable buffer"""
         try:
-            from stable_baselines3.common.buffers import (DictReplayBuffer,
-                                                          ReplayBuffer)
+            from stable_baselines3.common.buffers import DictReplayBuffer, ReplayBuffer
         except ImportError:
             raise Exception(
                 "Please install stable_baselines3 to use this feature, e.g. by running 'pip install stable_baselines3"

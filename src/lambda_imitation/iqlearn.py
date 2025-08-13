@@ -829,7 +829,7 @@ class IQLearn:
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, termination, truncated, info = self.env.step(action)
-            self.env.set_probabilities_of_last_action(probs[0])
+            self.env.set_probabilities_of_last_action(probs[0].detach())
             if self.n_updates % self.args.episode_recalculation_interval == 0 :
                 self.env.recalculate_episodes()
 
