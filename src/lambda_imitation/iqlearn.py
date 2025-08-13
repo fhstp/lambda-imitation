@@ -763,7 +763,7 @@ class IQLearn:
                         self.get_actor_hidden_state(data.hidden_states),
                     )
                     self.env.override_policy_probabilities_last_sample(
-                        probs.detach().cpu().numpy()
+                        probs.detach()
                     )
                 alpha_loss = (
                     -self.log_alpha.exp() * (log_pi + self.target_entropy)
