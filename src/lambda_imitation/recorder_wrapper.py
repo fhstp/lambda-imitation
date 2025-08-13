@@ -55,13 +55,13 @@ class RecorderWrapper(gym.Wrapper):
             self.observation_space, self.buffer_size
         )
         self.actions = _generate_collection(self.action_space, self.buffer_size)
-        self.rewards = np.zeros(self.buffer_size, dtype=np.float32)
-        self.returns = np.zeros(self.buffer_size, dtype=np.float32)
-        self.behavior_probabilities = np.ones(self.buffer_size, dtype=np.float32)
-        self.policy_probabilities = np.zeros(self.buffer_size, dtype=np.float32)
-        self.importance_factors = np.zeros(self.buffer_size, dtype=np.float32)
-        self.terminated = np.zeros(self.buffer_size, dtype=np.bool_)
-        self.truncated = np.zeros(self.buffer_size, dtype=np.bool_)
+        self.rewards = torch.zeros(self.buffer_size, dtype=torch.float32)
+        self.returns = torch.zeros(self.buffer_size, dtype=torch.float32)
+        self.behavior_probabilities = torch.ones(self.buffer_size, dtype=torch.float32)
+        self.policy_probabilities = torch.zeros(self.buffer_size, dtype=torch.float32)
+        self.importance_factors = torch.zeros(self.buffer_size, dtype=torch.float32)
+        self.terminated = torch.zeros(self.buffer_size, dtype=torch.bool)
+        self.truncated = torch.zeros(self.buffer_size, dtype=torch.bool)
         self.setup_hidden_states(hidden_state_dims, hidden_state_net)
 
         self.pos = 0
@@ -70,7 +70,7 @@ class RecorderWrapper(gym.Wrapper):
 
     def setup_hidden_states(self, hidden_state_dims, hidden_state_net):
         self.hidden_states = tuple(
-            np.zeros((self.buffer_size, hidden_state_dim), dtype=np.float32)
+            torch.zeros((self.buffer_size, hidden_state_dim), dtype=torch.float32)
             for hidden_state_dim in hidden_state_dims
         )
         self.hidden_state_dims = hidden_state_dims
@@ -84,7 +84,7 @@ class RecorderWrapper(gym.Wrapper):
             self.hidden_state_net is not None
         ), "hidden state recalculation only possible for given hidden_state_net!"
         hidden_states = tuple(
-            np.zeros((hidden_state_dim), dtype=np.float32)
+            torch.zeros((hidden_state_dim), dtype=torch.float32)
             for hidden_state_dim in self.hidden_state_dims
         )
         for i in range(self.pos):
@@ -95,7 +95,7 @@ class RecorderWrapper(gym.Wrapper):
                 self.hidden_states[k][i + 1] = hidden_state
             if self.terminated[i] or self.truncated[i]:
                 hidden_states = tuple(
-                    np.zeros((hidden_state_dim), dtype=np.float32)
+                    torch.zeros((hidden_state_dim), dtype=torch.float32)
                     for hidden_state_dim in self.hidden_state_dims
                 )
                 for k, hidden_state in enumerate(hidden_states):
@@ -132,14 +132,14 @@ class RecorderWrapper(gym.Wrapper):
         obs, info = super().reset(**kwargs)
         self.last_obs = obs
         self.last_hidden_states = tuple(
-            np.zeros((hidden_state_dim), dtype=np.float32)
+            torch.zeros((hidden_state_dim), dtype=torch.float32)
             for hidden_state_dim in self.hidden_state_dims
         )
         mod_pos = self.pos % self.buffer_size
         _add_collection_entry(self.observation_space, self.observations, obs, mod_pos)
         for k, hidden_state_dim in enumerate(self.hidden_state_dims):
-            self.hidden_states[k][mod_pos] = np.zeros(
-                (hidden_state_dim), dtype=np.float32
+            self.hidden_states[k][mod_pos] = torch.zeros(
+                (hidden_state_dim), dtype=torch.float32
             )
         return obs, info
 
@@ -218,7 +218,7 @@ class RecorderWrapper(gym.Wrapper):
         self.pos += 1
         if self.hidden_state_net is not None:
             self.last_hidden_states = self.hidden_state_net(
-                self.last_obs, action, self.last_hidden_states
+                torch.tensor(self.last_obs), action, self.last_hidden_states
             )
             for k, last_hidden_state in enumerate(self.last_hidden_states):
                 self.hidden_states[k][mod_pos] = last_hidden_state
@@ -314,7 +314,7 @@ class RecorderWrapper(gym.Wrapper):
         )
         self.importance_factors[self.last_sampled_indices] = (
             self.importance_factors[(self.last_sampled_indices + 1) % self.buffer_size]
-            * (1 - term_trunc)
+            * (1 - term_trunc.float())
             + term_trunc
         ) * (
             self.policy_probabilities[self.last_sampled_indices]
@@ -341,7 +341,7 @@ class RecorderWrapper(gym.Wrapper):
                 exclusion_len < self.buffer_size
             ), "Last/Current episode was longer than buffer size!"
             upper_bound = self.buffer_size - exclusion_len
-            indices = np.array(range(upper_bound))
+            indices = torch.tensor(range(upper_bound))
             if upper_exclusion_ind > lower_exclusion_ind:
                 indices[lower_exclusion_ind + 1 :] += exclusion_len
             else:
@@ -364,14 +364,15 @@ class RecorderWrapper(gym.Wrapper):
             upper_bound = (
                 self.last_return_calculation if full_episodes_only else self.pos
             )
-            indices = np.array(range(upper_bound))
+            indices = torch.tensor(range(upper_bound))
             # batch_inds = np.random.randint(0, upper_bound, size=batch_size)
         if sample_by_importance:
+            raise NotImplementedError("This is currently not supported...")
             prob = self.importance_factors[indices]
-            prob = prob / np.sum(prob)
-            batch_inds = np.random.choice(indices, batch_size, p=prob)
+            prob = prob / torch.sum(prob)
+            batch_inds = torch.random.choice(indices, batch_size, p=prob)
         else:
-            batch_inds = np.random.choice(indices, batch_size)
+            batch_inds = indices[torch.randint(len(indices), size=(batch_size,))]
         return batch_inds
 
     def _sample(self, batch_inds, mode="numpy"):
@@ -385,39 +386,39 @@ class RecorderWrapper(gym.Wrapper):
         terminated = self.terminated[batch_inds]
         truncated = self.truncated[batch_inds]
         hidden_states = tuple(
-            hidden_state[batch_inds] for hidden_state in self.hidden_states
+            hidden_state[batch_inds].detach() for hidden_state in self.hidden_states
         )
         next_hidden_states = tuple(
-            hidden_state[(batch_inds + 1) % self.buffer_size]
+            hidden_state[(batch_inds + 1) % self.buffer_size].detach()
             for hidden_state in self.hidden_states
         )
 
-        if mode != "numpy":
-            observations = torch.tensor(observations).to(mode)
-            next_observations = torch.tensor(next_observations).to(mode)
-            actions = torch.tensor(actions).to(mode)
-            rewards = torch.tensor(rewards).to(mode)
-            returns = torch.tensor(returns).to(mode)
-            importance_factors = torch.tensor(importance_factors).to(mode)
-            terminated = torch.tensor(terminated).to(mode)
-            truncated = torch.tensor(truncated).to(mode)
-            hidden_states = tuple(
-                torch.tensor(hidden_state).to(mode) for hidden_state in hidden_states
-            )
-            next_hidden_states = tuple(
-                torch.tensor(hidden_state).to(mode)
-                for hidden_state in next_hidden_states
-            )
+        # if mode != "numpy":
+        #     observations = torch.tensor(observations).to(mode)
+        #     next_observations = torch.tensor(next_observations).to(mode)
+        #     actions = torch.tensor(actions).to(mode)
+        #     rewards = torch.tensor(rewards).to(mode)
+        #     returns = torch.tensor(returns).to(mode)
+        #     importance_factors = torch.tensor(importance_factors).to(mode)
+        #     terminated = torch.tensor(terminated).to(mode)
+        #     truncated = torch.tensor(truncated).to(mode)
+        #     hidden_states = tuple(
+        #         torch.tensor(hidden_state).to(mode) for hidden_state in hidden_states
+        #     )
+        #     next_hidden_states = tuple(
+        #         torch.tensor(hidden_state).to(mode)
+        #         for hidden_state in next_hidden_states
+        #     )
 
         return RecorderSample(
-            observations=observations,
-            next_observations=next_observations,
-            actions=actions,
-            rewards=rewards,
-            returns=returns,
-            importance_factors=importance_factors,
-            terminated=terminated,
-            truncated=truncated,
+            observations=observations.detach(),
+            next_observations=next_observations.detach(),
+            actions=actions.detach(),
+            rewards=rewards.detach(),
+            returns=returns.detach(),
+            importance_factors=importance_factors.detach(),
+            terminated=terminated.detach(),
+            truncated=truncated.detach(),
             hidden_states=hidden_states,
             next_hidden_states=next_hidden_states,
         )
@@ -425,7 +426,8 @@ class RecorderWrapper(gym.Wrapper):
     def get_sb3_buffer(self, device="auto"):
         """Converts the data to a sb3 usable buffer"""
         try:
-            from stable_baselines3.common.buffers import DictReplayBuffer, ReplayBuffer
+            from stable_baselines3.common.buffers import (DictReplayBuffer,
+                                                          ReplayBuffer)
         except ImportError:
             raise Exception(
                 "Please install stable_baselines3 to use this feature, e.g. by running 'pip install stable_baselines3"
@@ -486,9 +488,9 @@ class RecorderWrapper(gym.Wrapper):
                 )
                 rewards.append(self.rewards[i])
             if self.terminated[i] or self.truncated[i] or i == self.pos:
-                obs = np.array(obs)
-                actions = np.array(actions)
-                rewards = np.array(rewards)
+                obs = torch.array(obs)
+                actions = torch.array(actions)
+                rewards = torch.array(rewards)
                 if (
                     len(actions) > 0
                 ):  # length 0 trajectories might happen when env gets reset at last step
@@ -515,7 +517,7 @@ def _get_collection_entry(space, collection, pos):
 
 def _add_collection_entry(space, collection, entry, pos):
     if type(space) != Dict:
-        collection[pos] = entry
+        collection[pos] = torch.tensor(entry)
         return
 
     for key in entry:
@@ -524,9 +526,9 @@ def _add_collection_entry(space, collection, entry, pos):
 
 def _generate_collection(space, buffer_size):
     if type(space) == Box:
-        return np.zeros((buffer_size, *space.shape), dtype=space.dtype)
+        return torch.zeros((buffer_size, *space.shape), dtype=torch.float32)
     if type(space) == Discrete:
-        return np.zeros(buffer_size, dtype=np.int32)
+        return torch.zeros(buffer_size, dtype=torch.int32)
     if type(space) == Dict:
         collection = {}
         for key in space:

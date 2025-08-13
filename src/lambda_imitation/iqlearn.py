@@ -450,7 +450,7 @@ class IQLearn:
             h = tuple(torch.tensor(s).to(self.args.device) for s in h)
 
             h, c = self.feature_extractor(x, h)
-            return (torch.cat((h, c), dim=-1).detach().cpu().numpy(),)
+            return (torch.cat((h, c), dim=-1).detach(),)
 
         self.env = RecorderWrapper(
             self.env.env,
@@ -481,11 +481,11 @@ class IQLearn:
         self.env = gym.wrappers.RecordEpisodeStatistics(self.env)
 
         def hidden_state_net(x, a, h):
-            x = torch.tensor(x).to(self.args.device)
-            h = torch.tensor(h[0]).to(self.args.device)
+            # x = torch.tensor(x).to(self.args.device)
+            # h = torch.tensor(h[0]).to(self.args.device)
 
-            x, h = self.feature_extractor(x, h)
-            return (h.detach().cpu().numpy(),)
+            x, h = self.feature_extractor(x, h[0])
+            return (h.detach(),)
 
         self.env = RecorderWrapper(
             self.env,
@@ -497,10 +497,10 @@ class IQLearn:
 
     def set_demonstration_buffer(self, demonstration_buffer):
         def hidden_state_net(x, a, h):
-            x = torch.tensor(x).to(self.args.device)
-            h = torch.tensor(h[0]).to(self.args.device)
+            # x = torch.tensor(x).to(self.args.device)
+            # h = torch.tensor(h[0]).to(self.args.device)
 
-            x, h = self.feature_extractor(x, h)
+            x, h = self.feature_extractor(x, h[0])
             return (h.detach().cpu().numpy(),)
 
         self.demonstration_buffer = demonstration_buffer
@@ -1018,7 +1018,7 @@ class IQLearn:
                                     data.actions,
                                 )
                                 self.env.override_policy_probabilities_last_sample(
-                                    probs.detach().cpu().numpy()
+                                    probs.detach()
                                 )
                             alpha_loss = (
                                 -self.log_alpha.exp() * (log_pi + self.target_entropy)
