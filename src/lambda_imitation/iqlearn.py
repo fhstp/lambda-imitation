@@ -813,7 +813,7 @@ class IQLearn:
             #     action = np.array(self.env.action_space.sample())
             # else:
             torch_obs = torch.Tensor(self.obs).unsqueeze(0).to(self.args.device)
-            feature_obs, hidden_state = self.feature_extractor(
+            feature_obs, self.hidden_state = self.feature_extractor(
                 torch_obs, self.hidden_state
             )
 
