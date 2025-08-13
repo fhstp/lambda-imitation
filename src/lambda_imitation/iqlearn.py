@@ -85,6 +85,8 @@ class Args:
     """How often the hidden states of the demonstration buffer are recalculated"""
     recalculate_hidden_states_in_update: bool = False
     """Whether or not to recalculate hidden states at every step for sample"""
+    episode_recalculation_interval: int = 500
+    """How often episode features (importance factor, return) of the buffer are recalculated"""
     use_lambda_discrepancy: bool = False
     """Whether or not to also approximate the value function via MC estimation and use lambda discrepancy to optimize memory"""
     use_action_recalculation: bool = False
@@ -826,7 +828,8 @@ class IQLearn:
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, termination, truncated, info = self.env.step(action)
             self.env.set_probabilities_of_last_action(probs[0])
-            self.env.recalculate_episodes()
+            if self.n_updates % self.args.episode_recalculation_interval == 0:
+                self.env.recalculate_episodes()
 
             # TRY NOT TO MODIFY: record rewards for plotting purposes
             if (termination or truncated) and self.writer is not None:
