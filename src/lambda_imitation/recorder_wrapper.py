@@ -23,7 +23,13 @@ class RecorderSample(NamedTuple):
 class RecorderWrapper(gym.Wrapper):
 
     def __init__(
-        self, env, gamma, buffer_size, hidden_state_dims=(0,), hidden_state_net=None, device='cpu'
+        self,
+        env,
+        gamma,
+        buffer_size,
+        hidden_state_dims=(0,),
+        hidden_state_net=None,
+        device="cpu",
     ):
         """
         Gymnasium Wrapper for automatically logging episodes in a circular buffer. Buffer size has to be big enough for single-episode rollouts! (for return calculation)
@@ -46,6 +52,7 @@ class RecorderWrapper(gym.Wrapper):
             Dict,
         ], "Only Box, Discrete and Dict action spaces are supported right now!"
 
+        self.device = device
         self.gamma = gamma
         self.buffer_size = buffer_size
         self.observation_space = env.observation_space
@@ -57,9 +64,15 @@ class RecorderWrapper(gym.Wrapper):
         self.actions = _generate_collection(self.action_space, self.buffer_size, device)
         self.rewards = torch.zeros(self.buffer_size, dtype=torch.float32).to(device)
         self.returns = torch.zeros(self.buffer_size, dtype=torch.float32).to(device)
-        self.behavior_probabilities = torch.ones(self.buffer_size, dtype=torch.float32).to(device)
-        self.policy_probabilities = torch.zeros(self.buffer_size, dtype=torch.float32).to(device)
-        self.importance_factors = torch.zeros(self.buffer_size, dtype=torch.float32).to(device)
+        self.behavior_probabilities = torch.ones(
+            self.buffer_size, dtype=torch.float32
+        ).to(device)
+        self.policy_probabilities = torch.zeros(
+            self.buffer_size, dtype=torch.float32
+        ).to(device)
+        self.importance_factors = torch.zeros(self.buffer_size, dtype=torch.float32).to(
+            device
+        )
         self.terminated = torch.zeros(self.buffer_size, dtype=torch.bool).to(device)
         self.truncated = torch.zeros(self.buffer_size, dtype=torch.bool).to(device)
         self.setup_hidden_states(hidden_state_dims, hidden_state_net, device)
@@ -70,7 +83,9 @@ class RecorderWrapper(gym.Wrapper):
 
     def setup_hidden_states(self, hidden_state_dims, hidden_state_net, device):
         self.hidden_states = tuple(
-            torch.zeros((self.buffer_size, hidden_state_dim), dtype=torch.float32).to(device)
+            torch.zeros((self.buffer_size, hidden_state_dim), dtype=torch.float32).to(
+                device
+            )
             for hidden_state_dim in hidden_state_dims
         )
         self.hidden_state_dims = hidden_state_dims
@@ -132,7 +147,7 @@ class RecorderWrapper(gym.Wrapper):
         obs, info = super().reset(**kwargs)
         self.last_obs = obs
         self.last_hidden_states = tuple(
-            torch.zeros((hidden_state_dim), dtype=torch.float32)
+            torch.zeros((hidden_state_dim), dtype=torch.float32).to(self.device)
             for hidden_state_dim in self.hidden_state_dims
         )
         mod_pos = self.pos % self.buffer_size
@@ -218,7 +233,9 @@ class RecorderWrapper(gym.Wrapper):
         self.pos += 1
         if self.hidden_state_net is not None:
             self.last_hidden_states = self.hidden_state_net(
-                torch.tensor(self.last_obs), action, self.last_hidden_states
+                torch.tensor(self.last_obs).to(self.device),
+                action,
+                self.last_hidden_states,
             )
             for k, last_hidden_state in enumerate(self.last_hidden_states):
                 self.hidden_states[k][mod_pos] = last_hidden_state
@@ -426,8 +443,7 @@ class RecorderWrapper(gym.Wrapper):
     def get_sb3_buffer(self, device="auto"):
         """Converts the data to a sb3 usable buffer"""
         try:
-            from stable_baselines3.common.buffers import (DictReplayBuffer,
-                                                          ReplayBuffer)
+            from stable_baselines3.common.buffers import DictReplayBuffer, ReplayBuffer
         except ImportError:
             raise Exception(
                 "Please install stable_baselines3 to use this feature, e.g. by running 'pip install stable_baselines3"

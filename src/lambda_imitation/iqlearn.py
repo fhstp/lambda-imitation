@@ -446,10 +446,10 @@ class IQLearn:
 
     def reset_replay_buffer(self):
         def hidden_state_net(x, a, h):
-            x = torch.tensor(x).to(self.args.device)
-            h = tuple(torch.tensor(s).to(self.args.device) for s in h)
+            # x = torch.tensor(x).to(self.args.device)
+            # h = tuple(torch.tensor(s).to(self.args.device) for s in h)
 
-            h, c = self.feature_extractor(x, h)
+            h, c = self.feature_extractor(x, h[0])
             return (torch.cat((h, c), dim=-1).detach(),)
 
         self.env = RecorderWrapper(
