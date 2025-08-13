@@ -62,19 +62,27 @@ class RecorderWrapper(gym.Wrapper):
             self.observation_space, self.buffer_size, device
         )
         self.actions = _generate_collection(self.action_space, self.buffer_size, device)
-        self.rewards = torch.zeros(self.buffer_size, dtype=torch.float32).to(device)
-        self.returns = torch.zeros(self.buffer_size, dtype=torch.float32).to(device)
+        self.rewards = torch.zeros(
+            self.buffer_size, requires_grad=False, dtype=torch.float32
+        ).to(device)
+        self.returns = torch.zeros(
+            self.buffer_size, requires_grad=False, dtype=torch.float32
+        ).to(device)
         self.behavior_probabilities = torch.ones(
-            self.buffer_size, dtype=torch.float32
+            self.buffer_size, requires_grad=False, dtype=torch.float32
         ).to(device)
         self.policy_probabilities = torch.zeros(
-            self.buffer_size, dtype=torch.float32
+            self.buffer_size, requires_grad=False, dtype=torch.float32
         ).to(device)
-        self.importance_factors = torch.zeros(self.buffer_size, dtype=torch.float32).to(
-            device
-        )
-        self.terminated = torch.zeros(self.buffer_size, dtype=torch.bool).to(device)
-        self.truncated = torch.zeros(self.buffer_size, dtype=torch.bool).to(device)
+        self.importance_factors = torch.zeros(
+            self.buffer_size, requires_grad=False, dtype=torch.float32
+        ).to(device)
+        self.terminated = torch.zeros(
+            self.buffer_size, requires_grad=False, dtype=torch.bool
+        ).to(device)
+        self.truncated = torch.zeros(
+            self.buffer_size, requires_grad=False, dtype=torch.bool
+        ).to(device)
         self.setup_hidden_states(hidden_state_dims, hidden_state_net, device)
 
         self.pos = 0
@@ -155,7 +163,7 @@ class RecorderWrapper(gym.Wrapper):
         for k, hidden_state_dim in enumerate(self.hidden_state_dims):
             self.hidden_states[k][mod_pos] = torch.zeros(
                 (hidden_state_dim), dtype=torch.float32
-            )
+            ).to(self.device)
         return obs, info
 
     def recalculate_episodes(self):
@@ -332,7 +340,7 @@ class RecorderWrapper(gym.Wrapper):
         self.importance_factors[self.last_sampled_indices] = (
             self.importance_factors[(self.last_sampled_indices + 1) % self.buffer_size]
             * (1 - term_trunc.float())
-            + term_trunc
+            + term_trunc.float()
         ) * (
             self.policy_probabilities[self.last_sampled_indices]
             / self.behavior_probabilities[self.last_sampled_indices]
@@ -358,7 +366,7 @@ class RecorderWrapper(gym.Wrapper):
                 exclusion_len < self.buffer_size
             ), "Last/Current episode was longer than buffer size!"
             upper_bound = self.buffer_size - exclusion_len
-            indices = torch.tensor(range(upper_bound))
+            indices = torch.tensor(range(upper_bound)).to(self.device)
             if upper_exclusion_ind > lower_exclusion_ind:
                 indices[lower_exclusion_ind + 1 :] += exclusion_len
             else:
@@ -381,7 +389,7 @@ class RecorderWrapper(gym.Wrapper):
             upper_bound = (
                 self.last_return_calculation if full_episodes_only else self.pos
             )
-            indices = torch.tensor(range(upper_bound))
+            indices = torch.tensor(range(upper_bound)).to(self.device)
             # batch_inds = np.random.randint(0, upper_bound, size=batch_size)
         if sample_by_importance:
             raise NotImplementedError("This is currently not supported...")
@@ -443,7 +451,8 @@ class RecorderWrapper(gym.Wrapper):
     def get_sb3_buffer(self, device="auto"):
         """Converts the data to a sb3 usable buffer"""
         try:
-            from stable_baselines3.common.buffers import DictReplayBuffer, ReplayBuffer
+            from stable_baselines3.common.buffers import (DictReplayBuffer,
+                                                          ReplayBuffer)
         except ImportError:
             raise Exception(
                 "Please install stable_baselines3 to use this feature, e.g. by running 'pip install stable_baselines3"
@@ -542,9 +551,13 @@ def _add_collection_entry(space, collection, entry, pos):
 
 def _generate_collection(space, buffer_size, device):
     if type(space) == Box:
-        return torch.zeros((buffer_size, *space.shape), dtype=torch.float32).to(device)
+        return torch.zeros(
+            (buffer_size, *space.shape), requires_grad=False, dtype=torch.float32
+        ).to(device)
     if type(space) == Discrete:
-        return torch.zeros(buffer_size, dtype=torch.int32).to(device)
+        return torch.zeros(buffer_size, requires_grad=False, dtype=torch.int32).to(
+            device
+        )
     if type(space) == Dict:
         collection = {}
         for key in space:
