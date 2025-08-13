@@ -23,7 +23,7 @@ torch_deterministic: true
 track: false
 update_feature_extractor_with_losses: true
 use_action_recalculation: true
-use_importance_sampling: true
+use_importance_sampling: false
 use_lambda_discrepancy: true
 use_targets: true
 wandb_entity: null
