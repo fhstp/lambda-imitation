@@ -75,6 +75,7 @@ class Alpha(NamedTuple):
 
 
 def create_alpha(start_alpha, lr):
+    start_alpha = jnp.array(start_alpha, dtype=jnp.float32)
     log_alpha = jnp.log(start_alpha)
     optimizer = optax.adam(lr)
     init_state = optimizer.init(log_alpha)
@@ -268,7 +269,6 @@ def create_SAC(
             logits = actor_net(sample.observations)
             action_probs = jax.nn.softmax(logits, axis=1)
             log_prob = jax.nn.log_softmax(logits, axis=1)
-            # jax.debug.print("{x}", x=action_probs[0])
             return (((alpha * log_prob) - min_qf_pi) * action_probs).sum(axis=-1).mean()
         else:
             pi, log_pi = get_action(sample.observations, actor_net, key)
@@ -282,8 +282,9 @@ def create_SAC(
     def learn(
         state: SACState,
     ):
+        print(state.random_key)
+
         def update_step(state: SACState, tmp):
-            print(state.random_key)
             key_next, key_q, key_actor, key_action, key_env, key_alpha = (
                 jax.random.split(state.random_key, 6)
             )
@@ -563,7 +564,7 @@ key, key_reset, key_act = jax.random.split(key, 3)
 env, env_params = gymnax.make("CartPole-v1")
 
 sac_state, functions, buffer_functions = create_SAC(
-    env, env_params, 4, True, 2, 10000, Hyperparameters()
+    env, env_params, 4, True, 2, 100, Hyperparameters()
 )
 
 print(evaluate(sac_state.actor.net, env, env_params, functions.predict, key, 5))
@@ -585,6 +586,8 @@ for _ in range(256):
         buffer_functions,
         key_env,
     )
+
+import time
 
 for i in range(100):
     sac_state, metrics = functions.learn(sac_state)
