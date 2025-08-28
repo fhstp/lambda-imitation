@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import optax
+from numpy.random import random
 
 from lambda_imitation.jax.buffer import (
     Buffer,
@@ -19,11 +20,11 @@ from lambda_imitation.jax.buffer import (
 class Hyperparameters(NamedTuple):
     seed: int = 42
     """The seed used"""
-    buffer_size: int = 100000
+    buffer_size: int = 10000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
-    use_q_targets: bool = True
+    use_q_targets: bool = False
     """Whether or not to use target nets for the Q function"""
     use_policy_targets: bool = True
     """Whether or not to use target nets for the policy"""
@@ -395,12 +396,12 @@ def create_SAC(
                     n_updates=state.n_updates + 1,
                 ),
                 {
-                    "loss_q": value_loss_q,
-                    "q1_values": q1_values.mean(),
-                    "q2_values": q2_values.mean(),
-                    "loss_actor": value_loss_actor,
-                    "loss_alpha": value_loss_alpha,
-                    "entropy": -entropy,
+                    "train/loss_q": value_loss_q,
+                    "train/q1_values": q1_values.mean(),
+                    "train/q2_values": q2_values.mean(),
+                    "train/loss_actor": value_loss_actor,
+                    "train/loss_alpha": value_loss_alpha,
+                    "train/entropy": -entropy,
                 },
             )
 
@@ -563,8 +564,26 @@ key, key_reset, key_act = jax.random.split(key, 3)
 # Instantiate the environment & its settings.
 env, env_params = gymnax.make("CartPole-v1")
 
+import time
+
+import numpy as np
+
+import wandb
+
+hyperparameters = Hyperparameters(seed=np.random.randint(1000000))
+run = wandb.init(
+    # Set the wandb entity where your project will be logged (generally your team name).
+    entity="fhstp-data-intelligence-research-group",
+    # Set the wandb project where this run will be logged.
+    project="jax-sac-cartpole",
+    # Track hyperparameters and run metadata.
+    config=hyperparameters._asdict(),
+)
+run.log_code(".")
+
+learn_steps = 1000
 sac_state, functions, buffer_functions = create_SAC(
-    env, env_params, 4, True, 2, 100, Hyperparameters()
+    env, env_params, 4, True, 2, learn_steps, hyperparameters
 )
 
 print(evaluate(sac_state.actor.net, env, env_params, functions.predict, key, 5))
@@ -587,13 +606,16 @@ for _ in range(256):
         key_env,
     )
 
-import time
+from tqdm.rich import tqdm
 
-for i in range(100):
+for i in tqdm(range(1000)):
     sac_state, metrics = functions.learn(sac_state)
     # plt.plot(metrics["q1_values"])
     # plt.show()
     # print(metrics)
-    print(
-        f"{i}: {evaluate(sac_state.actor.net, env, env_params, functions.predict, key, 5)}"
-    )
+    split, key = jax.random.split(split)
+    eval = evaluate(sac_state.actor.net, env, env_params, functions.predict, key, 5)
+    log = {"eval/return": eval}
+    for key in metrics:
+        log[key] = metrics[key].mean()
+    run.log(log, step=i * learn_steps)
