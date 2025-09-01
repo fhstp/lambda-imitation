@@ -2,7 +2,6 @@ from functools import partial
 from typing import Any, Callable, NamedTuple, Tuple
 
 import flax.nnx as nnx
-import gymnax
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -15,6 +14,9 @@ from lambda_imitation.jax.buffer import (
     create_buffer,
 )
 
+LOG_STD_MIN = -5
+LOG_STD_MAX = 2
+
 
 class Hyperparameters(NamedTuple):
     seed: int = 42
@@ -23,7 +25,7 @@ class Hyperparameters(NamedTuple):
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
-    use_q_targets: bool = False
+    use_q_targets: bool = True
     """Whether or not to use target nets for the Q function"""
     use_policy_targets: bool = True
     """Whether or not to use target nets for the policy"""
@@ -50,7 +52,7 @@ class Hyperparameters(NamedTuple):
     hidden_state_dim: int = 10
     """Dimension of hidden states, has to be even, if 0, no LSTM will be used"""
     hidden_state_recalculation_interval: int = 500
-    """How often the hidden states of the demonstration buffer are recalculated"""
+    """How often the hidden states of the demonstration buffer are recalculated. Note that logging frequency must be a multiple of this number, or else training steps might differ for technical reasons."""
     recalculate_hidden_states_in_update: bool = False
     """Whether or not to recalculate hidden states at every step for sample"""
     use_lambda_discrepancy: bool = False
@@ -156,14 +158,20 @@ def create_SAC(
             )
             return actions, entropy.sum(axis=1)
         else:
-            mean, log_std = actor_net(observations)
-            std = log_std.exp()
+            actor_out = actor_net(observations)  # type: ignore
+            mean, log_std = (
+                actor_out[..., :action_space_size],
+                actor_out[..., action_space_size:],
+            )
+            log_std = jnp.tanh(log_std)
+            log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
+            std = jnp.exp(log_std)
             x_t = jax.random.normal(key, mean.shape) * std + mean
             y_t = jnp.tanh(x_t)
             action = y_t * action_scale + action_bias
             log_prob = (
-                -(x_t**2) / 2
-                + jnp.sqrt(2 * jnp.pi)
+                -((x_t - mean) ** 2) / (2 * std)
+                - jnp.sqrt(2 * jnp.pi * std**2)
                 - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
             )
             return action, log_prob
@@ -214,14 +222,20 @@ def create_SAC(
             ) * params.gamma * ((min_qf_next_target - alpha * log_prob) * probs).sum(-1)
             target_q_values = jax.lax.stop_gradient(target_q_values)
         else:
-            mean, log_std = actor_net(next_feature_obs)  # type: ignore
-            std = log_std.exp()
+            actor_out = actor_net(next_feature_obs)  # type: ignore
+            mean, log_std = (
+                actor_out[..., :action_space_size],
+                actor_out[..., action_space_size:],
+            )
+            log_std = jnp.tanh(log_std)
+            log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
+            std = jnp.exp(log_std)
             x_t = jax.random.normal(key_next_actions, mean.shape) * std + mean
             y_t = jnp.tanh(x_t)
             next_actions = y_t * action_scale + action_bias
             log_prob = (
-                -(x_t**2) / 2
-                + jnp.sqrt(2 * jnp.pi)
+                -((x_t - mean) ** 2) / (2 * std)
+                - jnp.sqrt(2 * jnp.pi * std**2)
                 - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
             )
             qf1_next_target = get_q_values(
@@ -456,7 +470,39 @@ def create_SAC(
                 },
             )
 
-        state, metrics = jax.lax.scan(update_step, state, None, learn_steps)
+        recalc = (
+            params.hidden_state_recalculation_interval
+            if params.hidden_state_recalculation_interval > 0
+            else learn_steps
+        )
+
+        def recalc_scan(carry, _unused):
+            state = carry
+            state, metrics = jax.lax.scan(update_step, state, None, recalc)
+            buffer = buffer_functions.recalculate_hidden_states(
+                state.buffer, feature_extractor.net
+            )
+            state = SACState(
+                feature_extractor=state.feature_extractor,
+                actor=state.actor,
+                q1=state.q1,
+                q2=state.q2,
+                alpha=state.alpha,
+                buffer=buffer,
+                obs=state.obs,
+                hidden_state=state.hidden_state,
+                env_state=state.env_state,
+                random_key=state.random_key,
+                n_updates=state.n_updates,
+            )
+            return state, metrics
+
+        state, metrics = jax.lax.scan(
+            recalc_scan,
+            state,
+            None,
+            learn_steps // recalc,
+        )
         return state, metrics
 
     def predict(
@@ -473,10 +519,16 @@ def create_SAC(
             else:
                 return jax.random.categorical(key, logits)[0], hidden_state
         else:
-            mean, log_std = actor_net(feature_obs)
+            actor_out = actor_net(feature_obs)
+            mean, log_std = (
+                actor_out[..., :action_space_size],
+                actor_out[..., action_space_size:],
+            )
             if deterministic:
-                return mean.reshape(-1)
-            std = log_std.exp()
+                return mean.reshape(-1), hidden_state
+            log_std = jnp.tanh(log_std)
+            log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
+            std = jnp.exp(log_std)
             x_t = jax.random.normal(key, mean.shape) * std + mean
             y_t = jnp.tanh(x_t)
             action = y_t * action_scale + action_bias
@@ -499,8 +551,8 @@ def create_SAC(
         def __init__(self):
             pass
 
-        def __call__(self, x):
-            return x
+        def __call__(self, carry, x):
+            return x, carry
 
     class LSTMExtractor(nnx.Module):
         def __init__(self, din, dout, rngs):
@@ -534,44 +586,73 @@ def create_SAC(
     actor = create_network(
         net=SimpleNet(
             observation_space_size + params.hidden_state_dim,
-            action_space_size,
+            (1 if discrete_action_space else 2) * action_space_size,
             nnx.Rngs(params.seed),
         ),
         target_net=SimpleNet(
             observation_space_size + params.hidden_state_dim,
-            action_space_size,
+            (1 if discrete_action_space else 2) * action_space_size,
             nnx.Rngs(params.seed),
         ),
         lr=params.policy_lr,
     )
 
-    q1 = create_network(
-        net=SimpleNet(
-            observation_space_size + params.hidden_state_dim,
-            action_space_size,
-            nnx.Rngs(params.seed),
-        ),
-        target_net=SimpleNet(
-            observation_space_size + params.hidden_state_dim,
-            action_space_size,
-            nnx.Rngs(params.seed),
-        ),
-        lr=params.q_lr,
-    )
+    if discrete_action_space:
+        q1 = create_network(
+            net=SimpleNet(
+                observation_space_size + params.hidden_state_dim,
+                action_space_size,
+                nnx.Rngs(params.seed),
+            ),
+            target_net=SimpleNet(
+                observation_space_size + params.hidden_state_dim,
+                action_space_size,
+                nnx.Rngs(params.seed),
+            ),
+            lr=params.q_lr,
+        )
 
-    q2 = create_network(
-        net=SimpleNet(
-            observation_space_size + params.hidden_state_dim,
-            action_space_size,
-            nnx.Rngs(params.seed),
-        ),
-        target_net=SimpleNet(
-            observation_space_size + params.hidden_state_dim,
-            action_space_size,
-            nnx.Rngs(params.seed),
-        ),
-        lr=params.q_lr,
-    )
+        q2 = create_network(
+            net=SimpleNet(
+                observation_space_size + params.hidden_state_dim,
+                action_space_size,
+                nnx.Rngs(params.seed),
+            ),
+            target_net=SimpleNet(
+                observation_space_size + params.hidden_state_dim,
+                action_space_size,
+                nnx.Rngs(params.seed),
+            ),
+            lr=params.q_lr,
+        )
+    else:
+        q1 = create_network(
+            net=SimpleNet(
+                observation_space_size + action_space_size + params.hidden_state_dim,
+                1,
+                nnx.Rngs(params.seed),
+            ),
+            target_net=SimpleNet(
+                observation_space_size + action_space_size + params.hidden_state_dim,
+                1,
+                nnx.Rngs(params.seed),
+            ),
+            lr=params.q_lr,
+        )
+
+        q2 = create_network(
+            net=SimpleNet(
+                observation_space_size + action_space_size + params.hidden_state_dim,
+                1,
+                nnx.Rngs(params.seed),
+            ),
+            target_net=SimpleNet(
+                observation_space_size + action_space_size + params.hidden_state_dim,
+                1,
+                nnx.Rngs(params.seed),
+            ),
+            lr=params.q_lr,
+        )
 
     buffer, buffer_functions = create_buffer(
         observation_space_size,
@@ -620,7 +701,7 @@ def evaluate(
 
         def policy_step(state_input, tmp):
             """lax.scan compatible step transition in jax env."""
-            obs, hidden_state, state, policy_params, key = state_input
+            obs, hidden_state, state, key = state_input
             key, key_step, key_net = jax.random.split(key, 3)
             action, next_hidden_state = predict(
                 obs, hidden_state, actor_net, feature_net, key_net, deterministic=True
@@ -631,13 +712,13 @@ def evaluate(
             next_hidden_state = jax.lax.select(
                 done, jnp.zeros((2 * hidden_state_dim,)), next_hidden_state[0]
             )
-            carry = [next_obs, next_hidden_state, next_state, policy_params, key]
+            carry = [next_obs, next_hidden_state, next_state, key]
             return carry, [obs, action, reward, next_obs, done]
 
         # Scan over episode step loop
         _, scan_out = jax.lax.scan(
             policy_step,
-            [obs, jnp.zeros((2 * hidden_state_dim)), state, sac_state, key_episode],
+            [obs, jnp.zeros((2 * hidden_state_dim)), state, key_episode],
             (),
             501,
         )
@@ -655,89 +736,3 @@ def evaluate(
 
     _, episode_lens = jax.lax.scan(step, key, (), num_episodes)
     return episode_lens.mean()
-
-
-key = jax.random.key(0)
-key, key_reset, key_act = jax.random.split(key, 3)
-
-# Instantiate the environment & its settings.
-env, env_params = gymnax.make("CartPole-v1")
-
-import time
-
-import numpy as np
-
-import wandb
-
-hyperparameters = Hyperparameters(seed=np.random.randint(1000000))
-run = wandb.init(
-    # Set the wandb entity where your project will be logged (generally your team name).
-    entity="fhstp-data-intelligence-research-group",
-    # Set the wandb project where this run will be logged.
-    project="jax-sac-cartpole",
-    # Track hyperparameters and run metadata.
-    config=hyperparameters._asdict(),
-)
-run.log_code(".")
-
-learn_steps = 1000
-sac_state, functions, buffer_functions = create_SAC(
-    env, env_params, 4, True, 2, learn_steps, hyperparameters
-)
-
-print(
-    evaluate(
-        sac_state.actor.net,
-        sac_state.feature_extractor.net,
-        env,
-        env_params,
-        functions.predict,
-        hyperparameters.hidden_state_dim,
-        key,
-        5,
-    )
-)
-
-# Perform the step transition.
-buffer = sac_state.buffer
-env_state = sac_state.env_state
-obs = sac_state.obs
-hidden_state = sac_state.hidden_state
-for _ in range(256):
-    key_act, split, key_env = jax.random.split(key_act, 3)
-    action = env.action_space(env_params).sample(split)  # type: ignore
-    buffer, obs, done, env_state = run_env_step(
-        env,
-        env_params,
-        action,
-        buffer,
-        obs,
-        hidden_state,
-        env_state,
-        buffer_functions,
-        key_env,
-    )
-    _, hidden_state = sac_state.feature_extractor.net(hidden_state, obs)  # type: ignore
-
-from tqdm.rich import tqdm
-
-for i in tqdm(range(1000)):
-    sac_state, metrics = functions.learn(sac_state)
-    # plt.plot(metrics["q1_values"])
-    # plt.show()
-    # print(metrics)
-    split, key = jax.random.split(split)
-    eval = evaluate(
-        sac_state.actor.net,
-        sac_state.feature_extractor.net,
-        env,
-        env_params,
-        functions.predict,
-        hyperparameters.hidden_state_dim,
-        key,
-        5,
-    )
-    log = {"eval/return": eval}
-    for key in metrics:
-        log[key] = metrics[key].mean()
-    run.log(log, step=i * learn_steps)

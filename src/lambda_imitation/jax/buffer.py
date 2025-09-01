@@ -37,6 +37,7 @@ class BufferSample(NamedTuple):
 class BufferFunctions(NamedTuple):
     add: Callable
     sample: Callable
+    recalculate_hidden_states: Callable
 
 
 def create_buffer(
@@ -117,7 +118,37 @@ def create_buffer(
             terminated=jax.lax.stop_gradient(buffer.terminated[indices]),
         )
 
-    return buffer, BufferFunctions(add=add, sample=sample)
+    def recalculate_hidden_states(buffer: Buffer, feature_extractor):
+        def scan_fun(carry, xs):
+            pos = xs
+            _, hidden_state = feature_extractor(
+                buffer.hidden_states[pos], buffer.observations[pos]
+            )
+            hidden_state *= 1 - buffer.terminated[(pos + 1) % size]
+            return None, hidden_state
+
+        indices = (buffer.pos + jnp.arange(1, size, dtype=jnp.int16)) % size
+        _, next_hidden_states = jax.lax.scan(scan_fun, None, indices)
+        return Buffer(
+            observations=buffer.observations,
+            hidden_states=buffer.hidden_states.at[(indices + 1) % size].set(
+                next_hidden_states
+            ),
+            actions=buffer.actions,
+            rewards=buffer.rewards,
+            returns=buffer.returns,
+            behavior_probs=buffer.behavior_probs,
+            policy_probs=buffer.policy_probs,
+            importance_factors=buffer.importance_factors,
+            terminated=buffer.terminated,
+            sampling_ok=buffer.sampling_ok,
+            pos=buffer.pos,
+            size=buffer.size,
+        )
+
+    return buffer, BufferFunctions(
+        add=add, sample=sample, recalculate_hidden_states=recalculate_hidden_states
+    )
 
 
 if __name__ == "__main__":
