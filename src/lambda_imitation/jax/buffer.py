@@ -7,6 +7,7 @@ import jax.numpy as jnp
 
 class Buffer(NamedTuple):
     observations: jax.Array
+    hidden_states: jax.Array
     actions: jax.Array
     rewards: jax.Array
     returns: jax.Array
@@ -22,6 +23,8 @@ class Buffer(NamedTuple):
 class BufferSample(NamedTuple):
     observations: jax.Array
     next_observations: jax.Array
+    hidden_states: jax.Array
+    next_hidden_states: jax.Array
     actions: jax.Array
     rewards: jax.Array
     returns: jax.Array
@@ -37,10 +40,15 @@ class BufferFunctions(NamedTuple):
 
 
 def create_buffer(
-    observation_space_size, action_space_size, size: int, sampling_size: int
+    observation_space_size,
+    action_space_size,
+    hidden_state_size,
+    size: int,
+    sampling_size: int,
 ):
     buffer = Buffer(
         observations=jnp.zeros((size, observation_space_size)),
+        hidden_states=jnp.zeros((size, hidden_state_size)),
         actions=jnp.zeros((size, action_space_size)),
         rewards=jnp.zeros((size,)),
         returns=jnp.zeros((size,)),
@@ -56,12 +64,14 @@ def create_buffer(
     def add(
         buffer: Buffer,
         obs: jax.Array,
+        hidden_state: jax.Array,
         action: jax.Array,
         reward: float,
         terminated: bool,
     ) -> Buffer:
         pos = (buffer.pos) % buffer.size
         observations = buffer.observations.at[pos].set(obs)
+        hidden_states = buffer.hidden_states.at[pos].set(hidden_state)
         actions = buffer.actions.at[pos].set(action)
         rewards = buffer.rewards.at[pos].set(reward)
         terminated_arr = buffer.terminated.at[pos].set(terminated)
@@ -70,6 +80,7 @@ def create_buffer(
         ].set((buffer.pos > 0, terminated))
         return Buffer(
             observations=observations,
+            hidden_states=hidden_states,
             actions=actions,
             rewards=rewards,
             returns=buffer.returns,
@@ -91,6 +102,10 @@ def create_buffer(
             next_observations=jax.lax.stop_gradient(
                 buffer.observations[(indices + 1) % size]
             ),
+            hidden_states=jax.lax.stop_gradient(buffer.hidden_states[indices]),
+            next_hidden_states=jax.lax.stop_gradient(
+                buffer.hidden_states[(indices + 1) % size]
+            ),
             actions=jax.lax.stop_gradient(buffer.actions[indices]),
             rewards=jax.lax.stop_gradient(buffer.rewards[indices]),
             returns=jax.lax.stop_gradient(buffer.returns[indices]),
@@ -106,19 +121,34 @@ def create_buffer(
 
 
 if __name__ == "__main__":
-    buffer, functions = create_buffer(3, 2, 10, 4)
+    buffer, functions = create_buffer(3, 2, 0, 10, 4)
 
     step = 0.0
     buffer = functions.add(
-        buffer, jnp.array([step, step, step]), jnp.array([step, step]), step, False
+        buffer,
+        jnp.array([step, step, step]),
+        jnp.zeros((0,)),
+        jnp.array([step, step]),
+        step,
+        False,
     )
     step = 1.0
     buffer = functions.add(
-        buffer, jnp.array([step, step, step]), jnp.array([step, step]), step, False
+        buffer,
+        jnp.array([step, step, step]),
+        jnp.zeros((0,)),
+        jnp.array([step, step]),
+        step,
+        False,
     )
     step = 2.0
     buffer = functions.add(
-        buffer, jnp.array([step, step, step]), jnp.array([step, step]), step, True
+        buffer,
+        jnp.array([step, step, step]),
+        jnp.zeros((0,)),
+        jnp.array([step, step]),
+        step,
+        True,
     )
 
     key = jax.random.key(0)
