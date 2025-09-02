@@ -69,6 +69,8 @@ def create_buffer(
         action: jax.Array,
         reward: float,
         terminated: bool,
+        gamma: float,
+        calculate_return: bool,
     ) -> Buffer:
         pos = (buffer.pos) % buffer.size
         observations = buffer.observations.at[pos].set(obs)
@@ -76,15 +78,32 @@ def create_buffer(
         actions = buffer.actions.at[pos].set(action)
         rewards = buffer.rewards.at[pos].set(reward)
         terminated_arr = buffer.terminated.at[pos].set(terminated)
-        sampling_ok = buffer.sampling_ok.at[
-            jnp.array([(pos - 1) % buffer.size, pos])
-        ].set((buffer.pos > 0, terminated))
+        # sampling_ok = buffer.sampling_ok.at[
+        #     jnp.array([(pos - 1) % buffer.size, pos])
+        # ].set((buffer.pos > 0 and not calculate_return, terminated))
+        returns = buffer.returns
+        sampling_ok = buffer.sampling_ok.at[pos].set(False)
+        if calculate_return:
+            returns = (
+                rewards + (1 - terminated_arr) * jnp.roll(buffer.returns, -1) * gamma
+            )
+            sampling_ok = sampling_ok | jnp.roll(sampling_ok, -1)
+        sampling_ok = sampling_ok.at[
+            jnp.array([buffer.size - 1, (pos - 1) % buffer.size, pos])
+        ].set(
+            (
+                buffer.pos >= buffer.size & sampling_ok[-1],
+                buffer.pos > 0 & jnp.array(not calculate_return, dtype=jnp.bool),
+                terminated,
+            )
+        )
+
         return Buffer(
             observations=observations,
             hidden_states=hidden_states,
             actions=actions,
             rewards=rewards,
-            returns=buffer.returns,
+            returns=returns,
             behavior_probs=buffer.behavior_probs,
             policy_probs=buffer.policy_probs,
             importance_factors=buffer.importance_factors,

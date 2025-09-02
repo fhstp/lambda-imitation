@@ -11,18 +11,26 @@ key, key_reset, key_act = jax.random.split(key, 3)
 # Instantiate the environment & its settings.
 env, env_params = gymnax.make("CartPole-v1")
 
+import sys
 import time
 
 import numpy as np
+import yaml
 
 import wandb
 
-hyperparameters = Hyperparameters(seed=np.random.randint(1000000))
+args = {}
+if len(sys.argv) > 1:
+    with open(sys.argv[1]) as file:
+        args = yaml.safe_load(file.read())
+args["seed"] = np.random.randint(1000000)
+
+hyperparameters = Hyperparameters(**args)
 run = wandb.init(
     # Set the wandb entity where your project will be logged (generally your team name).
     entity="fhstp-data-intelligence-research-group",
     # Set the wandb project where this run will be logged.
-    project="jax-sac-cartpole",
+    project="jax-sac-partial-cartpole",
     # Track hyperparameters and run metadata.
     config=hyperparameters._asdict(),
 )
@@ -33,6 +41,32 @@ sac_state, functions, buffer_functions = create_SAC(
     env, env_params, 4, True, 2, learn_steps, hyperparameters
 )
 
+
+class LSTMExtractor(nnx.Module):
+    def __init__(self, din, dout, rngs):
+        self.lstm = nnx.OptimizedLSTMCell(din, dout, rngs=rngs)
+
+    def __call__(self, carry, x):
+        x = x.at[..., 3].set(0).at[..., 1].set(0)
+        carry = (
+            carry[..., : hyperparameters.hidden_state_dim],
+            carry[..., hyperparameters.hidden_state_dim :],
+        )
+        (c, h), _ = self.lstm(carry, x)
+        feature_obs = jnp.concatenate([x, h], axis=-1)
+        carry = jnp.concatenate([c, h], axis=-1)  # type: ignore
+        return feature_obs, carry
+
+
+feature_extractor = create_network(
+    net=LSTMExtractor(
+        4, hyperparameters.hidden_state_dim, nnx.Rngs(hyperparameters.seed)
+    ),
+    target_net=LSTMExtractor(
+        4, hyperparameters.hidden_state_dim, nnx.Rngs(hyperparameters.seed)
+    ),
+    lr=hyperparameters.feature_extractor_lr,
+)
 print(
     evaluate(
         sac_state.actor.net,
@@ -64,6 +98,8 @@ for _ in range(256):
         hidden_state,
         env_state,
         buffer_functions,
+        hyperparameters.gamma,
+        hyperparameters.lambda_discrepancy_coef > 0.0,
         key_env,
     )
     _, hidden_state = sac_state.feature_extractor.net(hidden_state, obs)  # type: ignore

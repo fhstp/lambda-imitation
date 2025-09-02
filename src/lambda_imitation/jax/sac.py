@@ -7,12 +7,8 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import optax
 
-from lambda_imitation.jax.buffer import (
-    Buffer,
-    BufferFunctions,
-    BufferSample,
-    create_buffer,
-)
+from lambda_imitation.jax.buffer import (Buffer, BufferFunctions, BufferSample,
+                                         create_buffer)
 
 LOG_STD_MIN = -5
 LOG_STD_MAX = 2
@@ -55,14 +51,12 @@ class Hyperparameters(NamedTuple):
     """How often the hidden states of the demonstration buffer are recalculated. Note that logging frequency must be a multiple of this number, or else training steps might differ for technical reasons."""
     recalculate_hidden_states_in_update: bool = False
     """Whether or not to recalculate hidden states at every step for sample"""
-    use_lambda_discrepancy: bool = False
-    """Whether or not to also approximate the value function via MC estimation and use lambda discrepancy to optimize memory"""
+    lambda_discrepancy_coef: float = 0.4
+    """Coefficient for lambda discrepancy loss. If 0, no MC approximation will be calculated."""
     use_action_recalculation: bool = False
     """Whether or not to re-calculate actions in calculation of lambda-discrepancy"""
-    update_feature_extractor_with_losses: bool = False
-    """Whether or not the feature extractor gets updated with standard losses or just by lambda-discrepancy. If `use_lambda_discrepancy` is False, this will always be True"""
-    use_importance_sampling: bool = True
-    """Whether or not to use importance sampling for MC approximation"""
+    resample_actions: bool = True
+    """Whether or not to resample actions or just take buffer actions when calculating lambda discrepancy"""
 
 
 class Network(NamedTuple):
@@ -72,8 +66,8 @@ class Network(NamedTuple):
 
 
 class Alpha(NamedTuple):
-    log_alpha: jnp.float32
-    alpha: jnp.float32
+    log_alpha: jax.Array
+    alpha: jax.Array
     optimizer_update: Any
     optimizer_state: Any
 
@@ -99,6 +93,8 @@ class SACState(NamedTuple):
     actor: Network
     q1: Network
     q2: Network
+    mc_q1: Network
+    mc_q2: Network
     alpha: Alpha
     buffer: Buffer
     obs: jax.Array
@@ -113,7 +109,7 @@ class SACFunctions(NamedTuple):
     predict: Callable
 
 
-@partial(nnx.jit, static_argnums=[0, 1, 7])
+@partial(nnx.jit, static_argnums=[0, 1, 7, 9])
 def run_env_step(
     env,
     env_params,
@@ -123,12 +119,14 @@ def run_env_step(
     hidden_state,
     env_state,
     buffer_functions,
+    gamma,
+    calculate_return,
     key,
 ) -> Tuple[Buffer, jax.Array, jax.Array]:
     key_step, key_reset = jax.random.split(key)
     obs, state, reward, done, _ = env.step(key_step, env_state, action, env_params)
     new_buffer: Buffer = buffer_functions.add(
-        buffer, current_obs, hidden_state, action, reward, done
+        buffer, current_obs, hidden_state, action, reward, done, gamma, calculate_return
     )
     # reset_obs, reset_state = env.reset(key_reset, env_params)
     # return_obs = jax.tree.map(lambda x, y: done * x + (1 - done) * y, reset_obs, obs)
@@ -261,6 +259,25 @@ def create_SAC(
         q2_loss = (qf2_values - target_q_values) ** 2
         return (q1_loss + q2_loss).mean(), (qf1_values, qf2_values)
 
+    def loss_mc(
+        mc_q1_net: nnx.Module,
+        mc_q2_net: nnx.Module,
+        feature_extractor_net: nnx.Module,
+        buffer: Buffer,
+        key,
+    ):
+        sample: BufferSample = buffer_functions.sample(buffer, key)
+        feature_obs, _ = feature_extractor_net(  # type: ignore
+            sample.hidden_states, sample.observations
+        )
+        mc_q1 = get_q_values(feature_obs, sample.actions, mc_q1_net)
+        mc_q2 = get_q_values(feature_obs, sample.actions, mc_q2_net)
+
+        q1_loss = ((mc_q1 - sample.returns) ** 2).mean()
+        q2_loss = ((mc_q2 - sample.returns) ** 2).mean()
+        q_loss = q1_loss + q2_loss
+        return q_loss
+
     def loss_alpha(
         log_alpha: jax.Array,
         actor_net: nnx.Module,
@@ -314,6 +331,34 @@ def create_SAC(
             min_qf_pi = jnp.minimum(qf1_pi, qf2_pi)
             return ((alpha * log_pi) - min_qf_pi).mean()
 
+    def loss_lambda_discrepancy(
+        feature_extractor_net: nnx.Module,
+        mc_q1_net: nnx.Module,
+        mc_q2_net: nnx.Module,
+        q1_net: nnx.Module,
+        q2_net: nnx.Module,
+        actor_net: nnx.Module,
+        buffer: Buffer,
+        key,
+    ):
+        sample: BufferSample = buffer_functions.sample(buffer, key)
+        feature_obs, _ = feature_extractor_net(  # type: ignore
+            sample.hidden_states, sample.observations
+        )
+        actions = sample.actions
+        if params.resample_actions:
+            pi, _ = get_action(feature_obs, actor_net, key)
+            actions = pi
+        mc_q1 = get_q_values(feature_obs, actions, mc_q1_net)
+        mc_q2 = get_q_values(feature_obs, actions, mc_q2_net)
+        mc_q = jnp.minimum(mc_q1, mc_q2)
+
+        q1 = get_q_values(feature_obs, actions, q1_net)
+        q2 = get_q_values(feature_obs, actions, q2_net)
+        q = jnp.minimum(q1, q2)
+
+        return ((mc_q - q) ** 2).mean(), (mc_q, q)
+
     @nnx.jit
     def learn(
         state: SACState,
@@ -321,9 +366,16 @@ def create_SAC(
         print(state.random_key)
 
         def update_step(state: SACState, _unused_scan_input):
-            key_next, key_q, key_actor, key_action, key_env, key_alpha = (
-                jax.random.split(state.random_key, 6)
-            )
+            (
+                key_next,
+                key_q,
+                key_actor,
+                key_action,
+                key_env,
+                key_alpha,
+                key_mc,
+                key_ld,
+            ) = jax.random.split(state.random_key, 8)
             action, hidden_state = predict(
                 state.obs,
                 state.hidden_state,
@@ -340,6 +392,8 @@ def create_SAC(
                 state.hidden_state,
                 state.env_state,
                 buffer_functions,
+                params.gamma,
+                params.lambda_discrepancy_coef > 0.0,
                 key_env,
             )
             hidden_state = jax.lax.select(
@@ -360,11 +414,6 @@ def create_SAC(
                 buffer,
                 key_q,
             )
-            state.q1.optimizer.update(state.q1.net, grads_q[0])
-            state.q2.optimizer.update(state.q2.net, grads_q[1])
-            state.feature_extractor.optimizer.update(
-                state.feature_extractor.net, grads_q[2]
-            )
 
             value_loss_actor, grads_actor = nnx.value_and_grad(loss_actor)(
                 state.actor.net,
@@ -375,7 +424,42 @@ def create_SAC(
                 buffer,
                 key_actor,
             )
+            grads_fe = grads_q[2]
+
+            if params.lambda_discrepancy_coef > 0:
+                value_loss_mc, grads_mc = nnx.value_and_grad(
+                    loss_mc, has_aux=False, argnums=[0, 1]
+                )(
+                    state.mc_q1.net,
+                    state.mc_q2.net,
+                    state.feature_extractor.net,
+                    buffer,
+                    key_mc,
+                )
+
+                (value_loss_ld, (mc_q, q)), grads_ld = nnx.value_and_grad(
+                    loss_lambda_discrepancy, has_aux=True
+                )(
+                    state.feature_extractor.net,
+                    state.mc_q1.target_net if params.use_q_targets else state.mc_q1.net,
+                    state.mc_q2.target_net if params.use_q_targets else state.mc_q2.net,
+                    state.q1.target_net if params.use_q_targets else state.q1.net,
+                    state.q2.target_net if params.use_q_targets else state.q2.net,
+                    state.actor.net,
+                    buffer,
+                    key_ld,
+                )
+
             state.actor.optimizer.update(state.actor.net, grads_actor)
+            state.q1.optimizer.update(state.q1.net, grads_q[0])
+            state.q2.optimizer.update(state.q2.net, grads_q[1])
+            if params.lambda_discrepancy_coef > 0:
+                state.mc_q1.optimizer.update(state.mc_q1.net, grads_mc[0])
+                state.mc_q2.optimizer.update(state.mc_q2.net, grads_mc[1])
+                grads_fe = jax.tree.map(lambda x, y: (1-params.lambda_discrepancy_coef)*x + params.lambda_discrepancy_coef * y, grads_fe, grads_ld)
+            state.feature_extractor.optimizer.update(
+                state.feature_extractor.net, grads_q[2]
+            )
 
             if params.autotune:
                 (value_loss_alpha, entropy), grads_alpha = nnx.value_and_grad(
@@ -405,6 +489,8 @@ def create_SAC(
             # target update
             new_q1 = state.q1
             new_q2 = state.q2
+            new_mc_q1 = state.mc_q1
+            new_mc_q2 = state.mc_q2
             new_feature_extractor = state.feature_extractor
             if params.use_q_targets:
                 update_param = jax.lax.select(
@@ -445,6 +531,29 @@ def create_SAC(
                     target_net=new_feature_extractor_target,
                     optimizer=state.feature_extractor.optimizer,
                 )
+                if params.lambda_discrepancy_coef > 0.0:
+                    new_mc_q1_target = jax.tree.map(
+                        lambda net, target: update_param * net
+                        + (1 - update_param) * target,
+                        state.mc_q1.net,
+                        state.mc_q1.target_net,
+                    )
+                    new_mc_q1 = Network(
+                        net=state.mc_q1.net,
+                        target_net=new_mc_q1_target,
+                        optimizer=state.mc_q1.optimizer,
+                    )
+                    new_mc_q2_target = jax.tree.map(
+                        lambda net, target: update_param * net
+                        + (1 - update_param) * target,
+                        state.mc_q2.net,
+                        state.mc_q2.target_net,
+                    )
+                    new_mc_q2 = Network(
+                        net=state.mc_q2.net,
+                        target_net=new_mc_q2_target,
+                        optimizer=state.mc_q2.optimizer,
+                    )
 
             return (
                 SACState(
@@ -452,6 +561,8 @@ def create_SAC(
                     actor=state.actor,
                     q1=new_q1,
                     q2=new_q2,
+                    mc_q1=new_mc_q1,
+                    mc_q2=new_mc_q2,
                     alpha=new_alpha,
                     buffer=buffer,
                     obs=obs,
@@ -467,6 +578,12 @@ def create_SAC(
                     "train/loss_actor": value_loss_actor,
                     "train/loss_alpha": value_loss_alpha,
                     "train/entropy": -entropy,
+                    "train/loss_mc": (
+                        0 if params.lambda_discrepancy_coef == 0.0 else value_loss_mc
+                    ),
+                    "train/loss_ld": (
+                        0 if params.lambda_discrepancy_coef == 0.0 else value_loss_ld
+                    ),
                 },
             )
 
@@ -487,6 +604,8 @@ def create_SAC(
                 actor=state.actor,
                 q1=state.q1,
                 q2=state.q2,
+                mc_q1=state.mc_q1,
+                mc_q2=state.mc_q2,
                 alpha=state.alpha,
                 buffer=buffer,
                 obs=state.obs,
@@ -625,6 +744,35 @@ def create_SAC(
             ),
             lr=params.q_lr,
         )
+
+        mc_q1 = create_network(
+            net=SimpleNet(
+                observation_space_size + params.hidden_state_dim,
+                action_space_size,
+                nnx.Rngs(params.seed),
+            ),
+            target_net=SimpleNet(
+                observation_space_size + params.hidden_state_dim,
+                action_space_size,
+                nnx.Rngs(params.seed),
+            ),
+            lr=params.q_lr,
+        )
+
+        mc_q2 = create_network(
+            net=SimpleNet(
+                observation_space_size + params.hidden_state_dim,
+                action_space_size,
+                nnx.Rngs(params.seed),
+            ),
+            target_net=SimpleNet(
+                observation_space_size + params.hidden_state_dim,
+                action_space_size,
+                nnx.Rngs(params.seed),
+            ),
+            lr=params.q_lr,
+        )
+
     else:
         q1 = create_network(
             net=SimpleNet(
@@ -641,6 +789,34 @@ def create_SAC(
         )
 
         q2 = create_network(
+            net=SimpleNet(
+                observation_space_size + action_space_size + params.hidden_state_dim,
+                1,
+                nnx.Rngs(params.seed),
+            ),
+            target_net=SimpleNet(
+                observation_space_size + action_space_size + params.hidden_state_dim,
+                1,
+                nnx.Rngs(params.seed),
+            ),
+            lr=params.q_lr,
+        )
+
+        mc_q1 = create_network(
+            net=SimpleNet(
+                observation_space_size + action_space_size + params.hidden_state_dim,
+                1,
+                nnx.Rngs(params.seed),
+            ),
+            target_net=SimpleNet(
+                observation_space_size + action_space_size + params.hidden_state_dim,
+                1,
+                nnx.Rngs(params.seed),
+            ),
+            lr=params.q_lr,
+        )
+
+        mc_q2 = create_network(
             net=SimpleNet(
                 observation_space_size + action_space_size + params.hidden_state_dim,
                 1,
@@ -671,6 +847,8 @@ def create_SAC(
         actor=actor,
         q1=q1,
         q2=q2,
+        mc_q1=mc_q1,
+        mc_q2=mc_q2,
         alpha=create_alpha(params.alpha, params.q_lr),
         buffer=buffer,
         obs=obs,
