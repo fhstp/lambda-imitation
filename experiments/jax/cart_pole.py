@@ -25,7 +25,7 @@ if len(sys.argv) > 1:
         args = yaml.safe_load(file.read())
 args["seed"] = np.random.randint(1000000)
 # args["policy_update_frequency"] = 50
-args["use_importance_sampling"] = True
+# args["use_importance_sampling"] = True
 
 hyperparameters = Hyperparameters(**args)
 run = wandb.init(
@@ -44,31 +44,48 @@ sac_state, functions, buffer_functions = create_SAC(
 )
 
 
-class LSTMExtractor(nnx.Module):
-    def __init__(self, din, dout, rngs):
-        self.lstm = nnx.OptimizedLSTMCell(din, dout, rngs=rngs)
+if hyperparameters.hidden_state_dim > 0:
 
-    def __call__(self, carry, x):
-        x = x.at[..., 3].set(0).at[..., 1].set(0)
-        carry = (
-            carry[..., : hyperparameters.hidden_state_dim],
-            carry[..., hyperparameters.hidden_state_dim :],
-        )
-        (c, h), _ = self.lstm(carry, x)
-        feature_obs = jnp.concatenate([x, h], axis=-1)
-        carry = jnp.concatenate([c, h], axis=-1)  # type: ignore
-        return feature_obs, carry
+    class LSTMExtractor(nnx.Module):
+        def __init__(self, din, dout, rngs):
+            self.lstm = nnx.OptimizedLSTMCell(din, dout, rngs=rngs)
 
+        def __call__(self, carry, x):
+            x = x.at[..., 3].set(0).at[..., 1].set(0)
+            carry = (
+                carry[..., : hyperparameters.hidden_state_dim],
+                carry[..., hyperparameters.hidden_state_dim :],
+            )
+            (c, h), _ = self.lstm(carry, x)
+            feature_obs = jnp.concatenate([x, h], axis=-1)
+            carry = jnp.concatenate([c, h], axis=-1)  # type: ignore
+            return feature_obs, carry
 
-feature_extractor = create_network(
-    net=LSTMExtractor(
-        4, hyperparameters.hidden_state_dim, nnx.Rngs(hyperparameters.seed)
-    ),
-    target_net=LSTMExtractor(
-        4, hyperparameters.hidden_state_dim, nnx.Rngs(hyperparameters.seed)
-    ),
-    lr=hyperparameters.feature_extractor_lr,
-)
+    feature_extractor = create_network(
+        net=LSTMExtractor(
+            4, hyperparameters.hidden_state_dim, nnx.Rngs(hyperparameters.seed)
+        ),
+        target_net=LSTMExtractor(
+            4, hyperparameters.hidden_state_dim, nnx.Rngs(hyperparameters.seed)
+        ),
+        lr=hyperparameters.feature_extractor_lr,
+    )
+else:
+
+    class IdentityExtractor(nnx.Module):
+        def __init__(self):
+            pass
+
+        def __call__(self, carry, x):
+            x = x.at[..., 3].set(0).at[..., 1].set(0)
+            return x, carry
+
+    feature_extractor = create_network(
+        net=IdentityExtractor(),
+        target_net=IdentityExtractor(),
+        lr=hyperparameters.feature_extractor_lr,
+    )
+
 eval = evaluate(
     sac_state.actor.net,
     sac_state.feature_extractor.net,
