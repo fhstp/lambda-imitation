@@ -24,6 +24,8 @@ if len(sys.argv) > 1:
     with open(sys.argv[1]) as file:
         args = yaml.safe_load(file.read())
 args["seed"] = np.random.randint(1000000)
+# args["policy_update_frequency"] = 50
+args["use_importance_sampling"] = True
 
 hyperparameters = Hyperparameters(**args)
 run = wandb.init(
@@ -67,18 +69,18 @@ feature_extractor = create_network(
     ),
     lr=hyperparameters.feature_extractor_lr,
 )
-print(
-    evaluate(
-        sac_state.actor.net,
-        sac_state.feature_extractor.net,
-        env,
-        env_params,
-        functions.predict,
-        hyperparameters.hidden_state_dim,
-        key,
-        5,
-    )
+eval = evaluate(
+    sac_state.actor.net,
+    sac_state.feature_extractor.net,
+    env,
+    env_params,
+    functions.predict,
+    hyperparameters.hidden_state_dim,
+    key,
+    5,
 )
+log = {"eval/return": eval}
+run.log(log, step=0)
 
 
 # Perform the step transition.
@@ -86,13 +88,14 @@ buffer = sac_state.buffer
 env_state = sac_state.env_state
 obs = sac_state.obs
 hidden_state = sac_state.hidden_state
-for _ in range(256):
+for _ in range(hyperparameters.learning_starts):
     key_act, split, key_env = jax.random.split(key_act, 3)
     action = env.action_space(env_params).sample(split)  # type: ignore
     buffer, obs, done, env_state = run_env_step(
         env,
         env_params,
         action,
+        0.5,
         buffer,
         obs,
         hidden_state,
@@ -103,6 +106,22 @@ for _ in range(256):
         key_env,
     )
     _, hidden_state = sac_state.feature_extractor.net(hidden_state, obs)  # type: ignore
+
+sac_state = SACState(
+    feature_extractor=sac_state.feature_extractor,
+    actor=sac_state.actor,
+    q1=sac_state.q1,
+    q2=sac_state.q2,
+    mc_q1=sac_state.mc_q1,
+    mc_q2=sac_state.mc_q2,
+    alpha=sac_state.alpha,
+    buffer=buffer,
+    obs=sac_state.obs,
+    hidden_state=sac_state.hidden_state,
+    env_state=sac_state.env_state,
+    random_key=sac_state.random_key,
+    n_updates=sac_state.n_updates,
+)
 
 from tqdm.rich import tqdm
 
@@ -125,4 +144,5 @@ for i in tqdm(range(1000)):
     log = {"eval/return": eval}
     for key in metrics:
         log[key] = metrics[key].mean()
-    run.log(log, step=i * learn_steps)
+    # print(metrics["train/mc_q_values"])
+    run.log(log, step=(i + 1) * learn_steps)

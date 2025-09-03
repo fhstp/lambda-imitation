@@ -31,7 +31,7 @@ class Hyperparameters(NamedTuple):
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 256
     """the batch size of sample from the replay memory"""
-    learning_starts: int = 0
+    learning_starts: int = 256
     """timestep to start learning"""
     policy_lr: float = 3e-4
     """the learning rate of the policy network optimizer"""
@@ -57,6 +57,8 @@ class Hyperparameters(NamedTuple):
     """Whether or not to re-calculate actions in calculation of lambda-discrepancy"""
     resample_actions: bool = True
     """Whether or not to resample actions or just take buffer actions when calculating lambda discrepancy"""
+    use_importance_sampling: bool = False
+    """Whether or not to use importance sampling for MC approximation"""
 
 
 class Network(NamedTuple):
@@ -109,11 +111,12 @@ class SACFunctions(NamedTuple):
     predict: Callable
 
 
-@partial(nnx.jit, static_argnums=[0, 1, 7, 9])
+@partial(nnx.jit, static_argnums=[0, 1, 8, 10])
 def run_env_step(
     env,
     env_params,
     action,
+    action_prob,
     buffer: Buffer,
     current_obs,
     hidden_state,
@@ -126,7 +129,7 @@ def run_env_step(
     key_step, key_reset = jax.random.split(key)
     obs, state, reward, done, _ = env.step(key_step, env_state, action, env_params)
     new_buffer: Buffer = buffer_functions.add(
-        buffer, current_obs, hidden_state, action, reward, done, gamma, calculate_return
+        buffer, current_obs, hidden_state, action, action_prob, reward, done, gamma, calculate_return
     )
     # reset_obs, reset_state = env.reset(key_reset, env_params)
     # return_obs = jax.tree.map(lambda x, y: done * x + (1 - done) * y, reset_obs, obs)
@@ -169,10 +172,38 @@ def create_SAC(
             action = y_t * action_scale + action_bias
             log_prob = (
                 -((x_t - mean) ** 2) / (2 * std)
-                - jnp.sqrt(2 * jnp.pi * std**2)
+                - 0.5*jnp.log(2 * jnp.pi * std**2)
                 - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
             )
             return action, log_prob
+
+    def get_action_probs(observations, actions, actor_net):
+        if discrete_action_space:
+            logits = actor_net(observations)
+            probs = jax.nn.softmax(logits, axis=1)
+            return jnp.take_along_axis(
+                probs,
+                jnp.reshape(actions.astype(jnp.int32), (params.batch_size, 1)),
+                1,
+            ).reshape(-1)
+        else:
+            actor_out = actor_net(observations)  # type: ignore
+            mean, log_std = (
+                actor_out[..., :action_space_size],
+                actor_out[..., action_space_size:],
+            )
+            log_std = jnp.tanh(log_std)
+            log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
+            std = jnp.exp(log_std)
+            y_t = (actions - action_bias)/action_scale
+            x_t = jnp.atanh(y_t)
+            prob = jnp.exp(
+                -((x_t - mean) ** 2) / (2 * std)
+                - 0.5*jnp.log(2 * jnp.pi * std**2)
+                - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
+            )
+            return prob
+
 
     def get_q_values(observations, actions, net):
         if discrete_action_space:
@@ -197,7 +228,8 @@ def create_SAC(
         key,
     ):
         key_sample, key_next_actions = jax.random.split(key)
-        sample: BufferSample = buffer_functions.sample(buffer, key_sample)
+        sample: BufferSample; indices: jax.Array
+        sample, indices = buffer_functions.sample(buffer, key_sample)
         feature_obs, hidden_state_obs = feature_extractor_net(  # type: ignore
             sample.hidden_states, sample.observations
         )
@@ -266,17 +298,20 @@ def create_SAC(
         buffer: Buffer,
         key,
     ):
-        sample: BufferSample = buffer_functions.sample(buffer, key)
+        sample: BufferSample; indices: jax.Array
+        sample, indices = buffer_functions.sample(buffer, key, params.use_importance_sampling)
         feature_obs, _ = feature_extractor_net(  # type: ignore
             sample.hidden_states, sample.observations
         )
         mc_q1 = get_q_values(feature_obs, sample.actions, mc_q1_net)
         mc_q2 = get_q_values(feature_obs, sample.actions, mc_q2_net)
 
-        q1_loss = ((mc_q1 - sample.returns) ** 2).mean()
-        q2_loss = ((mc_q2 - sample.returns) ** 2).mean()
+        # jax.debug.print('importance={x}', x=sample.importance_factors)
+        # jax.debug.print('indices={x}', x=buffer.sampling_ok[:200])
+        q1_loss = (sample.importance_factors*(mc_q1 - sample.returns) ** 2).mean()
+        q2_loss = (sample.importance_factors*(mc_q2 - sample.returns) ** 2).mean()
         q_loss = q1_loss + q2_loss
-        return q_loss
+        return q_loss, sample.importance_factors
 
     def loss_alpha(
         log_alpha: jax.Array,
@@ -285,7 +320,8 @@ def create_SAC(
         buffer: Buffer,
         key,
     ):
-        sample: BufferSample = buffer_functions.sample(buffer, key)
+        sample: BufferSample; indices: jax.Array
+        sample, indices = buffer_functions.sample(buffer, key)
         feature_obs, _ = feature_extractor_net(  # type: ignore
             sample.hidden_states, sample.observations
         )
@@ -310,7 +346,8 @@ def create_SAC(
         buffer: Buffer,
         key,
     ):
-        sample: BufferSample = buffer_functions.sample(buffer, key)
+        sample: BufferSample; indices: jax.Array
+        sample, indices = buffer_functions.sample(buffer, key)
         feature_obs, _ = feature_extractor_net(  # type: ignore
             sample.hidden_states, sample.observations
         )
@@ -341,7 +378,8 @@ def create_SAC(
         buffer: Buffer,
         key,
     ):
-        sample: BufferSample = buffer_functions.sample(buffer, key)
+        sample: BufferSample; indices: jax.Array
+        sample, indices = buffer_functions.sample(buffer, key)
         feature_obs, _ = feature_extractor_net(  # type: ignore
             sample.hidden_states, sample.observations
         )
@@ -368,6 +406,7 @@ def create_SAC(
         def update_step(state: SACState, _unused_scan_input):
             (
                 key_next,
+                key_sample,
                 key_q,
                 key_actor,
                 key_action,
@@ -375,19 +414,46 @@ def create_SAC(
                 key_alpha,
                 key_mc,
                 key_ld,
-            ) = jax.random.split(state.random_key, 8)
-            action, hidden_state = predict(
+            ) = jax.random.split(state.random_key, 9)
+            action, hidden_state, action_prob = predict(
                 state.obs,
                 state.hidden_state,
                 state.actor.net,
                 state.feature_extractor.net,
                 key_action,
             )
+            # recalculate action probs
+            buffer = state.buffer
+            if params.lambda_discrepancy_coef > 0.0:
+                sample: BufferSample; indices: jax.Array
+                sample, indices = buffer_functions.sample(buffer, key_sample)
+                feature_obs, _ = state.feature_extractor.net(  # type: ignore
+                    sample.hidden_states, sample.observations
+                )
+                # policy_probs = buffer.policy_probs
+                probs = get_action_probs(feature_obs, sample.actions, state.actor.net)
+                policy_probs = buffer.policy_probs.at[indices].set(probs)
+                buffer = Buffer(
+                    observations=buffer.observations,
+                    hidden_states=buffer.hidden_states,
+                    actions=buffer.actions,
+                    rewards=buffer.rewards,
+                    returns=buffer.returns,
+                    behavior_probs=buffer.behavior_probs,
+                    policy_probs=policy_probs,
+                    importance_factors=buffer.importance_factors,
+                    terminated=buffer.terminated,
+                    sampling_ok=buffer.sampling_ok,
+                    pos=buffer.pos,
+                    size=buffer.size,
+                )
+
             buffer, obs, done, env_state = run_env_step(
                 env,
                 env_params,
                 action,
-                state.buffer,
+                action_prob,
+                buffer,
                 state.obs,
                 state.hidden_state,
                 state.env_state,
@@ -427,8 +493,8 @@ def create_SAC(
             grads_fe = grads_q[2]
 
             if params.lambda_discrepancy_coef > 0:
-                value_loss_mc, grads_mc = nnx.value_and_grad(
-                    loss_mc, has_aux=False, argnums=[0, 1]
+                (value_loss_mc, importance_factors), grads_mc = nnx.value_and_grad(
+                    loss_mc, has_aux=True, argnums=[0, 1]
                 )(
                     state.mc_q1.net,
                     state.mc_q2.net,
@@ -575,6 +641,10 @@ def create_SAC(
                     "train/loss_q": value_loss_q,
                     "train/q1_values": q1_values.mean(),
                     "train/q2_values": q2_values.mean(),
+                    "train/mc_q_values": 
+                        0 if params.lambda_discrepancy_coef == 0.0 else mc_q.mean(),
+                    "train/importance_factors": 
+                        0 if params.lambda_discrepancy_coef == 0.0 else importance_factors.mean(),
                     "train/loss_actor": value_loss_actor,
                     "train/loss_alpha": value_loss_alpha,
                     "train/entropy": -entropy,
@@ -626,7 +696,7 @@ def create_SAC(
 
     def predict(
         obs, hidden_state, actor_net, feature_net, key, deterministic=False
-    ) -> Tuple[jax.Array, jax.Array]:
+    ) -> Tuple[jax.Array, jax.Array, jax.Array]:
         obs = obs.reshape(1, -1)
         hidden_state = hidden_state.reshape(1, -1)
         feature_obs, hidden_state = feature_net(hidden_state, obs)
@@ -634,9 +704,10 @@ def create_SAC(
         if discrete_action_space:
             logits = actor_net(feature_obs)
             if deterministic:
-                return jnp.argmax(logits), hidden_state
+                return jnp.argmax(logits), hidden_state, 1.0
             else:
-                return jax.random.categorical(key, logits)[0], hidden_state
+                action = jax.random.categorical(key, logits)[0]
+                return action, hidden_state, jax.nn.softmax(logits[0])[action]
         else:
             actor_out = actor_net(feature_obs)
             mean, log_std = (
@@ -644,14 +715,22 @@ def create_SAC(
                 actor_out[..., action_space_size:],
             )
             if deterministic:
-                return mean.reshape(-1), hidden_state
+                return mean.reshape(-1), hidden_state, 1.0
             log_std = jnp.tanh(log_std)
             log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
             std = jnp.exp(log_std)
             x_t = jax.random.normal(key, mean.shape) * std + mean
             y_t = jnp.tanh(x_t)
             action = y_t * action_scale + action_bias
-            return action.reshape(-1), hidden_state
+            action =action.reshape(-1)
+            mean = mean.reshape(-1)
+            std = std.reshape(-1)
+            prob = jnp.exp(
+                -((x_t - mean) ** 2) / (2 * std)
+                - 0.5*jnp.log(2 * jnp.pi * std**2)
+                - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
+            )
+            return action, hidden_state, prob
 
     class SimpleNet(nnx.Module):
         def __init__(self, din, dout, rngs):
@@ -836,6 +915,7 @@ def create_SAC(
         2 * params.hidden_state_dim,
         params.buffer_size,
         params.batch_size,
+        params.use_importance_sampling
     )
 
     key = jax.random.key(params.seed)
@@ -881,7 +961,7 @@ def evaluate(
             """lax.scan compatible step transition in jax env."""
             obs, hidden_state, state, key = state_input
             key, key_step, key_net = jax.random.split(key, 3)
-            action, next_hidden_state = predict(
+            action, next_hidden_state, _ = predict(
                 obs, hidden_state, actor_net, feature_net, key_net, deterministic=True
             )
             next_obs, next_state, reward, done, _ = env.step(
