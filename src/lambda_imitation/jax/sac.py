@@ -31,17 +31,17 @@ class Hyperparameters(NamedTuple):
     """Whether or not to use target nets for the policy"""
     policy_update_frequency: int = 1
     """How often targets are updated"""
-    tau: float = 0.005
+    tau: float = 0.0005
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 256
     """the batch size of sample from the replay memory"""
     learning_starts: int = 0
     """timestep to start learning"""
-    policy_lr: float = 3e-4
+    policy_lr: float = 1e-4
     """the learning rate of the policy network optimizer"""
-    q_lr: float = 3e-4
+    q_lr: float = 1e-4
     """the learning rate of the Q network network optimizer"""
-    feature_extractor_lr: float = 3e-4
+    feature_extractor_lr: float = 1e-4
     """the learning rate of the feature extractor network optimizer"""
     alpha: float = 1.0
     """Entropy regularization coefficient."""

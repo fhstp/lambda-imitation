@@ -28,7 +28,7 @@ run = wandb.init(
 )
 run.log_code(".")
 
-learn_steps = 1000
+learn_steps = 10000
 sac_state, functions, buffer_functions = create_SAC(
     env, env_params, 4, True, 2, learn_steps, hyperparameters
 )
