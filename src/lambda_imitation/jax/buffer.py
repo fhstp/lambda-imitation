@@ -55,7 +55,7 @@ def create_buffer(
         actions=jnp.zeros((size, action_space_size)),
         rewards=jnp.zeros((size,)),
         returns=jnp.zeros((size,)),
-        behavior_probs=jnp.zeros((size,)),
+        behavior_probs=jnp.ones((size,)),
         policy_probs=jnp.zeros((size,)),
         importance_factors=jnp.zeros((size,)),
         terminated=jnp.zeros((size,), dtype=jnp.bool),

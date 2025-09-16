@@ -172,7 +172,7 @@ def create_SAC(
             action = y_t * action_scale + action_bias
             log_prob = (
                 -((x_t - mean) ** 2) / (2 * std)
-                - 0.5*jnp.log(2 * jnp.pi * std**2)
+                - 0.5 * jnp.log(2 * jnp.pi * std**2)
                 - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
             )
             return action, log_prob
@@ -195,15 +195,14 @@ def create_SAC(
             log_std = jnp.tanh(log_std)
             log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
             std = jnp.exp(log_std)
-            y_t = (actions - action_bias)/action_scale
+            y_t = (actions - action_bias) / action_scale
             x_t = jnp.atanh(y_t)
             prob = jnp.exp(
                 -((x_t - mean) ** 2) / (2 * std)
-                - 0.5*jnp.log(2 * jnp.pi * std**2)
+                - 0.5 * jnp.log(2 * jnp.pi * std**2)
                 - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
             )
             return prob
-
 
     def get_q_values(observations, actions, net):
         if discrete_action_space:
@@ -228,7 +227,8 @@ def create_SAC(
         key,
     ):
         key_sample, key_next_actions = jax.random.split(key)
-        sample: BufferSample; indices: jax.Array
+        sample: BufferSample
+        indices: jax.Array
         sample, indices = buffer_functions.sample(buffer, key_sample)
         feature_obs, hidden_state_obs = feature_extractor_net(  # type: ignore
             sample.hidden_states, sample.observations
@@ -265,7 +265,7 @@ def create_SAC(
             next_actions = y_t * action_scale + action_bias
             log_prob = (
                 -((x_t - mean) ** 2) / (2 * std)
-                - jnp.sqrt(2 * jnp.pi * std**2)
+                - 0.5 * jnp.log(2 * jnp.pi * std**2)
                 - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
             )
             qf1_next_target = get_q_values(
