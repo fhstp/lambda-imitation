@@ -1,0 +1,23 @@
+---
+buffer_size: 10000
+gamma: 0.99
+use_q_targets: true
+use_policy_targets: true
+policy_update_frequency: 25
+tau: 0.005
+batch_size: 256
+learning_starts: 256
+policy_lr: 0.0003
+q_lr: 0.0003
+feature_extractor_lr: 0.0003
+alpha: 1.0
+autotune: true
+target_entropy: 0.4
+hidden_state_dim: 10
+hidden_state_recalculation_interval: 500
+recalculate_hidden_states_in_update: false
+lambda_discrepancy_coef: 0.0
+use_action_recalculation: true
+resample_actions: true
+use_importance_sampling: true
+
