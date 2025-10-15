@@ -7,8 +7,12 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import optax
 
-from lambda_imitation.jax.buffer import (Buffer, BufferFunctions, BufferSample,
-                                         create_buffer)
+from lambda_imitation.jax.buffer import (
+    Buffer,
+    BufferFunctions,
+    BufferSample,
+    create_buffer,
+)
 
 LOG_STD_MIN = -5
 LOG_STD_MAX = 2
@@ -129,7 +133,15 @@ def run_env_step(
     key_step, key_reset = jax.random.split(key)
     obs, state, reward, done, _ = env.step(key_step, env_state, action, env_params)
     new_buffer: Buffer = buffer_functions.add(
-        buffer, current_obs, hidden_state, action, action_prob, reward, done, gamma, calculate_return
+        buffer,
+        current_obs,
+        hidden_state,
+        action,
+        action_prob,
+        reward,
+        done,
+        gamma,
+        calculate_return,
     )
     # reset_obs, reset_state = env.reset(key_reset, env_params)
     # return_obs = jax.tree.map(lambda x, y: done * x + (1 - done) * y, reset_obs, obs)
@@ -298,8 +310,11 @@ def create_SAC(
         buffer: Buffer,
         key,
     ):
-        sample: BufferSample; indices: jax.Array
-        sample, indices = buffer_functions.sample(buffer, key, params.use_importance_sampling)
+        sample: BufferSample
+        indices: jax.Array
+        sample, indices = buffer_functions.sample(
+            buffer, key, params.use_importance_sampling
+        )
         feature_obs, _ = feature_extractor_net(  # type: ignore
             sample.hidden_states, sample.observations
         )
@@ -308,10 +323,10 @@ def create_SAC(
 
         # jax.debug.print('importance={x}', x=sample.importance_factors)
         # jax.debug.print('indices={x}', x=buffer.sampling_ok[:200])
-        q1_loss = (sample.importance_factors*(mc_q1 - sample.returns) ** 2).mean()
-        q2_loss = (sample.importance_factors*(mc_q2 - sample.returns) ** 2).mean()
+        q1_loss = (sample.importance_factors * (mc_q1 - sample.returns) ** 2).mean()
+        q2_loss = (sample.importance_factors * (mc_q2 - sample.returns) ** 2).mean()
         q_loss = q1_loss + q2_loss
-        return q_loss, sample.importance_factors
+        return q_loss, (sample.importance_factors, sample.returns)
 
     def loss_alpha(
         log_alpha: jax.Array,
@@ -320,7 +335,8 @@ def create_SAC(
         buffer: Buffer,
         key,
     ):
-        sample: BufferSample; indices: jax.Array
+        sample: BufferSample
+        indices: jax.Array
         sample, indices = buffer_functions.sample(buffer, key)
         feature_obs, _ = feature_extractor_net(  # type: ignore
             sample.hidden_states, sample.observations
@@ -346,7 +362,8 @@ def create_SAC(
         buffer: Buffer,
         key,
     ):
-        sample: BufferSample; indices: jax.Array
+        sample: BufferSample
+        indices: jax.Array
         sample, indices = buffer_functions.sample(buffer, key)
         feature_obs, _ = feature_extractor_net(  # type: ignore
             sample.hidden_states, sample.observations
@@ -378,7 +395,8 @@ def create_SAC(
         buffer: Buffer,
         key,
     ):
-        sample: BufferSample; indices: jax.Array
+        sample: BufferSample
+        indices: jax.Array
         sample, indices = buffer_functions.sample(buffer, key)
         feature_obs, _ = feature_extractor_net(  # type: ignore
             sample.hidden_states, sample.observations
@@ -425,7 +443,8 @@ def create_SAC(
             # recalculate action probs
             buffer = state.buffer
             if params.lambda_discrepancy_coef > 0.0:
-                sample: BufferSample; indices: jax.Array
+                sample: BufferSample
+                indices: jax.Array
                 sample, indices = buffer_functions.sample(buffer, key_sample)
                 feature_obs, _ = state.feature_extractor.net(  # type: ignore
                     sample.hidden_states, sample.observations
@@ -493,9 +512,10 @@ def create_SAC(
             grads_fe = grads_q[2]
 
             if params.lambda_discrepancy_coef > 0:
-                (value_loss_mc, importance_factors), grads_mc = nnx.value_and_grad(
-                    loss_mc, has_aux=True, argnums=[0, 1]
-                )(
+                (
+                    value_loss_mc,
+                    (importance_factors, returns),
+                ), grads_mc = nnx.value_and_grad(loss_mc, has_aux=True, argnums=[0, 1])(
                     state.mc_q1.net,
                     state.mc_q2.net,
                     state.feature_extractor.net,
@@ -522,7 +542,19 @@ def create_SAC(
             if params.lambda_discrepancy_coef > 0:
                 state.mc_q1.optimizer.update(state.mc_q1.net, grads_mc[0])
                 state.mc_q2.optimizer.update(state.mc_q2.net, grads_mc[1])
-                grads_fe = jax.tree.map(lambda x, y: (1-params.lambda_discrepancy_coef)*x + params.lambda_discrepancy_coef * y, grads_fe, grads_ld)
+                # jax.debug.print(
+                #     "actor: {x}", x=jax.tree.map(lambda x: x.mean(), grads_actor)
+                # )
+                # jax.debug.print("q: {x}", x=jax.tree.map(lambda x: x.mean(), grads_q))
+                # jax.debug.print("mc: {x}", x=jax.tree.map(lambda x: x.mean(), grads_mc))
+                # jax.debug.print("fe: {x}", x=jax.tree.map(lambda x: x.mean(), grads_fe))
+                # jax.debug.print("ld: {x}", x=jax.tree.map(lambda x: x.mean(), grads_ld))
+                grads_fe = jax.tree.map(
+                    lambda x, y: (1 - params.lambda_discrepancy_coef) * x
+                    + params.lambda_discrepancy_coef * y,
+                    grads_fe,
+                    grads_ld,
+                )
             state.feature_extractor.optimizer.update(
                 state.feature_extractor.net, grads_q[2]
             )
@@ -641,10 +673,17 @@ def create_SAC(
                     "train/loss_q": value_loss_q,
                     "train/q1_values": q1_values.mean(),
                     "train/q2_values": q2_values.mean(),
-                    "train/mc_q_values": 
-                        0 if params.lambda_discrepancy_coef == 0.0 else mc_q.mean(),
-                    "train/importance_factors": 
-                        0 if params.lambda_discrepancy_coef == 0.0 else importance_factors.mean(),
+                    "train/mc_q_values": (
+                        0 if params.lambda_discrepancy_coef == 0.0 else mc_q.mean()
+                    ),
+                    "train/importance_factors": (
+                        0
+                        if params.lambda_discrepancy_coef == 0.0
+                        else importance_factors.mean()
+                    ),
+                    "train/returns": (
+                        0 if params.lambda_discrepancy_coef == 0.0 else returns.mean()
+                    ),
                     "train/loss_actor": value_loss_actor,
                     "train/loss_alpha": value_loss_alpha,
                     "train/entropy": -entropy,
@@ -722,12 +761,12 @@ def create_SAC(
             x_t = jax.random.normal(key, mean.shape) * std + mean
             y_t = jnp.tanh(x_t)
             action = y_t * action_scale + action_bias
-            action =action.reshape(-1)
+            action = action.reshape(-1)
             mean = mean.reshape(-1)
             std = std.reshape(-1)
             prob = jnp.exp(
                 -((x_t - mean) ** 2) / (2 * std)
-                - 0.5*jnp.log(2 * jnp.pi * std**2)
+                - 0.5 * jnp.log(2 * jnp.pi * std**2)
                 - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
             )
             return action, hidden_state, prob
@@ -915,7 +954,7 @@ def create_SAC(
         2 * params.hidden_state_dim,
         params.buffer_size,
         params.batch_size,
-        params.use_importance_sampling
+        params.use_importance_sampling,
     )
 
     key = jax.random.key(params.seed)
