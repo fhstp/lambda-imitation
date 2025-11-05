@@ -183,7 +183,7 @@ def create_SAC(
             y_t = jnp.tanh(x_t)
             action = y_t * action_scale + action_bias
             log_prob = (
-                -((x_t - mean) ** 2) / (2 * std)
+                -((x_t - mean) ** 2) / (2 * std**2)
                 - 0.5 * jnp.log(2 * jnp.pi * std**2)
                 - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
             )
@@ -210,7 +210,7 @@ def create_SAC(
             y_t = (actions - action_bias) / action_scale
             x_t = jnp.atanh(y_t)
             prob = jnp.exp(
-                -((x_t - mean) ** 2) / (2 * std)
+                -((x_t - mean) ** 2) / (2 * std**2)
                 - 0.5 * jnp.log(2 * jnp.pi * std**2)
                 - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
             )
@@ -276,7 +276,7 @@ def create_SAC(
             y_t = jnp.tanh(x_t)
             next_actions = y_t * action_scale + action_bias
             log_prob = (
-                -((x_t - mean) ** 2) / (2 * std)
+                -((x_t - mean) ** 2) / (2 * std**2)
                 - 0.5 * jnp.log(2 * jnp.pi * std**2)
                 - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
             )
@@ -382,7 +382,7 @@ def create_SAC(
             xa = jnp.concatenate([feature_obs, pi], axis=-1)
             qf1_pi = q1_net(xa)  # type: ignore
             qf2_pi = q2_net(xa)  # type: ignore
-            min_qf_pi = jnp.minimum(qf1_pi, qf2_pi)
+            min_qf_pi = jnp.minimum(qf1_pi, qf2_pi).reshape(-1)
             return ((alpha * log_pi) - min_qf_pi).mean()
 
     def loss_lambda_discrepancy(
@@ -765,7 +765,7 @@ def create_SAC(
             mean = mean.reshape(-1)
             std = std.reshape(-1)
             prob = jnp.exp(
-                -((x_t - mean) ** 2) / (2 * std)
+                -((x_t - mean) ** 2) / (2 * std**2)
                 - 0.5 * jnp.log(2 * jnp.pi * std**2)
                 - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
             )
