@@ -121,4 +121,4 @@ def train(config):
         run.log(log, step=(i + 1) * learn_steps)
 
 
-wandb.agent(sweep_id, train)
+wandb.agent("pwato51u", train)
