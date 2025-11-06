@@ -7,9 +7,9 @@ policy_update_frequency: 25
 tau: 0.0005
 batch_size: 256
 learning_starts: 256
-policy_lr: 0.0003
-q_lr: 0.0003
-feature_extractor_lr: 0.0003
+policy_lr: 0.0001
+q_lr: 0.0001
+feature_extractor_lr: 0.0001
 alpha: 1.0
 autotune: true
 target_entropy: 0.2

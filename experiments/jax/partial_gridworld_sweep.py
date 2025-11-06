@@ -11,14 +11,6 @@ import wandb
 from lambda_imitation.jax.gridworld import PartiallyObservableGridworld
 from lambda_imitation.jax.sac import *
 
-args = {}
-if len(sys.argv) > 1:
-    with open(sys.argv[1]) as file:
-        args = yaml.safe_load(file.read())
-# args["policy_update_frequency"] = 50
-# args["use_importance_sampling"] = True
-
-
 def train(config):
     key = jax.random.key(0)
     key, key_reset, key_act = jax.random.split(key, 3)
