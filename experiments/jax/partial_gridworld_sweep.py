@@ -11,6 +11,7 @@ import wandb
 from lambda_imitation.jax.gridworld import PartiallyObservableGridworld
 from lambda_imitation.jax.sac import *
 
+
 def train(config):
     key = jax.random.key(0)
     key, key_reset, key_act = jax.random.split(key, 3)
@@ -23,8 +24,6 @@ def train(config):
         entity="fhstp-data-intelligence-research-group",
         # Set the wandb project where this run will be logged.
         project="jax-sac-partial-gridworld-sweep",
-        # Track hyperparameters and run metadata.
-        config=config,
     )
     args = run.config
     hyperparameters = Hyperparameters(**args)
@@ -113,4 +112,4 @@ def train(config):
         run.log(log, step=(i + 1) * learn_steps)
 
 
-wandb.agent("pwato51u", train)
+wandb.agent("o0npuxy3", train, project="jax-sac-partial-gridworld-sweep")
