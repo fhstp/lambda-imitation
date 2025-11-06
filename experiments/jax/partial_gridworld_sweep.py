@@ -112,4 +112,4 @@ def train(config):
         run.log(log, step=(i + 1) * learn_steps)
 
 
-wandb.agent("o0npuxy3", train, project="jax-sac-partial-gridworld-sweep")
+wandb.agent("o0npuxy3", train, project="jax-sac-partial-gridworld-sweep", count=1)
