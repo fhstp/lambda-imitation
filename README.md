@@ -24,13 +24,16 @@
         - [ ] discrete
         - [ ] continuous
     - [ ] 2.6 (1): LSTM feature extraction
-    - [ ] 2.7 (2.3, 2.4): lambda discrepancy
+    - [ ] 2.7 (2.5): lambda discrepancy
     - [ ] 2.8 (2.6, 2.7): train LSTM feature extraction through lambda discrepancy
     - [ ] 2.9 (2.5): policy improvement
         - [ ] discrete
         - [ ] continuous
     - [ ] 2.10 (2.9): automatic alpha tuning
-    - [ ] 2.11 (2.10): logging of metrics in wandb
+    - [ ] 2.11: logging of metrics in wandb
  - [ ] AP3: IQLearn
     - [ ] 3.1 (2.5): reward training
     - [ ] 3.2 (3.1): logging of additional metrics
+
+Evaluation Environments:
+ - Discrete and Continuous Gridworlds, where Q-values are explicitly calculatable
