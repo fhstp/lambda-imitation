@@ -31,7 +31,7 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 
-from buffer import Buffer, BufferSample, create_sample
+from .buffer import Buffer, BufferSample, create_sample
 
 # Bounds for the squashed log-standard-deviation of the policy distribution.
 # The raw output is tanh-squashed and then rescaled into this range to keep
@@ -816,22 +816,3 @@ def create_iqlearn(
 
     graphs = IQLearnGraphs(actor_fe_graph, actor_head_graph, critic_fe_graph, critic_head_graph)
     return iqlearn, IQLearnFunctions(predict, train), graphs
-
-
-# Example usage:
-#
-# obs_dim, action_dim = 10, 2
-# rngs = nnx.Rngs(0)
-# buffer, buffer_fns = create_buffer(
-#     shapes={"observations": (obs_dim,), "actions": (action_dim,)},
-#     size=10000, sampling_size=256,
-#     this_step_infos=["observations", "actions"],
-#     next_step_infos=["observations"],
-# )
-# actor_fe = MLPFeatureExtractor(obs_dim, (256, 256), rngs=rngs)
-# critic_fe = MLPFeatureExtractor(obs_dim, (256, 256), rngs=rngs)
-# iqlearn, functions, _ = create_iqlearn(
-#     Hyperparameters(), buffer, action_dim, actor_fe, critic_fe,
-# )
-# iqlearn, metrics = functions.train(iqlearn, jax.random.key(0))
-# print(metrics)

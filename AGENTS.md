@@ -2,12 +2,30 @@
 
 ## Overview
 
-IQ-Learn (Inverse Q-Learning) imitation learning implementation in **Python** using **JAX + Flax NNX + Optax**. Currently on the `fresh_start` branch -- an active rewrite with two source files.
+IQ-Learn (Inverse Q-Learning) imitation learning implementation in **Python** using **JAX + Flax NNX + Optax**. Currently on the `fresh_start` branch. The project is structured as an installable Python package (`lambda-imitation`) with a `src/` layout.
+
+## Repository layout
+
+```
+src/
+    lambda_imitation/
+        __init__.py       ← public API re-exports
+        buffer.py         ← generic circular replay buffer
+        iqlearn.py        ← SAC-style actor-critic with IQ-Learn reward recovery
+        utils.py          ← environment-interface adapters and high-level factory
+tests/
+    __init__.py
+    test_buffer.py        ← 26 tests
+    test_iqlearn.py       ← 37 tests
+    test_utils.py         ← 37 tests
+pyproject.toml            ← hatchling build, optional extras, pytest config
+```
 
 ## Architecture
 
 - `buffer.py` -- Generic circular replay buffer using JAX arrays and NamedTuples
 - `iqlearn.py` -- SAC-style actor-critic with IQ-Learn reward recovery (configurable networks, continuous actions)
+- `utils.py` -- Environment-interface adapters: extracts `EnvSpec` from gymnasium / gymnax / jumanji environments, plus `create_iqlearn_from_env` high-level factory
 
 **Design pattern:** Purely functional. Both modules use a factory pattern (`create_buffer`, `create_iqlearn`) that returns `(state_namedtuple, functions_namedtuple)`. No mutable class state. Flax NNX models are split into graph definition + state via `nnx.split`/`nnx.merge` for functional updates inside `jax.jit`.
 
@@ -23,17 +41,26 @@ Both are stored together in a `NetworkState(fe, head)` NamedTuple, which is a JA
 
 `create_iqlearn` infers the feature dim by running a dummy forward pass on the provided feature extractor before splitting it. Use `nnx.List` (not plain `list`) for any collection of sub-modules inside an `nnx.Module`.
 
-## Dependencies (no manifest exists)
+## Dependencies
 
-Inferred from imports: `jax`, `jaxlib`, `flax` (NNX API), `optax`, `numpy`, `pytest`. Install manually; there is no `requirements.txt` or `pyproject.toml`.
+Declared in `pyproject.toml`. Install with:
+
+```
+pip install -e ".[dev]"          # core + pytest
+pip install -e ".[dev,gymnasium]"  # add gymnasium support
+```
+
+Core: `jax>=0.4.30`, `jaxlib>=0.4.30`, `flax>=0.9.0`, `optax>=0.2.0`, `numpy>=1.26`  
+Optional extras: `[gymnasium]`, `[gymnax]`, `[jumanji]`, `[dev]` (pytest)  
+Requires Python 3.10+ (uses `X | Y` union type syntax).
 
 ## Commands
 
-No build system, CI, linting, or formatting is configured.
-
-- Run all tests: `pytest test_buffer.py test_iqlearn.py`
-- Run buffer tests only: `pytest test_buffer.py`
-- Run iqlearn tests only: `pytest test_iqlearn.py`
+- Install: `pip install -e ".[dev]"`
+- Run all tests: `pytest tests/`
+- Run buffer tests only: `pytest tests/test_buffer.py`
+- Run iqlearn tests only: `pytest tests/test_iqlearn.py`
+- Run utils tests only: `pytest tests/test_utils.py`
 
 ## Conventions
 
@@ -42,3 +69,7 @@ No build system, CI, linting, or formatting is configured.
 - Hyperparameters are a NamedTuple with defaults, not a dataclass.
 - `jax.lax.scan` is used for multi-step training loops; avoid Python for-loops inside JIT-compiled code.
 - Actor/Critic are MLP networks; input is flattened via `x.reshape(x.shape[0], -1)` to handle any obs shape.
+- `utils.py` extractors do lazy imports (each library only imported when its extractor is called); only the library you use needs to be installed.
+- `utils.py` only supports continuous (Box-style) action spaces; discrete action spaces raise `ValueError`.
+- Mocking gymnax/jumanji in tests: use `ModuleType` objects (not `MagicMock`) for the full parent-module chain and wire `.spaces`/`.specs` attributes explicitly, so CPython's attribute-traversal in dotted imports resolves to the mock classes rather than auto-generated MagicMock attributes.
+- All imports within the package use relative imports (`from .buffer import ...`).

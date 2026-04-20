@@ -7,12 +7,18 @@ and a small end-to-end integration test with a synthetic buffer.
 import jax
 import jax.numpy as jnp
 import pytest
+from flax import nnx
 
-from buffer import create_buffer
-from iqlearn import (
+from lambda_imitation.buffer import create_buffer
+from lambda_imitation.iqlearn import (
+    ActorHead,
+    CriticHead,
     Hyperparameters,
     IQLearnFunctions,
+    IQLearnGraphs,
     IQLearnState,
+    MLPFeatureExtractor,
+    NetworkState,
     create_iqlearn,
 )
 
@@ -25,6 +31,7 @@ ACTION_DIM = 2
 BUFFER_SIZE = 32
 BATCH_SIZE = 8
 TRAIN_STEPS = 3
+FE_DIMS = (32, 32)  # small FE for fast tests
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +70,14 @@ def make_filled_buffer(
     return buf, fns
 
 
+def make_feature_extractors(obs_dim=OBS_DIM, hidden_dims=FE_DIMS):
+    """Create a pair of MLPFeatureExtractor instances for actor and critic."""
+    rngs = nnx.Rngs(0)
+    actor_fe = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
+    critic_fe = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
+    return actor_fe, critic_fe
+
+
 def make_iqlearn(
     buf=None,
     hp=None,
@@ -70,22 +85,30 @@ def make_iqlearn(
     autotune_alpha=True,
     action_scale=1.0,
     action_bias=0.0,
+    actor_head_dims=(),
+    critic_head_dims=(32,),
+    obs_dim=OBS_DIM,
 ):
     """Thin wrapper around create_iqlearn with test-friendly defaults."""
     if buf is None:
-        buf, _ = make_filled_buffer()
+        buf, _ = make_filled_buffer(obs_dim=obs_dim)
     if hp is None:
         hp = Hyperparameters(
             batch_size=BATCH_SIZE,
             autotune_alpha=autotune_alpha,
         )
+    actor_fe, critic_fe = make_feature_extractors(obs_dim=obs_dim)
     return create_iqlearn(
         hp,
         buf,
         ACTION_DIM,
+        actor_fe,
+        critic_fe,
         train_steps=train_steps,
         action_scale=action_scale,
         action_bias=action_bias,
+        actor_head_dims=actor_head_dims,
+        critic_head_dims=critic_head_dims,
     )
 
 
@@ -111,8 +134,57 @@ class TestHyperparameters:
         hp = Hyperparameters(actor_lr=5e-4, batch_size=64)
         assert hp.actor_lr == 5e-4
         assert hp.batch_size == 64
-        # unchanged defaults
-        assert hp.gamma == 0.99
+        assert hp.gamma == 0.99  # unchanged default
+
+
+# ---------------------------------------------------------------------------
+# Network building blocks
+# ---------------------------------------------------------------------------
+
+class TestMLPFeatureExtractor:
+    def test_output_shape(self):
+        fe = MLPFeatureExtractor(OBS_DIM, (64, 64), rngs=nnx.Rngs(0))
+        x = jnp.ones((5, OBS_DIM))
+        out = fe(x)
+        assert out.shape == (5, 64)
+
+    def test_flattens_input(self):
+        """2-D obs (e.g. image-like) should be flattened automatically."""
+        fe = MLPFeatureExtractor(6, (16,), rngs=nnx.Rngs(0))
+        x = jnp.ones((3, 2, 3))  # batch=3, obs shape (2,3) -> flat dim 6
+        out = fe(x)
+        assert out.shape == (3, 16)
+
+    def test_single_hidden_layer(self):
+        fe = MLPFeatureExtractor(OBS_DIM, (8,), rngs=nnx.Rngs(0))
+        out = fe(jnp.ones((2, OBS_DIM)))
+        assert out.shape == (2, 8)
+
+
+class TestActorHead:
+    def test_default_no_hidden(self):
+        head = ActorHead(32, ACTION_DIM, (), rngs=nnx.Rngs(0))
+        out = head(jnp.ones((4, 32)))
+        assert out.shape == (4, 2 * ACTION_DIM)
+
+    def test_with_hidden_layers(self):
+        head = ActorHead(32, ACTION_DIM, (16, 16), rngs=nnx.Rngs(0))
+        out = head(jnp.ones((4, 32)))
+        assert out.shape == (4, 2 * ACTION_DIM)
+
+
+class TestCriticHead:
+    def test_default_output(self):
+        head = CriticHead(32, ACTION_DIM, (16,), rngs=nnx.Rngs(0))
+        features = jnp.ones((4, 32))
+        actions = jnp.ones((4, ACTION_DIM))
+        out = head(features, actions)
+        assert out.shape == (4, 2)  # twin Q
+
+    def test_no_hidden(self):
+        head = CriticHead(32, ACTION_DIM, (), rngs=nnx.Rngs(0))
+        out = head(jnp.ones((4, 32)), jnp.ones((4, ACTION_DIM)))
+        assert out.shape == (4, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -121,33 +193,32 @@ class TestHyperparameters:
 
 class TestCreateIQLearn:
     def test_return_types(self):
-        state, fns, graph = make_iqlearn()
+        state, fns, graphs = make_iqlearn()
         assert isinstance(state, IQLearnState)
         assert isinstance(fns, IQLearnFunctions)
+        assert isinstance(graphs, IQLearnGraphs)
 
-    def test_state_fields_populated(self):
+    def test_state_fields_are_network_states(self):
         state, _, _ = make_iqlearn()
-        # All graph-state fields should be non-None
-        assert state.actor is not None
-        assert state.critic is not None
-        assert state.actor_target is not None
-        assert state.critic_target is not None
+        for field in (state.actor, state.critic, state.actor_target, state.critic_target):
+            assert isinstance(field, NetworkState)
+            assert field.fe is not None
+            assert field.head is not None
+
+    def test_optimizer_states_populated(self):
+        state, _, _ = make_iqlearn()
         assert state.actor_optimizer_state is not None
         assert state.critic_optimizer_state is not None
         assert state.alpha_optimizer_state is not None
 
     def test_targets_match_initial_params(self):
         state, _, _ = make_iqlearn()
-        # At init, targets should equal online params
-        actor_leaves = jax.tree.leaves(state.actor)
-        target_leaves = jax.tree.leaves(state.actor_target)
-        for a, t in zip(actor_leaves, target_leaves):
-            assert (a == t).all()
-
-        critic_leaves = jax.tree.leaves(state.critic)
-        target_leaves = jax.tree.leaves(state.critic_target)
-        for c, t in zip(critic_leaves, target_leaves):
-            assert (c == t).all()
+        for online, target in [
+            (state.actor, state.actor_target),
+            (state.critic, state.critic_target),
+        ]:
+            for o, t in zip(jax.tree.leaves(online), jax.tree.leaves(target)):
+                assert (o == t).all()
 
     def test_alpha_matches_hp(self):
         state, _, _ = make_iqlearn()
@@ -157,8 +228,43 @@ class TestCreateIQLearn:
     def test_custom_alpha(self):
         hp = Hyperparameters(alpha=0.5, batch_size=BATCH_SIZE)
         buf, _ = make_filled_buffer()
-        state, _, _ = create_iqlearn(hp, buf, ACTION_DIM, train_steps=TRAIN_STEPS)
+        actor_fe, critic_fe = make_feature_extractors()
+        state, _, _ = create_iqlearn(
+            hp, buf, ACTION_DIM, actor_fe, critic_fe, train_steps=TRAIN_STEPS,
+        )
         assert jnp.isclose(state.alpha, 0.5, atol=1e-6)
+
+    def test_graphs_have_four_fields(self):
+        _, _, graphs = make_iqlearn()
+        assert graphs.actor_fe is not None
+        assert graphs.actor_head is not None
+        assert graphs.critic_fe is not None
+        assert graphs.critic_head is not None
+
+    def test_feature_dim_inferred_for_custom_fe(self):
+        """A FE with output dim 64 should produce actor head output 2*action_dim."""
+        buf, _ = make_filled_buffer()
+        actor_fe = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(1))
+        critic_fe = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(2))
+        hp = Hyperparameters(batch_size=BATCH_SIZE)
+        state, fns, _ = create_iqlearn(
+            hp, buf, ACTION_DIM, actor_fe, critic_fe, train_steps=TRAIN_STEPS,
+        )
+        # Should be able to predict without shape errors
+        action = fns.predict(state, jnp.ones(OBS_DIM), deterministic=True)
+        assert action.shape == (ACTION_DIM,)
+
+    def test_separate_fe_architectures(self):
+        """Actor and critic can have different FE architectures."""
+        buf, _ = make_filled_buffer()
+        actor_fe = MLPFeatureExtractor(OBS_DIM, (16,), rngs=nnx.Rngs(0))
+        critic_fe = MLPFeatureExtractor(OBS_DIM, (64, 64), rngs=nnx.Rngs(1))
+        hp = Hyperparameters(batch_size=BATCH_SIZE)
+        state, fns, _ = create_iqlearn(
+            hp, buf, ACTION_DIM, actor_fe, critic_fe, train_steps=TRAIN_STEPS,
+        )
+        action = fns.predict(state, jnp.ones(OBS_DIM), deterministic=True)
+        assert action.shape == (ACTION_DIM,)
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +312,41 @@ class TestPredict:
         assert (action > -1.0 - 1e-6).all()
         assert (action < 3.0 + 1e-6).all()
 
+    def test_multidim_obs_flattened(self):
+        """FE should flatten non-flat obs; predict should still work."""
+        obs_shape = (2, 3)  # flat dim = 6
+        obs_dim = 6
+        buf, _ = make_filled_buffer(obs_dim=obs_dim)
+        # Reshape obs in buffer to 2-D (simulate image-like)
+        import numpy as np
+        buf2, fns2 = create_buffer(
+            shapes={"observations": obs_shape, "actions": (ACTION_DIM,)},
+            size=BUFFER_SIZE,
+            sampling_size=BATCH_SIZE,
+            this_step_infos=["observations", "actions"],
+            next_step_infos=["observations"],
+        )
+        key = jax.random.key(42)
+        for i in range(BUFFER_SIZE):
+            key, k_obs, k_act = jax.random.split(key, 3)
+            buf2 = fns2.add(
+                buf2,
+                {
+                    "observations": jax.random.normal(k_obs, obs_shape),
+                    "actions": jax.random.uniform(k_act, (ACTION_DIM,), minval=-1, maxval=1),
+                },
+                i == BUFFER_SIZE - 1,
+            )
+        actor_fe = MLPFeatureExtractor(obs_dim, FE_DIMS, rngs=nnx.Rngs(0))
+        critic_fe = MLPFeatureExtractor(obs_dim, FE_DIMS, rngs=nnx.Rngs(1))
+        hp = Hyperparameters(batch_size=BATCH_SIZE)
+        state, fns, _ = create_iqlearn(
+            hp, buf2, ACTION_DIM, actor_fe, critic_fe, train_steps=TRAIN_STEPS,
+        )
+        obs = jnp.ones(obs_shape)
+        action = fns.predict(state, obs, deterministic=True)
+        assert action.shape == (ACTION_DIM,)
+
 
 # ---------------------------------------------------------------------------
 # train
@@ -238,41 +379,58 @@ class TestTrain:
         for k, v in metrics.items():
             assert jnp.isfinite(v), f"metric '{k}' is not finite: {v}"
 
-    def test_actor_params_change(self, trained):
+    def test_actor_fe_params_change(self, trained):
         old_state, new_state, _, _ = trained
-        old_leaves = jax.tree.leaves(old_state.actor)
-        new_leaves = jax.tree.leaves(new_state.actor)
-        changed = any(not (o == n).all() for o, n in zip(old_leaves, new_leaves))
-        assert changed, "actor params should change after training"
+        old = jax.tree.leaves(old_state.actor.fe)
+        new = jax.tree.leaves(new_state.actor.fe)
+        assert any(not (o == n).all() for o, n in zip(old, new)), \
+            "actor FE params should change after training"
 
-    def test_critic_params_change(self, trained):
+    def test_actor_head_params_change(self, trained):
         old_state, new_state, _, _ = trained
-        old_leaves = jax.tree.leaves(old_state.critic)
-        new_leaves = jax.tree.leaves(new_state.critic)
-        changed = any(not (o == n).all() for o, n in zip(old_leaves, new_leaves))
-        assert changed, "critic params should change after training"
+        old = jax.tree.leaves(old_state.actor.head)
+        new = jax.tree.leaves(new_state.actor.head)
+        assert any(not (o == n).all() for o, n in zip(old, new)), \
+            "actor head params should change after training"
+
+    def test_critic_fe_params_change(self, trained):
+        old_state, new_state, _, _ = trained
+        old = jax.tree.leaves(old_state.critic.fe)
+        new = jax.tree.leaves(new_state.critic.fe)
+        assert any(not (o == n).all() for o, n in zip(old, new)), \
+            "critic FE params should change after training"
+
+    def test_critic_head_params_change(self, trained):
+        old_state, new_state, _, _ = trained
+        old = jax.tree.leaves(old_state.critic.head)
+        new = jax.tree.leaves(new_state.critic.head)
+        assert any(not (o == n).all() for o, n in zip(old, new)), \
+            "critic head params should change after training"
 
     def test_targets_lag_behind_online(self, trained):
         """After training with tau < 1, targets should differ from online params."""
         _, new_state, _, _ = trained
-        actor_online = jax.tree.leaves(new_state.actor)
-        actor_target = jax.tree.leaves(new_state.actor_target)
-        differs = any(not jnp.allclose(o, t) for o, t in zip(actor_online, actor_target))
-        assert differs, "target should lag behind online after training"
+        for online, target in [
+            (new_state.actor, new_state.actor_target),
+            (new_state.critic, new_state.critic_target),
+        ]:
+            differs = any(
+                not jnp.allclose(o, t)
+                for o, t in zip(jax.tree.leaves(online), jax.tree.leaves(target))
+            )
+            assert differs, "target should lag behind online after training"
 
     def test_alpha_updates_with_autotune(self, trained):
         old_state, new_state, _, _ = trained
-        assert not jnp.allclose(old_state.alpha, new_state.alpha), (
+        assert not jnp.allclose(old_state.alpha, new_state.alpha), \
             "alpha should change when autotune_alpha=True"
-        )
 
     def test_alpha_fixed_without_autotune(self):
         buf, _ = make_filled_buffer()
         state, fns, _ = make_iqlearn(buf=buf, autotune_alpha=False)
         new_state, metrics = fns.train(state, jax.random.key(0))
-        assert jnp.allclose(state.alpha, new_state.alpha), (
+        assert jnp.allclose(state.alpha, new_state.alpha), \
             "alpha should stay fixed when autotune_alpha=False"
-        )
         assert "alpha" not in metrics
 
     def test_reproducible_with_same_key(self):
@@ -284,6 +442,17 @@ class TestTrain:
             assert jnp.allclose(l1, l2)
         for k in m1:
             assert jnp.allclose(m1[k], m2[k])
+
+    def test_custom_head_dims(self):
+        """Training should work with non-default head dims."""
+        buf, _ = make_filled_buffer()
+        state, fns, _ = make_iqlearn(
+            buf=buf, actor_head_dims=(16, 16), critic_head_dims=(16,),
+        )
+        new_state, metrics = fns.train(state, jax.random.key(0))
+        assert isinstance(new_state, IQLearnState)
+        for k, v in metrics.items():
+            assert jnp.isfinite(v), f"metric '{k}' not finite"
 
 
 # ---------------------------------------------------------------------------

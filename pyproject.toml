@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lambda-imitation"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "jax>=0.4.30",
+    "jaxlib>=0.4.30",
+    "flax>=0.9.0",
+    "optax>=0.2.0",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+gymnasium = ["gymnasium"]
+gymnax = ["gymnax"]
+jumanji = ["jumanji"]
+dev = ["pytest"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lambda_imitation"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

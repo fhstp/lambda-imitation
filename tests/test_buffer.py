@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from buffer import create_buffer
+from lambda_imitation.buffer import create_buffer
 
 
 # ---------------------------------------------------------------------------
