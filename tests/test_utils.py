@@ -157,8 +157,17 @@ def _make_spec(obs_shape=(4,), action_dim=2, low=-1.0, high=1.0):
     return EnvSpec(
         obs_shape=obs_shape,
         action_dim=action_dim,
+        is_discrete=False,
         action_low=jnp.full((action_dim,), low),
         action_high=jnp.full((action_dim,), high),
+    )
+
+
+def _make_discrete_spec(obs_shape=(4,), num_actions=4):
+    return EnvSpec(
+        obs_shape=obs_shape,
+        action_dim=num_actions,
+        is_discrete=True,
     )
 
 
@@ -175,8 +184,17 @@ class TestEnvSpec:
         spec = _make_spec(obs_shape=(8,), action_dim=3)
         assert spec.obs_shape == (8,)
         assert spec.action_dim == 3
+        assert spec.is_discrete is False
         assert spec.action_low.shape == (3,)
         assert spec.action_high.shape == (3,)
+
+    def test_discrete_fields(self):
+        spec = _make_discrete_spec(obs_shape=(8,), num_actions=5)
+        assert spec.obs_shape == (8,)
+        assert spec.action_dim == 5
+        assert spec.is_discrete is True
+        assert spec.action_low is None
+        assert spec.action_high is None
 
 
 # ===========================================================================
@@ -238,15 +256,18 @@ class TestEnvSpecFromGymnasium:
         assert float(spec.action_low[1]) == pytest.approx(-2.0)
         assert float(spec.action_high[1]) == pytest.approx(3.0)
 
-    def test_raises_on_discrete_action(self):
+    def test_discrete_action_returns_spec(self):
         import gymnasium.spaces as sp
 
         class Env:
             observation_space = sp.Box(-np.inf, np.inf, shape=(4,), dtype=np.float32)
             action_space = sp.Discrete(5)
 
-        with pytest.raises(ValueError, match="Box action space"):
-            env_spec_from_gymnasium(Env())
+        spec = env_spec_from_gymnasium(Env())
+        assert spec.is_discrete is True
+        assert spec.action_dim == 5
+        assert spec.action_low is None
+        assert spec.action_high is None
 
     def test_raises_on_discrete_obs(self):
         import gymnasium.spaces as sp
@@ -299,13 +320,16 @@ class TestEnvSpecFromGymnax:
         assert (spec.action_low == -1.0).all()
         assert (spec.action_high == 1.0).all()
 
-    def test_raises_on_discrete_action(self):
+    def test_discrete_action_returns_spec(self):
         obs = _GBox(-np.inf, np.inf, (4,))
         act = _GDiscrete(5)
         mocks, env = _gymnax_modules(obs, act)
         with patch.dict(sys.modules, mocks):
-            with pytest.raises(ValueError, match="Box action space"):
-                env_spec_from_gymnax(env, params=None)
+            spec = env_spec_from_gymnax(env, params=None)
+        assert spec.is_discrete is True
+        assert spec.action_dim == 5
+        assert spec.action_low is None
+        assert spec.action_high is None
 
     def test_raises_on_discrete_obs(self):
         obs = _GDiscrete(10)
@@ -369,13 +393,16 @@ class TestEnvSpecFromJumanji:
             with pytest.raises(ValueError, match="flat Array"):
                 env_spec_from_jumanji(env)
 
-    def test_raises_on_discrete_action(self):
+    def test_discrete_action_returns_spec(self):
         obs = _JArray((4,))
         act = _JDiscreteArray(5)
         mocks, env = _jumanji_modules(obs, act)
         with patch.dict(sys.modules, mocks):
-            with pytest.raises(ValueError, match="[Dd]iscrete"):
-                env_spec_from_jumanji(env)
+            spec = env_spec_from_jumanji(env)
+        assert spec.is_discrete is True
+        assert spec.action_dim == 5
+        assert spec.action_low is None
+        assert spec.action_high is None
 
     def test_raises_on_multi_discrete_action(self):
         obs = _JArray((4,))
@@ -536,6 +563,95 @@ class TestCreateIQLearnFromEnv:
         action = fns.predict(state, obs, deterministic=True)
         assert jnp.all(action >= -3.0 - 1e-5)
         assert jnp.all(action <= 5.0 + 1e-5)
+
+
+def _make_discrete_expert_data(n=20, obs_dim=4, num_actions=4):
+    """Expert data with float32 action indices of shape (n, 1)."""
+    actions = jnp.array(
+        [[float(i % num_actions)] for i in range(n)], dtype=jnp.float32
+    )
+    return {
+        "observations": jnp.ones((n, obs_dim)),
+        "actions": actions,
+    }
+
+
+# ===========================================================================
+# create_iqlearn_from_env  (discrete)
+# ===========================================================================
+
+class TestCreateIQLearnFromEnvDiscrete:
+    def test_return_types(self):
+        spec = _make_discrete_spec()
+        data = _make_discrete_expert_data()
+        state, fns, graphs = create_iqlearn_from_env(
+            spec, data, buffer_size=100, train_steps=2
+        )
+        assert isinstance(state, IQLearnState)
+        assert isinstance(fns, IQLearnFunctions)
+        assert isinstance(graphs, IQLearnGraphs)
+
+    def test_default_target_entropy(self):
+        """Default hp should set target_entropy = 0.98 * log(num_actions)."""
+        import math
+        num_actions = 4
+        spec = _make_discrete_spec(num_actions=num_actions)
+        data = _make_discrete_expert_data(num_actions=num_actions)
+        # Training should run without error (verifies target_entropy was set)
+        state, fns, _ = create_iqlearn_from_env(spec, data, buffer_size=100, train_steps=1)
+        new_state, metrics = fns.train(state, jax.random.key(0))
+        assert all(jnp.isfinite(v).all() for v in jax.tree.leaves(metrics))
+
+    def test_predict_returns_float32_scalar(self):
+        """Discrete predict should return a float32 scalar (action index)."""
+        spec = _make_discrete_spec()
+        data = _make_discrete_expert_data()
+        state, fns, _ = create_iqlearn_from_env(spec, data, buffer_size=100, train_steps=1)
+        obs = jnp.zeros((4,))
+        action = fns.predict(state, obs, deterministic=True)
+        assert action.shape == ()
+        assert action.dtype == jnp.float32
+
+    def test_predict_deterministic_valid_range(self):
+        """Deterministic action must be a valid action index in [0, num_actions)."""
+        num_actions = 6
+        spec = _make_discrete_spec(num_actions=num_actions)
+        data = _make_discrete_expert_data(num_actions=num_actions)
+        state, fns, _ = create_iqlearn_from_env(spec, data, buffer_size=100, train_steps=1)
+        obs = jnp.zeros((4,))
+        action = fns.predict(state, obs, deterministic=True)
+        assert float(action) >= 0.0
+        assert float(action) < num_actions
+
+    def test_predict_stochastic_valid_range(self):
+        """Stochastic samples must all be valid action indices."""
+        num_actions = 4
+        spec = _make_discrete_spec(num_actions=num_actions)
+        data = _make_discrete_expert_data(num_actions=num_actions)
+        state, fns, _ = create_iqlearn_from_env(spec, data, buffer_size=100, train_steps=1)
+        obs = jnp.zeros((4,))
+        for seed in range(10):
+            action = fns.predict(state, obs, key=jax.random.key(seed), deterministic=False)
+            assert float(action) >= 0.0
+            assert float(action) < num_actions
+
+    def test_train_metrics_finite(self):
+        spec = _make_discrete_spec()
+        data = _make_discrete_expert_data()
+        state, fns, _ = create_iqlearn_from_env(spec, data, buffer_size=100, train_steps=2)
+        new_state, metrics = fns.train(state, jax.random.key(0))
+        for k, v in metrics.items():
+            assert jnp.isfinite(v), f"metric '{k}' is not finite: {v}"
+
+    def test_custom_hp_discrete(self):
+        """Caller-supplied hp should be forwarded unchanged for discrete."""
+        spec = _make_discrete_spec()
+        data = _make_discrete_expert_data()
+        hp = Hyperparameters(alpha=0.3, autotune_alpha=False)
+        state, _, _ = create_iqlearn_from_env(
+            spec, data, hp=hp, buffer_size=100, train_steps=1
+        )
+        assert float(state.log_alpha) == pytest.approx(jnp.log(0.3), abs=1e-5)
 
 
 # Need to import jax at module level for the test that uses jax.random.key

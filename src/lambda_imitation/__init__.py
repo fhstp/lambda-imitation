@@ -13,6 +13,8 @@ from lambda_imitation.buffer import (
 from lambda_imitation.iqlearn import (
     ActorHead,
     CriticHead,
+    DiscreteActorHead,
+    DiscreteCriticHead,
     Hyperparameters,
     IQLearnFunctions,
     IQLearnGraphs,
@@ -39,6 +41,8 @@ __all__ = [
     # iqlearn
     "ActorHead",
     "CriticHead",
+    "DiscreteActorHead",
+    "DiscreteCriticHead",
     "Hyperparameters",
     "IQLearnFunctions",
     "IQLearnGraphs",

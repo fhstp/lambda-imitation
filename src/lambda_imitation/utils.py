@@ -9,18 +9,26 @@ IQ-Learn agent from an ``EnvSpec`` and a dict of expert transitions.
 All three environment libraries are imported lazily, so only the library you
 actually use needs to be installed.
 
-Only continuous (``Box``-style) action spaces are supported.  Discrete action
-spaces raise :exc:`ValueError`.  Observation specs must be flat (single array);
-nested jumanji observation specs also raise :exc:`ValueError` -- flatten the
-observation manually before using this module.
+Both continuous (``Box``-style) and discrete action spaces are supported.
+For discrete spaces, ``action_low`` and ``action_high`` in the returned
+:class:`EnvSpec` are ``None``; ``action_dim`` holds the number of actions.
+Observation specs must be flat (single array); nested jumanji observation
+specs raise :exc:`ValueError` — flatten the observation manually before using
+this module.
 
-Typical usage (gymnasium)::
+Typical usage (gymnasium, continuous)::
 
     import gymnasium as gym
     from lambda_imitation.utils import env_spec_from_gymnasium, create_iqlearn_from_env
 
     env      = gym.make("HalfCheetah-v5")
     spec     = env_spec_from_gymnasium(env)
+    state, fns, graphs = create_iqlearn_from_env(spec, expert_data)
+
+Typical usage (gymnasium, discrete)::
+
+    env  = gym.make("CartPole-v1")
+    spec = env_spec_from_gymnasium(env)   # is_discrete=True
     state, fns, graphs = create_iqlearn_from_env(spec, expert_data)
 
 Typical usage (gymnax)::
@@ -72,19 +80,21 @@ class EnvSpec(NamedTuple):
         obs_shape: Shape of a single observation, e.g. ``(11,)`` or
             ``(84, 84, 3)``.  The feature extractor receives batches of this
             shape and is responsible for flattening if necessary.
-        action_dim: Number of continuous action dimensions.
+        action_dim: Number of continuous action dimensions, or number of
+            discrete actions when ``is_discrete=True``.
+        is_discrete: ``True`` for discrete (categorical) action spaces,
+            ``False`` for continuous (Box) action spaces.
         action_low: Lower bound per action dimension, shape ``(action_dim,)``.
-            Corresponds to the minimum value the environment accepts for each
-            action component.
+            ``None`` for discrete action spaces.
         action_high: Upper bound per action dimension, shape ``(action_dim,)``.
-            Corresponds to the maximum value the environment accepts for each
-            action component.
+            ``None`` for discrete action spaces.
     """
 
     obs_shape: tuple[int, ...]
     action_dim: int
-    action_low: jax.Array
-    action_high: jax.Array
+    is_discrete: bool
+    action_low: jax.Array | None = None
+    action_high: jax.Array | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -95,22 +105,23 @@ class EnvSpec(NamedTuple):
 def env_spec_from_gymnasium(env) -> EnvSpec:
     """Extract an :class:`EnvSpec` from a ``gymnasium.Env``.
 
-    Reads ``env.observation_space`` and ``env.action_space`` directly; both
-    must be ``gymnasium.spaces.Box``.  The environment does not need to be
-    reset before calling this function.
+    Reads ``env.observation_space`` and ``env.action_space`` directly.  The
+    observation space must be ``gymnasium.spaces.Box``.  The action space may
+    be either ``Box`` (continuous) or ``Discrete`` (discrete).
 
     Args:
         env: A ``gymnasium.Env`` instance (or any object exposing
-             ``observation_space`` and ``action_space`` attributes that are
-             ``gymnasium.spaces.Box``).
+             ``observation_space`` and ``action_space`` attributes).
 
     Returns:
         An :class:`EnvSpec` populated from the environment's spaces.
+        ``is_discrete=True`` and ``action_low=action_high=None`` for discrete
+        action spaces.
 
     Raises:
         ImportError: If ``gymnasium`` is not installed.
-        ValueError: If either the observation space or the action space is not
-            a ``gymnasium.spaces.Box`` (e.g. ``Discrete``).
+        ValueError: If the observation space is not a ``gymnasium.spaces.Box``,
+            or if the action space is neither ``Box`` nor ``Discrete``.
     """
     try:
         import gymnasium.spaces as spaces
@@ -128,19 +139,27 @@ def env_spec_from_gymnasium(env) -> EnvSpec:
             f"env_spec_from_gymnasium requires a Box observation space, "
             f"got {type(obs_space).__name__}."
         )
-    if not isinstance(act_space, spaces.Box):
-        raise ValueError(
-            f"env_spec_from_gymnasium requires a Box action space for "
-            f"continuous control, got {type(act_space).__name__}. "
-            f"Discrete action spaces are not supported."
+
+    if isinstance(act_space, spaces.Discrete):
+        return EnvSpec(
+            obs_shape=tuple(obs_space.shape),
+            action_dim=int(act_space.n),
+            is_discrete=True,
         )
 
-    action_dim = math.prod(act_space.shape)
-    return EnvSpec(
-        obs_shape=tuple(obs_space.shape),
-        action_dim=action_dim,
-        action_low=jnp.asarray(act_space.low.reshape(action_dim), dtype=jnp.float32),
-        action_high=jnp.asarray(act_space.high.reshape(action_dim), dtype=jnp.float32),
+    if isinstance(act_space, spaces.Box):
+        action_dim = math.prod(act_space.shape)
+        return EnvSpec(
+            obs_shape=tuple(obs_space.shape),
+            action_dim=action_dim,
+            is_discrete=False,
+            action_low=jnp.asarray(act_space.low.reshape(action_dim), dtype=jnp.float32),
+            action_high=jnp.asarray(act_space.high.reshape(action_dim), dtype=jnp.float32),
+        )
+
+    raise ValueError(
+        f"env_spec_from_gymnasium requires a Box or Discrete action space, "
+        f"got {type(act_space).__name__}."
     )
 
 
@@ -148,7 +167,9 @@ def env_spec_from_gymnax(env, params) -> EnvSpec:
     """Extract an :class:`EnvSpec` from a ``gymnax`` environment.
 
     Calls ``env.observation_space(params)`` and ``env.action_space(params)``
-    to obtain space objects; both must be ``gymnax.environments.spaces.Box``.
+    to obtain space objects.  The observation space must be
+    ``gymnax.environments.spaces.Box``; the action space may be either
+    ``Box`` (continuous) or ``Discrete`` (discrete).
 
     Args:
         env: A ``gymnax`` environment instance (returned by ``gymnax.make``).
@@ -160,8 +181,8 @@ def env_spec_from_gymnax(env, params) -> EnvSpec:
 
     Raises:
         ImportError: If ``gymnax`` is not installed.
-        ValueError: If either the observation space or the action space is not
-            a ``gymnax`` ``Box`` (e.g. ``Discrete``).
+        ValueError: If the observation space is not a ``Box``, or if the
+            action space is neither ``Box`` nor ``Discrete``.
     """
     try:
         import gymnax.environments.spaces as spaces
@@ -179,25 +200,33 @@ def env_spec_from_gymnax(env, params) -> EnvSpec:
             f"env_spec_from_gymnax requires a Box observation space, "
             f"got {type(obs_space).__name__}."
         )
-    if not isinstance(act_space, spaces.Box):
-        raise ValueError(
-            f"env_spec_from_gymnax requires a Box action space for "
-            f"continuous control, got {type(act_space).__name__}. "
-            f"Discrete action spaces are not supported."
+
+    if isinstance(act_space, spaces.Discrete):
+        return EnvSpec(
+            obs_shape=tuple(obs_space.shape),
+            action_dim=int(act_space.n),
+            is_discrete=True,
         )
 
-    action_dim = math.prod(act_space.shape)
-    low = jnp.broadcast_to(
-        jnp.asarray(act_space.low, dtype=jnp.float32), (action_dim,)
-    )
-    high = jnp.broadcast_to(
-        jnp.asarray(act_space.high, dtype=jnp.float32), (action_dim,)
-    )
-    return EnvSpec(
-        obs_shape=tuple(obs_space.shape),
-        action_dim=action_dim,
-        action_low=low,
-        action_high=high,
+    if isinstance(act_space, spaces.Box):
+        action_dim = math.prod(act_space.shape)
+        low = jnp.broadcast_to(
+            jnp.asarray(act_space.low, dtype=jnp.float32), (action_dim,)
+        )
+        high = jnp.broadcast_to(
+            jnp.asarray(act_space.high, dtype=jnp.float32), (action_dim,)
+        )
+        return EnvSpec(
+            obs_shape=tuple(obs_space.shape),
+            action_dim=action_dim,
+            is_discrete=False,
+            action_low=low,
+            action_high=high,
+        )
+
+    raise ValueError(
+        f"env_spec_from_gymnax requires a Box or Discrete action space, "
+        f"got {type(act_space).__name__}."
     )
 
 
@@ -206,9 +235,10 @@ def env_spec_from_jumanji(env) -> EnvSpec:
 
     Reads ``env.observation_spec`` and ``env.action_spec``; the observation
     spec must be a flat ``jumanji.specs.Array`` or ``BoundedArray`` (not a
-    nested ``Spec`` container), and the action spec must be a
-    ``jumanji.specs.BoundedArray`` (not a ``DiscreteArray`` or
-    ``MultiDiscreteArray``).
+    nested ``Spec`` container).  The action spec may be a
+    ``jumanji.specs.BoundedArray`` (continuous) or
+    ``jumanji.specs.DiscreteArray`` (discrete).
+    ``MultiDiscreteArray`` is not supported.
 
     Args:
         env: A ``jumanji`` environment instance (returned by ``jumanji.make``).
@@ -218,9 +248,9 @@ def env_spec_from_jumanji(env) -> EnvSpec:
 
     Raises:
         ImportError: If ``jumanji`` is not installed.
-        ValueError: If the observation spec is nested (a ``jumanji.specs.Spec``
-            composite), if the action spec is not a ``BoundedArray``, or if the
-            action spec is a ``DiscreteArray`` / ``MultiDiscreteArray``.
+        ValueError: If the observation spec is nested, if the action spec is a
+            ``MultiDiscreteArray``, or if the action spec is neither a
+            ``BoundedArray`` nor a ``DiscreteArray``.
     """
     try:
         import jumanji.specs as specs
@@ -241,32 +271,40 @@ def env_spec_from_jumanji(env) -> EnvSpec:
             f"before using this utility."
         )
 
-    # Reject discrete action specs (DiscreteArray and MultiDiscreteArray are
-    # both subclasses of BoundedArray, so check them first)
-    if isinstance(act_spec, (specs.DiscreteArray, specs.MultiDiscreteArray)):
+    # MultiDiscreteArray is unsupported (factored categorical needs a different policy)
+    if isinstance(act_spec, specs.MultiDiscreteArray):
         raise ValueError(
-            f"env_spec_from_jumanji requires a continuous BoundedArray action "
-            f"spec, got {type(act_spec).__name__}. Discrete action spaces are "
-            f"not supported."
-        )
-    if not isinstance(act_spec, specs.BoundedArray):
-        raise ValueError(
-            f"env_spec_from_jumanji requires a BoundedArray action spec, "
-            f"got {type(act_spec).__name__}."
+            f"env_spec_from_jumanji does not support MultiDiscreteArray action "
+            f"specs. Flatten or handle this action space manually."
         )
 
-    action_dim = math.prod(act_spec.shape)
-    low = jnp.broadcast_to(
-        jnp.asarray(act_spec.minimum, dtype=jnp.float32), (action_dim,)
-    )
-    high = jnp.broadcast_to(
-        jnp.asarray(act_spec.maximum, dtype=jnp.float32), (action_dim,)
-    )
-    return EnvSpec(
-        obs_shape=tuple(obs_spec.shape),
-        action_dim=action_dim,
-        action_low=low,
-        action_high=high,
+    # DiscreteArray (subclass of BoundedArray — check before BoundedArray)
+    if isinstance(act_spec, specs.DiscreteArray):
+        return EnvSpec(
+            obs_shape=tuple(obs_spec.shape),
+            action_dim=int(act_spec.num_values),
+            is_discrete=True,
+        )
+
+    if isinstance(act_spec, specs.BoundedArray):
+        action_dim = math.prod(act_spec.shape)
+        low = jnp.broadcast_to(
+            jnp.asarray(act_spec.minimum, dtype=jnp.float32), (action_dim,)
+        )
+        high = jnp.broadcast_to(
+            jnp.asarray(act_spec.maximum, dtype=jnp.float32), (action_dim,)
+        )
+        return EnvSpec(
+            obs_shape=tuple(obs_spec.shape),
+            action_dim=action_dim,
+            is_discrete=False,
+            action_low=low,
+            action_high=high,
+        )
+
+    raise ValueError(
+        f"env_spec_from_jumanji requires a BoundedArray or DiscreteArray action "
+        f"spec, got {type(act_spec).__name__}."
     )
 
 
@@ -293,10 +331,12 @@ def create_iqlearn_from_env(
     This is a high-level convenience wrapper around :func:`~lambda_imitation.iqlearn.create_iqlearn`
     that handles:
 
-    * Computing ``action_scale`` / ``action_bias`` to map the actor's
-      ``[-1, 1]`` tanh output to the environment's actual action range.
-    * Setting ``target_entropy`` to ``-action_dim`` if not already overridden
-      in ``hp``.
+    * For **continuous** spaces: computing ``action_scale`` / ``action_bias``
+      to map the actor's ``[-1, 1]`` tanh output to the environment's actual
+      action range; setting ``target_entropy`` to ``-action_dim`` by default.
+    * For **discrete** spaces: setting ``target_entropy`` to
+      ``0.98 * log(num_actions)`` by default (Christodoulou 2019);
+      ``action_scale`` and ``action_bias`` are not used.
     * Creating and pre-filling a replay :class:`~lambda_imitation.buffer.Buffer` from
       ``expert_data``.
     * Constructing two shared :class:`~lambda_imitation.iqlearn.MLPFeatureExtractor` instances
@@ -312,11 +352,13 @@ def create_iqlearn_from_env(
         expert_data: Dict mapping string keys to arrays of shape
             ``(N, *item_shape)``, where ``N`` is the number of expert
             transitions.  Must contain at least the keys ``obs_key`` and
-            ``action_key``.
+            ``action_key``.  For discrete spaces, actions should be stored as
+            float32 scalars (shape ``(N, 1)``), with action indices as floats
+            (e.g. ``0.0``, ``1.0``, ``2.0``).
         buffer_size: Maximum number of transitions the replay buffer can hold.
-        hp: :class:`~lambda_imitation.iqlearn.Hyperparameters` instance.  Defaults to
-            ``Hyperparameters()`` with ``target_entropy`` overridden to
-            ``-action_dim``.
+        hp: :class:`~lambda_imitation.iqlearn.Hyperparameters` instance.  When ``None``,
+            defaults are used with ``target_entropy`` set appropriately for
+            the action space type.
         fe_hidden_dims: Hidden layer widths for both the actor and critic
             feature extractors.  Both share the same architecture; construct
             them manually and call :func:`~lambda_imitation.iqlearn.create_iqlearn` directly
@@ -358,16 +400,24 @@ def create_iqlearn_from_env(
     if n_transitions == 0:
         raise ValueError("expert_data arrays must have at least one transition.")
 
-    # Default hyperparameters with target_entropy = -action_dim
-    if hp is None:
-        hp = Hyperparameters(target_entropy=float(-env_spec.action_dim))
-
-    # action_scale / action_bias map tanh output in [-1, 1] to [low, high]:
-    #   action = tanh(raw) * scale + bias
-    #   scale  = (high - low) / 2
-    #   bias   = (high + low) / 2
-    action_scale = (env_spec.action_high - env_spec.action_low) / 2.0
-    action_bias  = (env_spec.action_high + env_spec.action_low) / 2.0
+    if env_spec.is_discrete:
+        # Default target_entropy = 0.98 * log(num_actions) (Christodoulou 2019)
+        if hp is None:
+            hp = Hyperparameters(
+                target_entropy=float(0.98 * math.log(env_spec.action_dim))
+            )
+        action_scale = 1.0
+        action_bias = 0.0
+    else:
+        # Default target_entropy = -action_dim for continuous
+        if hp is None:
+            hp = Hyperparameters(target_entropy=float(-env_spec.action_dim))
+        # action_scale / action_bias map tanh output in [-1, 1] to [low, high]:
+        #   action = tanh(raw) * scale + bias
+        #   scale  = (high - low) / 2
+        #   bias   = (high + low) / 2
+        action_scale = (env_spec.action_high - env_spec.action_low) / 2.0
+        action_bias  = (env_spec.action_high + env_spec.action_low) / 2.0
 
     # Build shapes dict from expert_data (strip leading N dimension)
     shapes = {k: v.shape[1:] for k, v in expert_data.items()}
@@ -406,4 +456,5 @@ def create_iqlearn_from_env(
         train_steps=train_steps,
         actor_head_dims=actor_head_dims,
         critic_head_dims=critic_head_dims,
+        is_discrete=env_spec.is_discrete,
     )

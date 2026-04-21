@@ -13,6 +13,8 @@ from lambda_imitation.buffer import create_buffer
 from lambda_imitation.iqlearn import (
     ActorHead,
     CriticHead,
+    DiscreteActorHead,
+    DiscreteCriticHead,
     Hyperparameters,
     IQLearnFunctions,
     IQLearnGraphs,
@@ -28,6 +30,7 @@ from lambda_imitation.iqlearn import (
 
 OBS_DIM = 4
 ACTION_DIM = 2
+NUM_ACTIONS = 4  # discrete action count
 BUFFER_SIZE = 32
 BATCH_SIZE = 8
 TRAIN_STEPS = 3
@@ -76,6 +79,71 @@ def make_feature_extractors(obs_dim=OBS_DIM, hidden_dims=FE_DIMS):
     actor_fe = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
     critic_fe = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
     return actor_fe, critic_fe
+
+
+def make_discrete_buffer(
+    obs_dim=OBS_DIM,
+    num_actions=NUM_ACTIONS,
+    size=BUFFER_SIZE,
+    batch_size=BATCH_SIZE,
+):
+    """Create and fully fill a buffer for a discrete action space.
+
+    Actions are stored as float32 scalars of shape ``(1,)``.
+    """
+    buf, fns = create_buffer(
+        shapes={"observations": (obs_dim,), "actions": (1,)},
+        size=size,
+        sampling_size=batch_size,
+        this_step_infos=["observations", "actions"],
+        next_step_infos=["observations"],
+    )
+    key = jax.random.key(0)
+    for i in range(size):
+        key, k_obs, k_act = jax.random.split(key, 3)
+        terminated = i == size - 1
+        action_idx = jax.random.randint(k_act, (1,), 0, num_actions).astype(jnp.float32)
+        buf = fns.add(
+            buf,
+            {
+                "observations": jax.random.normal(k_obs, (obs_dim,)),
+                "actions": action_idx,
+            },
+            terminated,
+        )
+    return buf, fns
+
+
+def make_discrete_iqlearn(
+    buf=None,
+    hp=None,
+    train_steps=TRAIN_STEPS,
+    num_actions=NUM_ACTIONS,
+    obs_dim=OBS_DIM,
+    critic_head_dims=(32,),
+    autotune_alpha=True,
+):
+    """Thin wrapper around create_iqlearn with is_discrete=True."""
+    import math
+    if buf is None:
+        buf, _ = make_discrete_buffer(obs_dim=obs_dim, num_actions=num_actions)
+    if hp is None:
+        hp = Hyperparameters(
+            batch_size=BATCH_SIZE,
+            autotune_alpha=autotune_alpha,
+            target_entropy=float(0.98 * math.log(num_actions)),
+        )
+    actor_fe, critic_fe = make_feature_extractors(obs_dim=obs_dim)
+    return create_iqlearn(
+        hp,
+        buf,
+        num_actions,
+        actor_fe,
+        critic_fe,
+        train_steps=train_steps,
+        critic_head_dims=critic_head_dims,
+        is_discrete=True,
+    )
 
 
 def make_iqlearn(
@@ -488,3 +556,222 @@ class TestIntegration:
         action_sto = fns.predict(state, obs, key=jax.random.key(99), deterministic=False)
         assert action_sto.shape == (ACTION_DIM,)
         assert jnp.isfinite(action_sto).all()
+
+
+# ---------------------------------------------------------------------------
+# Discrete network building blocks
+# ---------------------------------------------------------------------------
+
+class TestDiscreteActorHead:
+    def test_output_shape(self):
+        head = DiscreteActorHead(32, NUM_ACTIONS, (), rngs=nnx.Rngs(0))
+        out = head(jnp.ones((4, 32)))
+        assert out.shape == (4, NUM_ACTIONS)
+
+    def test_with_hidden_dims(self):
+        head = DiscreteActorHead(32, NUM_ACTIONS, (16, 16), rngs=nnx.Rngs(0))
+        out = head(jnp.ones((4, 32)))
+        assert out.shape == (4, NUM_ACTIONS)
+
+    def test_single_action(self):
+        head = DiscreteActorHead(16, 1, (), rngs=nnx.Rngs(0))
+        out = head(jnp.ones((3, 16)))
+        assert out.shape == (3, 1)
+
+
+class TestDiscreteCriticHead:
+    def test_output_shape(self):
+        head = DiscreteCriticHead(32, NUM_ACTIONS, (16,), rngs=nnx.Rngs(0))
+        out = head(jnp.ones((4, 32)))
+        assert out.shape == (4, NUM_ACTIONS, 2)
+
+    def test_no_action_input(self):
+        """Discrete critic takes only features — no action argument."""
+        head = DiscreteCriticHead(32, NUM_ACTIONS, (), rngs=nnx.Rngs(0))
+        out = head(jnp.ones((2, 32)))
+        assert out.shape == (2, NUM_ACTIONS, 2)
+
+    def test_twin_outputs_differ(self):
+        """The two Q branches should produce different values (independent weights)."""
+        head = DiscreteCriticHead(32, NUM_ACTIONS, (16,), rngs=nnx.Rngs(0))
+        out = head(jnp.ones((4, 32)))
+        assert not jnp.allclose(out[..., 0], out[..., 1])
+
+
+# ---------------------------------------------------------------------------
+# create_iqlearn (discrete)
+# ---------------------------------------------------------------------------
+
+class TestCreateIQLearnDiscrete:
+    def test_return_types(self):
+        state, fns, graphs = make_discrete_iqlearn()
+        assert isinstance(state, IQLearnState)
+        assert isinstance(fns, IQLearnFunctions)
+        assert isinstance(graphs, IQLearnGraphs)
+
+    def test_state_fields_are_network_states(self):
+        state, _, _ = make_discrete_iqlearn()
+        for field in (state.actor, state.critic, state.actor_target, state.critic_target):
+            assert isinstance(field, NetworkState)
+            assert field.fe is not None
+            assert field.head is not None
+
+    def test_graphs_have_four_fields(self):
+        _, _, graphs = make_discrete_iqlearn()
+        assert graphs.actor_fe is not None
+        assert graphs.actor_head is not None
+        assert graphs.critic_fe is not None
+        assert graphs.critic_head is not None
+
+    def test_targets_match_initial_params(self):
+        state, _, _ = make_discrete_iqlearn()
+        for online, target in [
+            (state.actor, state.actor_target),
+            (state.critic, state.critic_target),
+        ]:
+            for o, t in zip(jax.tree.leaves(online), jax.tree.leaves(target)):
+                assert (o == t).all()
+
+    def test_feature_dim_inferred(self):
+        """Feature dim should be inferred correctly; predict must not error."""
+        buf, _ = make_discrete_buffer()
+        actor_fe = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(1))
+        critic_fe = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(2))
+        import math
+        hp = Hyperparameters(
+            batch_size=BATCH_SIZE,
+            target_entropy=float(0.98 * math.log(NUM_ACTIONS)),
+        )
+        state, fns, _ = create_iqlearn(
+            hp, buf, NUM_ACTIONS, actor_fe, critic_fe,
+            train_steps=TRAIN_STEPS, is_discrete=True,
+        )
+        action = fns.predict(state, jnp.ones(OBS_DIM), deterministic=True)
+        assert action.shape == ()
+
+
+# ---------------------------------------------------------------------------
+# predict (discrete)
+# ---------------------------------------------------------------------------
+
+class TestPredictDiscrete:
+    @pytest.fixture()
+    def setup(self):
+        state, fns, _ = make_discrete_iqlearn()
+        obs = jnp.ones(OBS_DIM)
+        return state, fns, obs
+
+    def test_output_is_float32_scalar(self, setup):
+        state, fns, obs = setup
+        action = fns.predict(state, obs, deterministic=True)
+        assert action.shape == ()
+        assert action.dtype == jnp.float32
+
+    def test_deterministic_ignores_key(self, setup):
+        state, fns, obs = setup
+        a1 = fns.predict(state, obs, key=jax.random.key(0), deterministic=True)
+        a2 = fns.predict(state, obs, key=jax.random.key(999), deterministic=True)
+        assert jnp.allclose(a1, a2)
+
+    def test_stochastic_varies(self, setup):
+        """Different keys should (with high probability) yield different actions."""
+        state, fns, obs = setup
+        results = {
+            int(fns.predict(state, obs, key=jax.random.key(s), deterministic=False))
+            for s in range(20)
+        }
+        assert len(results) > 1, "stochastic predict should not always return same action"
+
+    def test_valid_action_range_deterministic(self, setup):
+        state, fns, obs = setup
+        action = fns.predict(state, obs, deterministic=True)
+        assert float(action) >= 0.0
+        assert float(action) < NUM_ACTIONS
+
+    def test_valid_action_range_stochastic(self, setup):
+        state, fns, obs = setup
+        for seed in range(20):
+            action = fns.predict(state, obs, key=jax.random.key(seed), deterministic=False)
+            assert float(action) >= 0.0
+            assert float(action) < NUM_ACTIONS
+
+
+# ---------------------------------------------------------------------------
+# train (discrete)
+# ---------------------------------------------------------------------------
+
+class TestTrainDiscrete:
+    @pytest.fixture()
+    def trained(self):
+        buf, _ = make_discrete_buffer()
+        state, fns, _ = make_discrete_iqlearn(buf=buf)
+        new_state, metrics = fns.train(state, jax.random.key(42))
+        return state, new_state, fns, metrics
+
+    def test_return_types(self, trained):
+        _, new_state, _, metrics = trained
+        assert isinstance(new_state, IQLearnState)
+        assert isinstance(metrics, dict)
+
+    def test_expected_metric_keys(self, trained):
+        _, _, _, metrics = trained
+        expected = {
+            "q", "entropy", "v",
+            "demonstration_loss", "mixed_loss",
+            "regularizer_loss", "critic_loss", "alpha",
+        }
+        assert expected <= set(metrics.keys())
+
+    def test_metrics_finite(self, trained):
+        _, _, _, metrics = trained
+        for k, v in metrics.items():
+            assert jnp.isfinite(v), f"metric '{k}' is not finite: {v}"
+
+    def test_actor_params_change(self, trained):
+        old_state, new_state, _, _ = trained
+        old = jax.tree.leaves(old_state.actor)
+        new = jax.tree.leaves(new_state.actor)
+        assert any(not (o == n).all() for o, n in zip(old, new)), \
+            "actor params should change after training"
+
+    def test_critic_params_change(self, trained):
+        old_state, new_state, _, _ = trained
+        old = jax.tree.leaves(old_state.critic)
+        new = jax.tree.leaves(new_state.critic)
+        assert any(not (o == n).all() for o, n in zip(old, new)), \
+            "critic params should change after training"
+
+    def test_targets_lag_behind_online(self, trained):
+        _, new_state, _, _ = trained
+        for online, target in [
+            (new_state.actor, new_state.actor_target),
+            (new_state.critic, new_state.critic_target),
+        ]:
+            differs = any(
+                not jnp.allclose(o, t)
+                for o, t in zip(jax.tree.leaves(online), jax.tree.leaves(target))
+            )
+            assert differs, "target should lag behind online after training"
+
+    def test_alpha_updates_with_autotune(self, trained):
+        old_state, new_state, _, _ = trained
+        assert not jnp.allclose(old_state.alpha, new_state.alpha), \
+            "alpha should change when autotune_alpha=True"
+
+    def test_alpha_fixed_without_autotune(self):
+        buf, _ = make_discrete_buffer()
+        state, fns, _ = make_discrete_iqlearn(buf=buf, autotune_alpha=False)
+        new_state, metrics = fns.train(state, jax.random.key(0))
+        assert jnp.allclose(state.alpha, new_state.alpha), \
+            "alpha should stay fixed when autotune_alpha=False"
+        assert "alpha" not in metrics
+
+    def test_reproducible_with_same_key(self):
+        buf, _ = make_discrete_buffer()
+        state, fns, _ = make_discrete_iqlearn(buf=buf)
+        s1, m1 = fns.train(state, jax.random.key(7))
+        s2, m2 = fns.train(state, jax.random.key(7))
+        for l1, l2 in zip(jax.tree.leaves(s1), jax.tree.leaves(s2)):
+            assert jnp.allclose(l1, l2)
+        for k in m1:
+            assert jnp.allclose(m1[k], m2[k])

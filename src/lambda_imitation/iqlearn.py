@@ -6,11 +6,17 @@ Networks are split into a user-supplied *feature extractor* and an
 internally-managed *head*, so the observation-processing backbone can be
 swapped freely (MLP, CNN, transformer, …) without touching any IQ-Learn logic.
 
+Both **continuous** and **discrete** action spaces are supported.  Pass
+``is_discrete=True`` to :func:`create_iqlearn` to activate the discrete path,
+which uses categorical distributions and an all-actions critic (no action
+input to the critic; V(s) is computed as the exact inner product
+``Σ_a π(a|s)·Q(s,a)`` rather than via Monte-Carlo sampling).
+
 All state is held in immutable NamedTuples and the functional design
 (``create_iqlearn`` factory + pure ``train``/``predict`` closures) keeps the
 implementation compatible with ``jax.jit`` and ``jax.lax.scan``.
 
-Typical usage::
+Typical usage (continuous)::
 
     rngs = nnx.Rngs(0)
     actor_fe  = MLPFeatureExtractor(obs_dim, (256, 256), rngs=rngs)
@@ -21,6 +27,14 @@ Typical usage::
     )
     state, metrics = fns.train(state, jax.random.key(0))
     action = fns.predict(state, obs, deterministic=True)
+
+Typical usage (discrete)::
+
+    state, fns, graphs = create_iqlearn(
+        Hyperparameters(), buffer, num_actions, actor_fe, critic_fe,
+        is_discrete=True,
+    )
+    action = fns.predict(state, obs, deterministic=True)  # float32 scalar index
 """
 
 from functools import partial
@@ -43,22 +57,6 @@ LOG_STD_MAX = 2
 # ---------------------------------------------------------------------------
 # Network building blocks
 # ---------------------------------------------------------------------------
-
-
-class NetworkState(NamedTuple):
-    """Flax NNX graph states for a feature-extractor + head pair.
-
-    Both fields are ``nnx.GraphState`` objects produced by ``nnx.split``.
-    Together they form a JAX pytree, so optimizer updates and EMA target
-    updates work on them transparently via ``jax.tree.map``.
-
-    Attributes:
-        fe: Graph state of the feature extractor module.
-        head: Graph state of the task-specific head module.
-    """
-
-    fe: nnx.GraphState
-    head: nnx.GraphState
 
 
 class MLPFeatureExtractor(nnx.Module):
@@ -84,10 +82,10 @@ class MLPFeatureExtractor(nnx.Module):
         rngs: nnx.Rngs,
     ):
         dims = [input_dim] + list(hidden_dims)
-        self.layers = nnx.List([
+        self.layers = [
             nnx.Linear(dims[i], dims[i + 1], rngs=rngs)
             for i in range(len(dims) - 1)
-        ])
+        ]
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Encode a batch of observations.
@@ -130,10 +128,10 @@ class ActorHead(nnx.Module):
         rngs: nnx.Rngs,
     ):
         dims = [feature_dim] + list(hidden_dims) + [2 * action_dim]
-        self.layers = nnx.List([
+        self.layers = [
             nnx.Linear(dims[i], dims[i + 1], rngs=rngs)
             for i in range(len(dims) - 1)
-        ])
+        ]
 
     def __call__(self, features: jax.Array) -> jax.Array:
         """Compute distribution parameters from features.
@@ -176,10 +174,10 @@ class CriticHead(nnx.Module):
         rngs: nnx.Rngs,
     ):
         dims = [feature_dim + action_dim] + list(hidden_dims) + [2]
-        self.layers = nnx.List([
+        self.layers = [
             nnx.Linear(dims[i], dims[i + 1], rngs=rngs)
             for i in range(len(dims) - 1)
-        ])
+        ]
 
     def __call__(self, features: jax.Array, actions: jax.Array) -> jax.Array:
         """Estimate twin Q-values for a batch of (feature, action) pairs.
@@ -199,9 +197,127 @@ class CriticHead(nnx.Module):
         return self.layers[-1](x)
 
 
+class DiscreteActorHead(nnx.Module):
+    """Maps feature vectors to per-action logits for a categorical policy.
+
+    Outputs raw (pre-softmax) logits of shape ``(batch, num_actions)``.
+    The softmax and log-softmax are applied externally when computing the
+    policy distribution and its entropy.
+
+    Args:
+        feature_dim: Dimensionality of the incoming feature vector.
+        num_actions: Number of discrete actions.
+        hidden_dims: Optional hidden layers between features and output.
+            Defaults to ``()`` (direct linear projection).
+        rngs: Flax NNX RNG container used to initialise parameters.
+    """
+
+    def __init__(
+        self,
+        feature_dim: int,
+        num_actions: int,
+        hidden_dims: tuple[int, ...] = (),
+        *,
+        rngs: nnx.Rngs,
+    ):
+        dims = [feature_dim] + list(hidden_dims) + [num_actions]
+        self.layers = [
+            nnx.Linear(dims[i], dims[i + 1], rngs=rngs)
+            for i in range(len(dims) - 1)
+        ]
+
+    def __call__(self, features: jax.Array) -> jax.Array:
+        """Compute per-action logits from features.
+
+        Args:
+            features: Feature batch of shape ``(batch, feature_dim)``.
+
+        Returns:
+            Logit array of shape ``(batch, num_actions)``.
+        """
+        x = features
+        for layer in self.layers[:-1]:
+            x = nnx.relu(layer(x))
+        return self.layers[-1](x)
+
+
+class DiscreteCriticHead(nnx.Module):
+    """Maps feature vectors to twin Q-values for *all* discrete actions.
+
+    Unlike the continuous :class:`CriticHead`, this head takes only features
+    as input and outputs Q-values for every action simultaneously.  Two
+    independent MLP branches implement the double-Q trick.
+
+    Args:
+        feature_dim: Dimensionality of the incoming feature vector.
+        num_actions: Number of discrete actions.
+        hidden_dims: Hidden layer widths for each branch.  Defaults to
+            ``(256, 256)``.
+        rngs: Flax NNX RNG container used to initialise parameters.
+    """
+
+    def __init__(
+        self,
+        feature_dim: int,
+        num_actions: int,
+        hidden_dims: tuple[int, ...] = (256, 256),
+        *,
+        rngs: nnx.Rngs,
+    ):
+        dims = [feature_dim] + list(hidden_dims) + [num_actions]
+        self.q1_layers = [
+            nnx.Linear(dims[i], dims[i + 1], rngs=rngs)
+            for i in range(len(dims) - 1)
+        ]
+        self.q2_layers = [
+            nnx.Linear(dims[i], dims[i + 1], rngs=rngs)
+            for i in range(len(dims) - 1)
+        ]
+
+    def __call__(self, features: jax.Array) -> jax.Array:
+        """Estimate twin Q-values for all actions given a feature batch.
+
+        Args:
+            features: Feature batch of shape ``(batch, feature_dim)``.
+
+        Returns:
+            Array of shape ``(batch, num_actions, 2)`` where the last axis
+            indexes the two independent Q-value estimates.  Callers take
+            ``jnp.minimum(...[..., 0], ...[..., 1])`` to get the conservative
+            per-action Q-values.
+        """
+        x1 = features
+        for layer in self.q1_layers[:-1]:
+            x1 = nnx.relu(layer(x1))
+        q1 = self.q1_layers[-1](x1)  # (batch, num_actions)
+
+        x2 = features
+        for layer in self.q2_layers[:-1]:
+            x2 = nnx.relu(layer(x2))
+        q2 = self.q2_layers[-1](x2)  # (batch, num_actions)
+
+        return jnp.stack([q1, q2], axis=-1)  # (batch, num_actions, 2)
+
+
 # ---------------------------------------------------------------------------
 # State / function / graph containers
 # ---------------------------------------------------------------------------
+
+
+class NetworkState(NamedTuple):
+    """Flax NNX graph states for a feature-extractor + head pair.
+
+    Both fields are ``nnx.GraphState`` objects produced by ``nnx.split``.
+    Together they form a JAX pytree, so optimizer updates and EMA target
+    updates work on them transparently via ``jax.tree.map``.
+
+    Attributes:
+        fe: Graph state of the feature extractor module.
+        head: Graph state of the task-specific head module.
+    """
+
+    fe: nnx.GraphState
+    head: nnx.GraphState
 
 
 class IQLearnState(NamedTuple):
@@ -291,8 +407,9 @@ class Hyperparameters(NamedTuple):
         gamma: Discount factor for future rewards.
         regularizer_coef: Weight of the IQ-Learn soft-regularisation term
             (``1/40`` in the original paper).
-        target_entropy: Desired policy entropy used by the alpha loss.  A
-            common heuristic is ``-action_dim``.
+        target_entropy: Desired policy entropy used by the alpha loss.  For
+            continuous spaces a common heuristic is ``-action_dim``; for
+            discrete spaces ``0.98 * log(num_actions)`` (Christodoulou 2019).
         tau: Soft update coefficient for EMA target networks.  A value of
             ``0.005`` means targets lag significantly behind online weights.
     """
@@ -327,6 +444,7 @@ def create_iqlearn(
     train_steps: int = 1000,
     actor_head_dims: tuple[int, ...] = (),
     critic_head_dims: tuple[int, ...] = (256, 256),
+    is_discrete: bool = False,
 ) -> Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs]:
     """Construct an IQ-Learn agent from a pre-filled buffer and user-supplied FEs.
 
@@ -346,7 +464,8 @@ def create_iqlearn(
         buffer: Filled (or partially filled) replay buffer.  Must contain at
             least ``params.batch_size`` sampleable slots before ``train`` is
             called.
-        action_dim: Number of continuous action dimensions.
+        action_dim: Number of continuous action dimensions, or number of
+            discrete actions when ``is_discrete=True``.
         actor_feature_extractor: Initialised ``nnx.Module`` that maps
             ``(batch, *obs_shape) -> (batch, actor_feature_dim)``.  Ownership
             is transferred; the module is split and should not be used directly
@@ -355,15 +474,21 @@ def create_iqlearn(
             Actor and critic may have different architectures and output widths.
         obs_key: Key in ``buffer.info`` that holds observations.
         action_key: Key in ``buffer.info`` that holds actions.
-        action_scale: Per-dimension scale applied after the tanh squashing.
-            Scalar or array of shape ``(action_dim,)``.
-        action_bias: Per-dimension offset applied after the tanh squashing.
-            Scalar or array of shape ``(action_dim,)``.
+        action_scale: Per-dimension scale applied after the tanh squashing
+            (continuous only).  Scalar or array of shape ``(action_dim,)``.
+        action_bias: Per-dimension offset applied after the tanh squashing
+            (continuous only).  Scalar or array of shape ``(action_dim,)``.
         train_steps: Number of gradient steps executed per ``train`` call.
         actor_head_dims: Hidden layer widths for the actor head.  Defaults to
-            ``()`` (direct linear projection from features to distribution params).
+            ``()`` (direct linear projection from features to outputs).
         critic_head_dims: Hidden layer widths for the critic head.  Defaults to
             ``(256, 256)``.
+        is_discrete: If True, use a categorical actor and an all-actions critic.
+            The soft value V(s) is computed as the exact inner product
+            ``Σ_a π(a|s)·Q(s,a) + α·H(π(·|s))`` without any sampling.
+            ``predict`` returns the action index as a ``float32`` scalar.
+            If False (default), use a squashed-Gaussian actor and a continuous
+            critic that takes actions as additional input.
 
     Returns:
         A ``(IQLearnState, IQLearnFunctions, IQLearnGraphs)`` triple.
@@ -386,14 +511,22 @@ def create_iqlearn(
     actor_feature_dim = actor_feature_extractor(dummy_obs).shape[-1]
     critic_feature_dim = critic_feature_extractor(dummy_obs).shape[-1]
 
-    # Create heads
+    # Create heads — discrete and continuous use different classes
     rngs = nnx.Rngs(0)
-    actor_head_model = ActorHead(
-        actor_feature_dim, action_dim, actor_head_dims, rngs=rngs,
-    )
-    critic_head_model = CriticHead(
-        critic_feature_dim, action_dim, critic_head_dims, rngs=rngs,
-    )
+    if is_discrete:
+        actor_head_model = DiscreteActorHead(
+            actor_feature_dim, action_dim, actor_head_dims, rngs=rngs,
+        )
+        critic_head_model = DiscreteCriticHead(
+            critic_feature_dim, action_dim, critic_head_dims, rngs=rngs,
+        )
+    else:
+        actor_head_model = ActorHead(
+            actor_feature_dim, action_dim, actor_head_dims, rngs=rngs,
+        )
+        critic_head_model = CriticHead(
+            critic_feature_dim, action_dim, critic_head_dims, rngs=rngs,
+        )
 
     # Split all four modules into (graph_def, state)
     actor_fe_graph, actor_fe = nnx.split(actor_feature_extractor)
@@ -434,7 +567,7 @@ def create_iqlearn(
     )
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Shared helper: actor forward pass (same for both action space types)
     # ------------------------------------------------------------------
 
     def run_actor(actor: NetworkState, x: jax.Array) -> jax.Array:
@@ -443,143 +576,254 @@ def create_iqlearn(
         head = nnx.merge(actor_head_graph, actor.head)
         return head(fe(x))
 
-    def run_critic(
-        critic: NetworkState, x: jax.Array, actions: jax.Array
-    ) -> jax.Array:
-        """Reconstruct and run the critic (FE then head) returning twin Q-values."""
-        fe = nnx.merge(critic_fe_graph, critic.fe)
-        head = nnx.merge(critic_head_graph, critic.head)
-        return head(fe(x), actions)
+    # ------------------------------------------------------------------
+    # Action-space-specific helpers
+    # ------------------------------------------------------------------
 
-    def get_q(
-        critic: NetworkState, x: jax.Array, actions: jax.Array
-    ) -> jax.Array:
-        """Return the conservative (min over twin) Q-value for each transition."""
-        return jnp.min(run_critic(critic, x, actions), axis=-1)
+    if is_discrete:
 
-    def get_dist_params(
-        actor: NetworkState, x: jax.Array
-    ) -> Tuple[jax.Array, jax.Array]:
-        """Extract mean and std of the squashed Gaussian policy.
+        def run_critic(critic: NetworkState, x: jax.Array) -> jax.Array:
+            """Reconstruct and run the discrete critic, returning twin Q for all actions."""
+            fe = nnx.merge(critic_fe_graph, critic.fe)
+            head = nnx.merge(critic_head_graph, critic.head)
+            return head(fe(x))  # (batch, num_actions, 2)
 
-        The raw log-std output is tanh-squashed and rescaled into
-        ``[LOG_STD_MIN, LOG_STD_MAX]`` for numerical stability.
+        def get_q(
+            critic: NetworkState, x: jax.Array, expert_actions: jax.Array
+        ) -> jax.Array:
+            """Conservative Q-value for each expert transition.
 
-        Returns:
-            ``(mean, std)`` each of shape ``(batch, action_dim)``.
-        """
-        dist_params = run_actor(actor, x)
-        mean, log_std = (
-            dist_params[..., :action_dim],
-            dist_params[..., action_dim:],
-        )
-        log_std = jnp.tanh(log_std)
-        log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
-        std = jnp.exp(log_std)
-        return mean, std
+            Args:
+                critic: Critic network state.
+                x: Observation batch.
+                expert_actions: Float32 array of shape ``(batch, 1)`` holding
+                    action indices stored as floats (e.g. 0.0, 1.0, 2.0).
 
-    def sample_action_logprob(
-        actor: NetworkState, x: jax.Array, key: jax.Array
-    ) -> Tuple[jax.Array, jax.Array]:
-        """Sample actions and compute their log-probabilities under the policy.
+            Returns:
+                Per-transition Q-value of shape ``(batch,)``.
+            """
+            q_twin = run_critic(critic, x)  # (batch, num_actions, 2)
+            q_min = jnp.minimum(q_twin[..., 0], q_twin[..., 1])  # (batch, num_actions)
+            indices = jnp.round(expert_actions.reshape(-1)).astype(jnp.int32)
+            return q_min[jnp.arange(q_min.shape[0]), indices]  # (batch,)
 
-        Uses the reparameterisation trick: samples from N(mean, std) then
-        applies tanh squashing followed by optional affine rescaling.  The
-        log-probability accounts for the tanh change-of-variables (Appendix C
-        of the SAC paper).
+        def get_v(
+            actor: NetworkState,
+            critic: NetworkState,
+            alpha: jax.Array,
+            x: jax.Array,
+            key: jax.Array,
+            include_entropy: bool = True,
+            include_log: bool = False,
+        ) -> jax.Array | Tuple[jax.Array, dict]:
+            """Compute the soft value V(x) = Σ_a π(a|x)·(Q(x,a) − α·log π(a|x)).
 
-        Args:
-            actor: Current actor network state.
-            x: Observation batch of shape ``(batch, *obs_shape)``.
-            key: JAX PRNG key for sampling.
+            Uses the exact closed-form inner product over all actions; no PRNG
+            sampling is required.  The ``key`` argument is accepted for API
+            compatibility with the continuous path but is not used.
 
-        Returns:
-            ``(actions, log_probs)`` where ``actions`` has shape
-            ``(batch, action_dim)`` and ``log_probs`` has shape ``(batch,)``.
-        """
-        mean, std = get_dist_params(actor, x)
-        unsquashed_action = jax.random.normal(key, mean.shape) * std + mean
-        y_t = jnp.tanh(unsquashed_action)
-        action = y_t * action_scale + action_bias
-        log_prob = (
-            -((unsquashed_action - mean) ** 2) / (2 * std**2)
-            - 0.5 * jnp.log(2 * jnp.pi)
-            - jnp.log(std)
-            - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
-        )
-        return action, log_prob.sum(axis=-1)
+            Args:
+                actor: Actor network state.
+                critic: Critic network state.
+                alpha: Current entropy temperature.
+                x: Observation batch.
+                key: Unused PRNG key (present for API compatibility).
+                include_entropy: If True, add the entropy term ``α·H(π)`` to
+                    the expected Q to obtain the soft value.
+                include_log: If True, also return a metrics dict with scalar
+                    summaries ``{"q": ..., "entropy": ...}``.  Only meaningful
+                    when ``include_entropy`` is True.
 
-    def get_v(
-        actor: NetworkState,
-        critic: NetworkState,
-        alpha: jax.Array,
-        x: jax.Array,
-        key: jax.Array,
-        include_entropy: bool = True,
-        include_log: bool = False,
-    ) -> jax.Array | Tuple[jax.Array, dict]:
-        """Compute the soft state-value V(x) = E_π[Q(x,a) - α log π(a|x)].
-
-        Args:
-            actor: Actor network state used to sample actions.
-            critic: Critic network state used to evaluate Q-values.
-            alpha: Current entropy temperature.
-            x: Observation batch.
-            key: JAX PRNG key for action sampling.
-            include_entropy: If True, subtract the entropy term ``α log π``
-                from Q to obtain the soft value.  If False, return raw Q.
-            include_log: If True, also return a metrics dict with scalar
-                summaries ``{"q": ..., "entropy": ...}``.  Only meaningful
-                when ``include_entropy`` is True.
-
-        Returns:
-            When ``include_log=False``: value array of shape ``(batch,)``.
-            When ``include_log=True``: ``(values, metrics_dict)``.
-        """
-        action, logprob = sample_action_logprob(actor, x, key)
-        q = get_q(critic, x, action)
-        if include_entropy:
-            if include_log:
-                return q - alpha * logprob, {"q": q.mean(), "entropy": -logprob.mean()}
+            Returns:
+                When ``include_log=False``: value array of shape ``(batch,)``.
+                When ``include_log=True``: ``(values, metrics_dict)``.
+            """
+            logits = run_actor(actor, x)                        # (batch, num_actions)
+            probs = jax.nn.softmax(logits)                      # (batch, num_actions)
+            log_probs = jax.nn.log_softmax(logits)              # (batch, num_actions)
+            q_twin = run_critic(critic, x)                      # (batch, num_actions, 2)
+            q_min = jnp.minimum(q_twin[..., 0], q_twin[..., 1])  # (batch, num_actions)
+            entropy = -(probs * log_probs).sum(-1)              # (batch,) — exact H(π)
+            if include_entropy:
+                v = (probs * q_min).sum(-1) + alpha * entropy
+                if include_log:
+                    return v, {
+                        "q": (probs * q_min).sum(-1).mean(),
+                        "entropy": entropy.mean(),
+                    }
+                return v
             else:
-                return q - alpha * logprob
-        else:
-            return q
+                return (probs * q_min).sum(-1)
 
-    # ------------------------------------------------------------------
-    # Public functions
-    # ------------------------------------------------------------------
+        @partial(jax.jit, static_argnames=["deterministic"])
+        def predict(
+            iqlearn: IQLearnState,
+            obs: jax.Array,
+            key: jax.Array = jnp.array(0),
+            deterministic: bool = False,
+        ) -> jax.Array:
+            """Compute a discrete action for a single observation.
 
-    @partial(jax.jit, static_argnames=["deterministic"])
-    def predict(
-        iqlearn: IQLearnState,
-        obs: jax.Array,
-        key: jax.Array = jnp.array(0),
-        deterministic: bool = False,
-    ) -> jax.Array:
-        """Compute an action for a single observation.
+            Args:
+                iqlearn: Current agent state.
+                obs: Single observation of shape ``(*obs_shape,)`` (no batch dim).
+                key: JAX PRNG key, used only when ``deterministic=False``.
+                deterministic: If True, return the greedy (argmax) action.
+                    If False, sample from the categorical policy.
 
-        Args:
-            iqlearn: Current agent state.
-            obs: Single observation of shape ``(*obs_shape,)`` (no batch dim).
-            key: JAX PRNG key, used only when ``deterministic=False``.
-            deterministic: If True, return the tanh-squashed policy mean
-                (no sampling noise).  If False, sample from the full
-                Gaussian policy.
+            Returns:
+                Action index as a ``float32`` scalar.
+            """
+            obs_batch = jnp.expand_dims(obs, 0)
+            logits = run_actor(iqlearn.actor, obs_batch)[0]  # (num_actions,)
+            if deterministic:
+                return jnp.argmax(logits).astype(jnp.float32)
+            else:
+                return jax.random.categorical(key, logits).astype(jnp.float32)
 
-        Returns:
-            Action array of shape ``(action_dim,)``, scaled and shifted by
-            ``action_scale`` and ``action_bias``.
-        """
-        obs = jnp.expand_dims(obs, 0)
-        mean, std = get_dist_params(iqlearn.actor, obs)
-        if deterministic:
-            unsquashed_action = mean
-        else:
+    else:
+        # ------------------------------------------------------------------
+        # Continuous helpers
+        # ------------------------------------------------------------------
+
+        def run_critic(
+            critic: NetworkState, x: jax.Array, actions: jax.Array
+        ) -> jax.Array:
+            """Reconstruct and run the critic (FE then head) returning twin Q-values."""
+            fe = nnx.merge(critic_fe_graph, critic.fe)
+            head = nnx.merge(critic_head_graph, critic.head)
+            return head(fe(x), actions)
+
+        def get_q(
+            critic: NetworkState, x: jax.Array, actions: jax.Array
+        ) -> jax.Array:
+            """Return the conservative (min over twin) Q-value for each transition."""
+            return jnp.min(run_critic(critic, x, actions), axis=-1)
+
+        def get_dist_params(
+            actor: NetworkState, x: jax.Array
+        ) -> Tuple[jax.Array, jax.Array]:
+            """Extract mean and std of the squashed Gaussian policy.
+
+            The raw log-std output is tanh-squashed and rescaled into
+            ``[LOG_STD_MIN, LOG_STD_MAX]`` for numerical stability.
+
+            Returns:
+                ``(mean, std)`` each of shape ``(batch, action_dim)``.
+            """
+            dist_params = run_actor(actor, x)
+            mean, log_std = (
+                dist_params[..., :action_dim],
+                dist_params[..., action_dim:],
+            )
+            log_std = jnp.tanh(log_std)
+            log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
+            std = jnp.exp(log_std)
+            return mean, std
+
+        def sample_action_logprob(
+            actor: NetworkState, x: jax.Array, key: jax.Array
+        ) -> Tuple[jax.Array, jax.Array]:
+            """Sample actions and compute their log-probabilities under the policy.
+
+            Uses the reparameterisation trick: samples from N(mean, std) then
+            applies tanh squashing followed by optional affine rescaling.  The
+            log-probability accounts for the tanh change-of-variables (Appendix C
+            of the SAC paper).
+
+            Args:
+                actor: Current actor network state.
+                x: Observation batch of shape ``(batch, *obs_shape)``.
+                key: JAX PRNG key for sampling.
+
+            Returns:
+                ``(actions, log_probs)`` where ``actions`` has shape
+                ``(batch, action_dim)`` and ``log_probs`` has shape ``(batch,)``.
+            """
+            mean, std = get_dist_params(actor, x)
             unsquashed_action = jax.random.normal(key, mean.shape) * std + mean
-        y_t = jnp.tanh(unsquashed_action)
-        action = y_t * action_scale + action_bias
-        return action[0]
+            y_t = jnp.tanh(unsquashed_action)
+            action = y_t * action_scale + action_bias
+            log_prob = (
+                -((unsquashed_action - mean) ** 2) / (2 * std**2)
+                - 0.5 * jnp.log(2 * jnp.pi)
+                - jnp.log(std)
+                - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
+            )
+            return action, log_prob.sum(axis=-1)
+
+        def get_v(
+            actor: NetworkState,
+            critic: NetworkState,
+            alpha: jax.Array,
+            x: jax.Array,
+            key: jax.Array,
+            include_entropy: bool = True,
+            include_log: bool = False,
+        ) -> jax.Array | Tuple[jax.Array, dict]:
+            """Compute the soft state-value V(x) = E_π[Q(x,a) - α log π(a|x)].
+
+            Args:
+                actor: Actor network state used to sample actions.
+                critic: Critic network state used to evaluate Q-values.
+                alpha: Current entropy temperature.
+                x: Observation batch.
+                key: JAX PRNG key for action sampling.
+                include_entropy: If True, subtract the entropy term ``α log π``
+                    from Q to obtain the soft value.  If False, return raw Q.
+                include_log: If True, also return a metrics dict with scalar
+                    summaries ``{"q": ..., "entropy": ...}``.  Only meaningful
+                    when ``include_entropy`` is True.
+
+            Returns:
+                When ``include_log=False``: value array of shape ``(batch,)``.
+                When ``include_log=True``: ``(values, metrics_dict)``.
+            """
+            action, logprob = sample_action_logprob(actor, x, key)
+            q = get_q(critic, x, action)
+            if include_entropy:
+                if include_log:
+                    return q - alpha * logprob, {"q": q.mean(), "entropy": -logprob.mean()}
+                else:
+                    return q - alpha * logprob
+            else:
+                return q
+
+        @partial(jax.jit, static_argnames=["deterministic"])
+        def predict(
+            iqlearn: IQLearnState,
+            obs: jax.Array,
+            key: jax.Array = jnp.array(0),
+            deterministic: bool = False,
+        ) -> jax.Array:
+            """Compute an action for a single observation.
+
+            Args:
+                iqlearn: Current agent state.
+                obs: Single observation of shape ``(*obs_shape,)`` (no batch dim).
+                key: JAX PRNG key, used only when ``deterministic=False``.
+                deterministic: If True, return the tanh-squashed policy mean
+                    (no sampling noise).  If False, sample from the full
+                    Gaussian policy.
+
+            Returns:
+                Action array of shape ``(action_dim,)``, scaled and shifted by
+                ``action_scale`` and ``action_bias``.
+            """
+            obs = jnp.expand_dims(obs, 0)
+            mean, std = get_dist_params(iqlearn.actor, obs)
+            if deterministic:
+                unsquashed_action = mean
+            else:
+                unsquashed_action = jax.random.normal(key, mean.shape) * std + mean
+            y_t = jnp.tanh(unsquashed_action)
+            action = y_t * action_scale + action_bias
+            return action[0]
+
+    # ------------------------------------------------------------------
+    # Loss functions — structurally identical for both action space types;
+    # differences are absorbed by the action-space-specific helpers above.
+    # ------------------------------------------------------------------
 
     def loss_alpha(log_alpha: jax.Array, log_pi: jax.Array) -> jax.Array:
         """Entropy temperature loss.
@@ -590,6 +834,8 @@ def create_iqlearn(
         Args:
             log_alpha: Current log-temperature scalar.
             log_pi: Mean log-probability of the current policy (scalar).
+                For continuous: sampled log-prob.  For discrete: expected
+                log-prob ``Σ_a π(a|s) log π(a|s)``.
 
         Returns:
             Scalar loss value.
