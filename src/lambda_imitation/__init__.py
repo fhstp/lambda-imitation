@@ -21,6 +21,7 @@ from lambda_imitation.iqlearn import (
     NetworkState,
     TwinCriticState,
     create_iqlearn,
+    extract_buffer_shapes,
 )
 from lambda_imitation.utils import (
     EnvSpec,
@@ -48,6 +49,7 @@ __all__ = [
     "NetworkState",
     "TwinCriticState",
     "create_iqlearn",
+    "extract_buffer_shapes",
     # utils
     "EnvSpec",
     "create_iqlearn_from_env",

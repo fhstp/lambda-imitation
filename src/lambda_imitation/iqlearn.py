@@ -53,7 +53,7 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 
-from .buffer import Buffer, BufferSample, create_sample
+from .buffer import Buffer, BufferFunctions, BufferSample, create_buffer, create_sample
 
 # Bounds for the squashed log-standard-deviation of the policy distribution.
 # The raw output is tanh-squashed and then rescaled into this range to keep
@@ -249,7 +249,6 @@ class IQLearnState(NamedTuple):
     alpha: jax.Array
     log_alpha: jax.Array
     online_buffer: Buffer
-    online_buffer_functions: BufferFunctions
 
 
 class IQLearnFunctions(NamedTuple):
@@ -259,11 +258,20 @@ class IQLearnFunctions(NamedTuple):
         predict: ``(state, obs, key, deterministic) -> action`` -- sample or
             compute a deterministic action for a single observation.
         train: ``(state, key) -> (state, metrics)`` -- run ``train_steps``
-            update iterations via ``jax.lax.scan`` and return averaged metrics.
+            IQ-Learn update iterations via ``jax.lax.scan`` and return
+            averaged metrics.
+        train_sac: ``(state, env, env_params, env_state, key) ->
+            (state, env_state, metrics)`` -- collect online transitions from a
+            gymnax-compatible environment and run ``train_steps`` SAC gradient
+            updates.  ``env`` is a static (non-traced) Python object;
+            ``env_params`` and ``env_state`` are JAX pytrees.  Returns the
+            updated agent state, the new gymnax environment state (including
+            auto-resets on episode termination), and averaged metrics.
     """
 
     predict: Callable
     train: Callable
+    train_sac: Callable
 
 
 class IQLearnGraphs(NamedTuple):
@@ -308,6 +316,13 @@ class Hyperparameters(NamedTuple):
         target_entropy: Desired policy entropy used by the alpha loss.  For
             continuous spaces a common heuristic is ``-action_dim``; for
             discrete spaces ``0.98 * log(num_actions)`` (Christodoulou 2019).
+        online_buffer_size: Capacity of the circular online replay buffer used
+            by :func:`train_sac`.  Older transitions are overwritten once the
+            buffer is full.
+        online_batch_size: Number of transitions sampled per SAC gradient step.
+            :func:`create_iqlearn` pre-fills the online buffer with this many
+            random transitions so that :func:`train_sac` can update from the
+            very first call.
         tau: Soft update coefficient for EMA target networks.  A value of
             ``0.005`` means targets lag significantly behind online weights.
     """
@@ -321,7 +336,31 @@ class Hyperparameters(NamedTuple):
     gamma: float = 0.99
     regularizer_coef: float = 1 / 40
     target_entropy: float = -1
+    online_buffer_size: int = 10_000
+    online_batch_size: int = 256
     tau: float = 0.005
+
+
+# ---------------------------------------------------------------------------
+# Factory helpers
+# ---------------------------------------------------------------------------
+
+
+def extract_buffer_shapes(buffer: Buffer) -> dict[str, tuple[int, ...]]:
+    """Extract per-key item shapes from an existing buffer.
+
+    Useful for creating a second buffer (e.g. the online buffer) with the
+    same data schema as an existing one.
+
+    Args:
+        buffer: A :class:`Buffer` whose ``info`` arrays determine the item
+            shapes.  Only the shape is read; the contents are not used.
+
+    Returns:
+        Dict mapping each key to its per-item shape (i.e.
+        ``buffer.info[k].shape[1:]`` for every key ``k``).
+    """
+    return {k: v.shape[1:] for k, v in buffer.info.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +377,8 @@ def create_iqlearn(
     critic_q2_feature_extractor: nnx.Module,
     obs_key: str = "observations",
     action_key: str = "actions",
+    reward_key: str = "rewards",
+    terminated_key: str = "terminated",
     action_scale: float | jax.Array = 1,
     action_bias: float | jax.Array = 0,
     train_steps: int = 1000,
@@ -383,6 +424,12 @@ def create_iqlearn(
             two branches start with different weights.
         obs_key: Key in ``buffer.info`` that holds observations.
         action_key: Key in ``buffer.info`` that holds actions.
+        reward_key: Key used to store per-step scalar rewards in the online
+            buffer populated by :func:`train_sac`.  Must not clash with any
+            key already in ``buffer.info``.
+        terminated_key: Key used to store per-step episode-termination flags
+            (``float32`` 0/1) in the online buffer.  Must not clash with any
+            key already in ``buffer.info``.
         action_scale: Per-dimension scale applied after the tanh squashing
             (continuous only).  Scalar or array of shape ``(action_dim,)``.
         action_bias: Per-dimension offset applied after the tanh squashing
@@ -408,12 +455,51 @@ def create_iqlearn(
         - ``IQLearnGraphs``: static NNX graph definitions for all network modules,
           useful for inspection or custom inference.
     """
+    this_keys = [obs_key, action_key]
+    next_keys = [obs_key]
     buffer_sample = create_sample(
         buffer.size,
         params.batch_size,
-        this_keys=[obs_key, action_key],
-        next_keys=[obs_key],
+        this_keys=this_keys,
+        next_keys=next_keys,
     )
+    # Online buffer: same obs/action shapes as the expert buffer, plus scalar
+    # reward and terminated fields written by run_env_step / train_sac.
+    online_shapes = {
+        **extract_buffer_shapes(buffer),
+        reward_key: (),
+        terminated_key: (),
+    }
+    online_this_keys = [obs_key, action_key, reward_key, terminated_key]
+    online_next_keys = [obs_key]
+    online_buffer, online_buffer_functions = create_buffer(
+        online_shapes,
+        params.online_buffer_size,
+        params.online_batch_size,
+        online_this_keys,
+        online_next_keys,
+    )
+    online_buffer_sample = online_buffer_functions.sample
+
+    # Pre-fill the online buffer with params.online_batch_size random
+    # transitions so that train_sac can update from the very first call.
+    # All rewards are zero and terminated flags are 0 in the stored data;
+    # the final transition is passed terminated=True to the buffer's add()
+    # so that every pre-filled slot becomes sampleable immediately.
+    _prefill_key = jax.random.key(42)
+    for _i in range(params.online_batch_size):
+        _prefill_key, _k_obs, _k_act = jax.random.split(_prefill_key, 3)
+        _transition = {
+            obs_key: jax.random.normal(_k_obs, online_shapes[obs_key]),
+            action_key: jax.random.normal(_k_act, online_shapes[action_key]),
+            reward_key: jnp.zeros(()),
+            terminated_key: jnp.zeros(()),
+        }
+        online_buffer = online_buffer_functions.add(
+            online_buffer,
+            _transition,
+            terminated=(_i == params.online_batch_size - 1),
+        )
 
     # Infer feature dims via dummy forward pass (before split)
     dummy_obs = jnp.zeros((1,) + buffer.info[obs_key].shape[1:])
@@ -505,6 +591,7 @@ def create_iqlearn(
         remove_weak_types(alpha_optimizer_state),
         remove_weak_types(jnp.exp(log_alpha)),
         remove_weak_types(log_alpha),
+        remove_weak_types(online_buffer),
     )
 
     # ------------------------------------------------------------------
@@ -538,10 +625,32 @@ def create_iqlearn(
             q2 = head2(fe2(x))  # (batch, num_actions)
             return jnp.stack([q1, q2], axis=-1)  # (batch, num_actions, 2)
 
+        def get_q_both(
+            critic: TwinCriticState, x: jax.Array, expert_actions: jax.Array
+        ) -> Tuple[jax.Array, jax.Array]:
+            """Per-branch Q-values for the taken action in each expert transition.
+
+            Args:
+                critic: Twin-critic network state.
+                x: Observation batch.
+                expert_actions: Float32 array of shape ``(batch, 1)`` holding
+                    action indices stored as floats (e.g. 0.0, 1.0, 2.0).
+
+            Returns:
+                ``(q1, q2)`` each of shape ``(batch,)``.
+            """
+            q_twin = run_critic(critic, x)  # (batch, num_actions, 2)
+            indices = jnp.round(expert_actions.reshape(-1)).astype(jnp.int32)
+            batch = q_twin.shape[0]
+            return (
+                q_twin[jnp.arange(batch), indices, 0],  # (batch,)
+                q_twin[jnp.arange(batch), indices, 1],
+            )  # (batch,)
+
         def get_q(
             critic: TwinCriticState, x: jax.Array, expert_actions: jax.Array
         ) -> jax.Array:
-            """Conservative Q-value for each expert transition.
+            """Conservative (min over twin) Q-value for each expert transition.
 
             Args:
                 critic: Twin-critic network state.
@@ -552,10 +661,8 @@ def create_iqlearn(
             Returns:
                 Per-transition Q-value of shape ``(batch,)``.
             """
-            q_twin = run_critic(critic, x)  # (batch, num_actions, 2)
-            q_min = jnp.minimum(q_twin[..., 0], q_twin[..., 1])  # (batch, num_actions)
-            indices = jnp.round(expert_actions.reshape(-1)).astype(jnp.int32)
-            return q_min[jnp.arange(q_min.shape[0]), indices]  # (batch,)
+            q1, q2 = get_q_both(critic, x, expert_actions)
+            return jnp.minimum(q1, q2)
 
         def get_v(
             actor: NetworkState,
@@ -655,11 +762,23 @@ def create_iqlearn(
             q2 = head2(jnp.concat((fe2(x), actions), axis=-1))  # (batch, 1)
             return jnp.concat([q1, q2], axis=-1)  # (batch, 2)
 
+        def get_q_both(
+            critic: TwinCriticState, x: jax.Array, actions: jax.Array
+        ) -> Tuple[jax.Array, jax.Array]:
+            """Per-branch Q-values for continuous actions.
+
+            Returns:
+                ``(q1, q2)`` each of shape ``(batch,)``.
+            """
+            q = run_critic(critic, x, actions)  # (batch, 2)
+            return q[:, 0], q[:, 1]
+
         def get_q(
             critic: TwinCriticState, x: jax.Array, actions: jax.Array
         ) -> jax.Array:
             """Return the conservative (min over twin) Q-value for each transition."""
-            return jnp.min(run_critic(critic, x, actions), axis=-1)
+            q1, q2 = get_q_both(critic, x, actions)
+            return jnp.minimum(q1, q2)
 
         def get_dist_params(
             actor: NetworkState, x: jax.Array
@@ -900,6 +1019,196 @@ def create_iqlearn(
             "critic_loss": loss,
         }
 
+    def loss_critic_sac(
+        actor_target: NetworkState,
+        critic: TwinCriticState,
+        critic_target: TwinCriticState,
+        online_buf: Buffer,
+        alpha: jax.Array,
+        key: jax.Array,
+    ) -> Tuple[jax.Array, dict]:
+        """SAC Bellman MSE loss for the twin-critic (continuous and discrete).
+
+        Computes independent TD errors for both Q-branches against the shared
+        target ``r + γ(1−done)·V(s')``.  ``V(s')`` is computed under the
+        target actor and critic; for discrete spaces this is the exact
+        closed-form inner product, for continuous spaces it uses a sampled
+        action.
+
+        Args:
+            actor_target: EMA-smoothed actor used to compute ``V(s')``.
+            critic: Online twin-critic being optimised.
+            critic_target: EMA-smoothed critic used inside ``V(s')``.
+            online_buf: The online replay buffer.
+            alpha: Current entropy temperature.
+            key: JAX PRNG key.
+
+        Returns:
+            ``(scalar_loss, metrics)`` where metrics contains
+            ``"critic_loss"`` and ``"target_q"``.
+        """
+        key_sample, key_v = jax.random.split(key, 2)
+        sample, _ = online_buffer_sample(online_buf, key_sample)
+        obs = sample.this_info[obs_key]
+        actions = sample.this_info[action_key]
+        rewards = sample.this_info[reward_key].reshape(-1)
+        terminated = sample.this_info[terminated_key].reshape(-1)
+
+        next_v = get_v(
+            actor_target,
+            critic_target,
+            alpha,
+            sample.next_info[obs_key],
+            key_v,
+            include_entropy=True,
+        )
+        target_q = jax.lax.stop_gradient(
+            rewards + params.gamma * (1.0 - terminated) * next_v
+        )
+
+        q1, q2 = get_q_both(critic, obs, actions)
+        loss = 0.5 * (jnp.mean((q1 - target_q) ** 2) + jnp.mean((q2 - target_q) ** 2))
+        return loss, {"critic_loss": loss, "target_q": target_q.mean()}
+
+    # ------------------------------------------------------------------
+    # Online helpers: environment interaction and SAC update
+    # ------------------------------------------------------------------
+
+    def run_env_step(sac: IQLearnState, env, env_params, env_state, key: jax.Array):
+        """Collect one transition from a gymnax environment into the online buffer.
+
+        Calls ``env.get_obs`` to read the current observation, queries the
+        actor policy for an action, steps the environment, and writes the
+        ``(obs, action, reward, terminated)`` transition into
+        ``sac.online_buffer``.  Gymnax's base ``step()`` already performs an
+        automatic reset when the episode ends, so the returned state is always
+        ready for the next step without any additional handling.
+
+        Args:
+            sac: Current agent state.  Only ``sac.online_buffer`` is mutated.
+            env: Gymnax environment object (static — not traced by JAX).
+            env_params: Gymnax environment parameters pytree.
+            env_state: Current gymnax environment state pytree.
+            key: JAX PRNG key; split internally for action sampling and env step.
+
+        Returns:
+            ``(new_sac, new_env_state)`` where ``new_sac`` has an updated
+            ``online_buffer`` and ``new_env_state`` is the post-step gymnax
+            state (already reset if the episode ended).
+        """
+        key_act, key_step = jax.random.split(key, 2)
+        obs = env.get_obs(env_state, env_params)
+        action = predict(sac, obs, key_act)
+        if is_discrete:
+            env_action = jnp.round(action).astype(jnp.int32)
+        else:
+            env_action = action
+        _next_obs, new_env_state, reward, done, _ = env.step(
+            key_step, env_state, env_action, env_params
+        )
+        transition = {
+            obs_key: obs,
+            action_key: jnp.atleast_1d(action),
+            reward_key: jnp.asarray(reward, dtype=jnp.float32),
+            terminated_key: jnp.asarray(done, dtype=jnp.float32),
+        }
+        new_online_buffer = online_buffer_functions.add(
+            sac.online_buffer, transition, terminated=done
+        )
+        return sac._replace(online_buffer=new_online_buffer), new_env_state
+
+    def update_step_sac(sac: IQLearnState, key: jax.Array) -> Tuple[IQLearnState, dict]:
+        """Execute one SAC update step using the online replay buffer.
+
+        Uses the standard SAC Bellman MSE objective for the critic (with real
+        environment rewards) and the same soft-value actor objective as
+        IQ-Learn.  The online buffer must already hold at least
+        ``params.online_batch_size`` sampleable transitions before this
+        function is called (guaranteed by the :func:`create_iqlearn` pre-fill).
+
+        Args:
+            sac: Current agent state.
+            key: JAX PRNG key; split internally for actor/critic updates and
+                optional alpha update.
+
+        Returns:
+            ``(new_state, metrics)`` where metrics contains ``"q"``,
+            ``"entropy"``, ``"v"``, ``"critic_loss"``, ``"target_q"``,
+            and ``"alpha"`` (when ``params.autotune_alpha`` is True).
+        """
+        key_actor, key_critic = jax.random.split(key, 2)
+
+        # Actor gradient: maximise soft value V(s) = Q(s,a) - α log π(a|s)
+        grads_actor, metrics = jax.grad(loss_actor, has_aux=True)(
+            sac.actor,
+            sac.critic_target,
+            sac.online_buffer,
+            online_buffer_sample,
+            sac.alpha,
+            key_actor,
+        )
+        # Critic gradient: minimise SAC Bellman MSE
+        grads_critic, metrics_critic = jax.grad(
+            loss_critic_sac, argnums=1, has_aux=True
+        )(
+            sac.actor_target,
+            sac.critic,
+            sac.critic_target,
+            sac.online_buffer,
+            sac.alpha,
+            key_critic,
+        )
+        metrics.update(metrics_critic)
+
+        updates, new_actor_opt = actor_optimizer.update(
+            grads_actor, sac.actor_optimizer_state
+        )
+        new_actor = optax.apply_updates(sac.actor, updates)  # type: ignore
+
+        updates, new_critic_opt = critic_optimizer.update(
+            grads_critic, sac.critic_optimizer_state
+        )
+        new_critic = optax.apply_updates(sac.critic, updates)  # type: ignore
+
+        if params.autotune_alpha:
+            grads_alpha = jax.grad(loss_alpha)(sac.log_alpha, -metrics["entropy"])
+            updates, new_alpha_opt = alpha_optimizer.update(
+                grads_alpha, sac.alpha_optimizer_state
+            )
+            new_log_alpha = optax.apply_updates(sac.log_alpha, updates)  # type: ignore
+            new_alpha = jnp.exp(new_log_alpha)  # type: ignore
+            metrics.update({"alpha": new_alpha})
+        else:
+            new_alpha_opt = sac.alpha_optimizer_state
+            new_log_alpha = sac.log_alpha
+            new_alpha = sac.alpha
+
+        new_actor_target = jax.tree.map(
+            lambda x, y: (1 - params.tau) * x + params.tau * y,
+            sac.actor_target,
+            new_actor,
+        )
+        new_critic_target = jax.tree.map(
+            lambda x, y: (1 - params.tau) * x + params.tau * y,
+            sac.critic_target,
+            new_critic,
+        )
+        return (
+            IQLearnState(
+                new_actor,  # type: ignore
+                new_critic,  # type: ignore
+                new_actor_target,
+                new_critic_target,
+                new_actor_opt,
+                new_critic_opt,
+                new_alpha_opt,  # type: ignore
+                new_alpha,
+                new_log_alpha,  # type: ignore
+                sac.online_buffer,
+            ),
+            metrics,
+        )
+
     def update_step(iqlearn: IQLearnState, key: jax.Array) -> Tuple[IQLearnState, dict]:
         """Execute one full SAC-style update (actor + critic + alpha + EMA targets).
 
@@ -989,14 +1298,93 @@ def create_iqlearn(
                 new_alpha_optimizer_state,  # type: ignore
                 new_alpha,
                 new_log_alpha,  # type: ignore
+                iqlearn.online_buffer,
             ),
             metrics,
         )
 
+    @partial(jax.jit, static_argnames=["env"])
+    def _train_sac_jit(
+        sac: IQLearnState,
+        env,
+        env_params,
+        env_state,
+        key: jax.Array,
+    ) -> Tuple[IQLearnState, any, dict]:
+        def scan_fun(carry, _):
+            sac, env_state, key = carry
+            key, next_key, env_key, update_key = jax.random.split(key, 4)
+            sac, env_state = run_env_step(sac, env, env_params, env_state, env_key)
+            sac, metrics = update_step_sac(sac, update_key)
+            return (sac, env_state, next_key), metrics
+
+        (sac, env_state, _), metrics = jax.lax.scan(
+            scan_fun, (sac, env_state, key), length=train_steps
+        )
+        metrics = jax.tree.map(lambda x: x.mean(), metrics)
+        return sac, env_state, metrics
+
+    def train_sac(
+        sac: IQLearnState,
+        env,
+        env_params,
+        env_state,
+        key: jax.Array,
+    ) -> Tuple[IQLearnState, any, dict]:
+        """Collect online experience and run SAC gradient updates.
+
+        Each step of the inner scan loop:
+
+        1. Calls ``env.get_obs`` to obtain the current observation.
+        2. Samples an action from the current policy.
+        3. Steps the gymnax environment and writes the transition
+           ``(obs, action, reward, terminated)`` into ``sac.online_buffer``.
+           Gymnax's base ``step()`` automatically resets the environment state
+           when the episode terminates, so no separate reset call is needed.
+        4. Runs one SAC gradient update via :func:`update_step_sac`.
+
+        The entire loop is compiled as a single XLA program after the first
+        invocation (via the ``_train_sac_jit`` inner function).
+
+        A Python-level check is performed on every call to ensure the online
+        buffer is warm (at least ``params.online_batch_size`` sampleable
+        transitions).  :func:`create_iqlearn` pre-fills the buffer to this
+        size, so under normal usage the check never fails.  If you replace
+        ``sac.online_buffer`` manually you must ensure it satisfies this
+        invariant or a ``ValueError`` is raised.
+
+        Args:
+            sac: Current agent state.
+            env: Gymnax environment object.  Treated as a static (non-traced)
+                Python object; passed as a ``static_argnames`` argument to the
+                inner JIT.
+            env_params: Gymnax environment parameters pytree.
+            env_state: Current gymnax environment state pytree.  Updated by
+                each environment step and returned.
+            key: JAX PRNG key; split internally across all steps.
+
+        Returns:
+            ``(new_sac, new_env_state, metrics)`` where each metric scalar is
+            the mean over all ``train_steps`` steps.
+
+        Raises:
+            ValueError: If the online buffer holds fewer than
+                ``params.online_batch_size`` sampleable transitions.
+        """
+        n_ok = int(sac.online_buffer.sampling_ok.sum())
+        if n_ok < params.online_batch_size:
+            raise ValueError(
+                f"train_sac requires at least {params.online_batch_size} "
+                f"sampleable transitions in the online buffer, but found "
+                f"{n_ok}. Under normal usage create_iqlearn pre-fills the "
+                f"buffer to params.online_batch_size={params.online_batch_size}"
+                f" slots. If you replaced sac.online_buffer manually, ensure "
+                f"it has at least that many sampleable slots."
+            )
+        return _train_sac_jit(sac, env, env_params, env_state, key)
+
     @jax.jit
-    def train(
-        iqlearn: IQLearnState, key: jax.Array
-    ) -> Tuple[IQLearnState, dict]:
+    def train(iqlearn: IQLearnState, key: jax.Array) -> Tuple[IQLearnState, dict]:
         """Run ``train_steps`` gradient updates and return averaged metrics.
 
         The loop is implemented with ``jax.lax.scan`` so the entire sequence
@@ -1028,4 +1416,4 @@ def create_iqlearn(
         critic_q1=NetworkGraphs(critic_q1_fe_graph, critic_q1_head_graph),
         critic_q2=NetworkGraphs(critic_q2_fe_graph, critic_q2_head_graph),
     )
-    return iqlearn, IQLearnFunctions(predict, train), graphs
+    return iqlearn, IQLearnFunctions(predict, train, train_sac), graphs

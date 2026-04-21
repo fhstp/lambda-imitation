@@ -340,13 +340,16 @@ class TestEnvSpecFromGymnax:
                 env_spec_from_gymnax(env, params=None)
 
     def test_import_error_when_not_installed(self):
-        # Temporarily remove gymnax from sys.modules to simulate absence
-        saved = {k: sys.modules.pop(k) for k in list(sys.modules) if k.startswith("gymnax")}
-        try:
+        # Setting sys.modules entries to None blocks re-import from disk,
+        # simulating gymnax being absent even when it is installed.  Merely
+        # deleting entries would let Python re-discover the package on disk.
+        blocked = {k: None for k in list(sys.modules) if k.startswith("gymnax")}
+        blocked.setdefault("gymnax", None)
+        blocked.setdefault("gymnax.environments", None)
+        blocked.setdefault("gymnax.environments.spaces", None)
+        with patch.dict(sys.modules, blocked):
             with pytest.raises(ImportError, match="gymnax"):
                 env_spec_from_gymnax(object(), params=None)
-        finally:
-            sys.modules.update(saved)
 
 
 # ===========================================================================

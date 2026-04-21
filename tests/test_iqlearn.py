@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 from flax import nnx
+from typing import NamedTuple
 
 from lambda_imitation.buffer import create_buffer
 from lambda_imitation.iqlearn import (
@@ -21,6 +22,7 @@ from lambda_imitation.iqlearn import (
     NetworkState,
     TwinCriticState,
     create_iqlearn,
+    extract_buffer_shapes,
 )
 
 # ---------------------------------------------------------------------------
@@ -785,3 +787,418 @@ class TestTrainDiscrete:
             assert jnp.allclose(l1, l2)
         for k in m1:
             assert jnp.allclose(m1[k], m2[k])
+
+
+# ---------------------------------------------------------------------------
+# extract_buffer_shapes
+# ---------------------------------------------------------------------------
+
+
+class TestExtractBufferShapes:
+    def test_continuous_buffer(self):
+        buf, _ = make_filled_buffer()
+        shapes = extract_buffer_shapes(buf)
+        assert shapes == {"observations": (OBS_DIM,), "actions": (ACTION_DIM,)}
+
+    def test_discrete_buffer(self):
+        buf, _ = make_discrete_buffer()
+        shapes = extract_buffer_shapes(buf)
+        assert shapes == {"observations": (OBS_DIM,), "actions": (1,)}
+
+    def test_scalar_value(self):
+        """Buffers with scalar-valued keys should return empty tuples."""
+        from lambda_imitation.buffer import create_buffer
+        buf, _ = create_buffer(
+            shapes={"obs": (3,), "rew": ()},
+            size=8,
+            sampling_size=4,
+            this_step_infos=["obs", "rew"],
+            next_step_infos=["obs"],
+        )
+        shapes = extract_buffer_shapes(buf)
+        assert shapes["obs"] == (3,)
+        assert shapes["rew"] == ()
+
+    def test_multidim_obs(self):
+        """2-D observation shapes are preserved as-is."""
+        from lambda_imitation.buffer import create_buffer
+        buf, _ = create_buffer(
+            shapes={"observations": (2, 3), "actions": (2,)},
+            size=8,
+            sampling_size=4,
+            this_step_infos=["observations", "actions"],
+            next_step_infos=["observations"],
+        )
+        shapes = extract_buffer_shapes(buf)
+        assert shapes["observations"] == (2, 3)
+
+
+# ---------------------------------------------------------------------------
+# IQLearnState.online_buffer
+# ---------------------------------------------------------------------------
+
+
+class TestOnlineBuffer:
+    def test_online_buffer_in_state(self):
+        state, _, _ = make_iqlearn()
+        assert hasattr(state, "online_buffer")
+        from lambda_imitation.buffer import Buffer
+        assert isinstance(state.online_buffer, Buffer)
+
+    def test_online_buffer_has_reward_and_terminated(self):
+        state, _, _ = make_iqlearn()
+        assert "rewards" in state.online_buffer.info
+        assert "terminated" in state.online_buffer.info
+
+    def test_online_buffer_obs_action_shape(self):
+        state, _, _ = make_iqlearn()
+        buf = state.online_buffer
+        hp = Hyperparameters(batch_size=BATCH_SIZE)
+        assert buf.info["observations"].shape == (hp.online_buffer_size, OBS_DIM)
+        assert buf.info["actions"].shape == (hp.online_buffer_size, ACTION_DIM)
+
+    def test_online_buffer_reward_shape(self):
+        state, _, _ = make_iqlearn()
+        hp = Hyperparameters(batch_size=BATCH_SIZE)
+        assert state.online_buffer.info["rewards"].shape == (hp.online_buffer_size,)
+
+    def test_online_buffer_terminated_shape(self):
+        state, _, _ = make_iqlearn()
+        hp = Hyperparameters(batch_size=BATCH_SIZE)
+        assert state.online_buffer.info["terminated"].shape == (hp.online_buffer_size,)
+
+    def test_online_buffer_is_prefilled(self):
+        """create_iqlearn pre-fills the online buffer to online_batch_size slots."""
+        hp = Hyperparameters(batch_size=BATCH_SIZE, online_batch_size=BATCH_SIZE)
+        buf, _ = make_filled_buffer()
+        actor_fe, critic_q1_fe, critic_q2_fe = make_feature_extractors()
+        state, _, _ = create_iqlearn(
+            hp, buf, ACTION_DIM, actor_fe, critic_q1_fe, critic_q2_fe,
+            train_steps=TRAIN_STEPS,
+        )
+        assert int(state.online_buffer.sampling_ok.sum()) >= hp.online_batch_size
+
+    def test_iqlearn_train_preserves_online_buffer(self):
+        """IQ-Learn train() must thread online_buffer through unchanged."""
+        buf, _ = make_filled_buffer()
+        state, fns, _ = make_iqlearn(buf=buf)
+        new_state, _ = fns.train(state, jax.random.key(0))
+        # online buffer is all-empty; its leaves should be identical
+        for old, new in zip(
+            jax.tree.leaves(state.online_buffer),
+            jax.tree.leaves(new_state.online_buffer),
+        ):
+            assert (old == new).all()
+
+    def test_discrete_online_buffer_action_shape(self):
+        state, _, _ = make_discrete_iqlearn()
+        hp = Hyperparameters(batch_size=BATCH_SIZE)
+        assert state.online_buffer.info["actions"].shape == (hp.online_buffer_size, 1)
+
+
+# ---------------------------------------------------------------------------
+# IQLearnFunctions.train_sac — structural
+# ---------------------------------------------------------------------------
+
+
+class TestIQLearnFunctionsHasTrainSAC:
+    def test_train_sac_callable(self):
+        _, fns, _ = make_iqlearn()
+        assert callable(fns.train_sac)
+
+    def test_train_sac_callable_discrete(self):
+        _, fns, _ = make_discrete_iqlearn()
+        assert callable(fns.train_sac)
+
+
+# ---------------------------------------------------------------------------
+# Mock gymnax environment (for run_env_step / train_sac tests)
+# ---------------------------------------------------------------------------
+#
+# A minimal gymnax-compatible environment that:
+#   - reset(key, params) -> (obs, state)
+#   - step(key, state, action, params) -> (obs, state, reward, done, info)
+#   - get_obs(state, params) -> obs
+#
+# Observations are drawn from a fixed Normal distribution; reward is 1.0;
+# done is always False (no episodic termination) so auto-reset logic stays
+# dormant.  A separate variant sets done=True for every step to test the
+# auto-reset path.
+
+
+class _MockEnvState(NamedTuple):
+    obs: jax.Array
+    step_count: jax.Array
+
+
+class _MockEnvParams(NamedTuple):
+    pass
+
+
+class _MockEnv:
+    """Gymnax-style environment for testing (deterministic, never terminates)."""
+
+    def reset(self, key, params):
+        obs = jnp.ones(OBS_DIM) * 0.5
+        state = _MockEnvState(obs=obs, step_count=jnp.int32(0))
+        return obs, state
+
+    def step(self, key, state, action, params):
+        next_obs = jnp.ones(OBS_DIM) * 0.5
+        next_state = _MockEnvState(
+            obs=next_obs, step_count=state.step_count + 1
+        )
+        reward = jnp.float32(1.0)
+        done = jnp.bool_(False)
+        return next_obs, next_state, reward, done, {}
+
+    def get_obs(self, state, params):
+        return state.obs
+
+
+class _MockEnvAlwaysDone:
+    """Gymnax-style environment that terminates on every step (tests auto-reset).
+
+    Mirrors the real gymnax base-class behaviour: ``step()`` performs an
+    internal auto-reset so that the returned state is already the fresh reset
+    state when ``done=True``.  ``reset()`` returns obs=zeros; the post-step
+    (terminal) obs is ones, so the caller can distinguish them.
+    """
+
+    def reset(self, key, params):
+        obs = jnp.zeros(OBS_DIM)
+        state = _MockEnvState(obs=obs, step_count=jnp.int32(0))
+        return obs, state
+
+    def step(self, key, state, action, params):
+        # Post-step (terminal) state — obs=ones so it differs from reset obs
+        next_obs = jnp.ones(OBS_DIM)
+        next_state = _MockEnvState(obs=next_obs, step_count=state.step_count + 1)
+        reward = jnp.float32(0.0)
+        done = jnp.bool_(True)
+        # Real gymnax base-class step() always auto-resets on done:
+        reset_obs, reset_state = self.reset(key, params)
+        final_obs = jax.lax.select(done, reset_obs, next_obs)
+        final_state = jax.tree.map(
+            lambda r, s: jax.lax.select(done, r, s), reset_state, next_state
+        )
+        return final_obs, final_state, reward, done, {}
+
+    def get_obs(self, state, params):
+        return state.obs
+
+
+# ---------------------------------------------------------------------------
+# train_sac — warm-buffer guard
+# ---------------------------------------------------------------------------
+
+
+class TestTrainSACBufferGuard:
+    """train_sac must raise ValueError when the online buffer is not warm."""
+
+    def _make_cold_state(self, discrete=False):
+        """Create an IQLearnState whose online_buffer has been replaced with an
+        empty one, bypassing the factory pre-fill."""
+        from lambda_imitation.buffer import create_buffer
+
+        if discrete:
+            state, fns, _ = make_discrete_iqlearn(
+                hp=Hyperparameters(
+                    batch_size=BATCH_SIZE,
+                    online_batch_size=BATCH_SIZE,
+                    online_buffer_size=32,
+                    target_entropy=float(0.98 * __import__("math").log(NUM_ACTIONS)),
+                ),
+            )
+        else:
+            state, fns, _ = make_iqlearn(
+                hp=Hyperparameters(
+                    batch_size=BATCH_SIZE,
+                    online_batch_size=BATCH_SIZE,
+                    online_buffer_size=32,
+                ),
+                train_steps=1,
+            )
+        # Substitute an empty online buffer to simulate missing pre-fill.
+        empty_buf, _ = create_buffer(
+            shapes={k: v.shape[1:] for k, v in state.online_buffer.info.items()},
+            size=32,
+            sampling_size=BATCH_SIZE,
+            this_step_infos=list(state.online_buffer.info.keys()),
+            next_step_infos=["observations"],
+        )
+        cold_state = state._replace(online_buffer=empty_buf)
+        return cold_state, fns
+
+    def test_raises_value_error_when_buffer_empty_continuous(self):
+        cold_state, fns = self._make_cold_state(discrete=False)
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state0 = env.reset(jax.random.key(0), env_params)
+        with pytest.raises(ValueError, match="sampleable transitions"):
+            fns.train_sac(cold_state, env, env_params, env_state0, jax.random.key(0))
+
+    def test_raises_value_error_when_buffer_empty_discrete(self):
+        cold_state, fns = self._make_cold_state(discrete=True)
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state0 = env.reset(jax.random.key(0), env_params)
+        with pytest.raises(ValueError, match="sampleable transitions"):
+            fns.train_sac(cold_state, env, env_params, env_state0, jax.random.key(0))
+
+
+# ---------------------------------------------------------------------------
+# train_sac — warm online buffer
+# ---------------------------------------------------------------------------
+
+
+def _make_warm_sac(
+    discrete=False,
+    online_buffer_size=64,
+    online_batch_size=8,
+    train_steps=20,
+):
+    """Create an IQLearnState with a warm online buffer and run train_sac."""
+    env = _MockEnv()
+    env_params = _MockEnvParams()
+    _, env_state0 = env.reset(jax.random.key(0), env_params)
+
+    hp = Hyperparameters(
+        batch_size=BATCH_SIZE,
+        online_batch_size=online_batch_size,
+        online_buffer_size=online_buffer_size,
+    )
+    if discrete:
+        import math
+        hp = Hyperparameters(
+            batch_size=BATCH_SIZE,
+            online_batch_size=online_batch_size,
+            online_buffer_size=online_buffer_size,
+            target_entropy=float(0.98 * math.log(NUM_ACTIONS)),
+        )
+        state, fns, _ = make_discrete_iqlearn(hp=hp, train_steps=train_steps)
+    else:
+        state, fns, _ = make_iqlearn(hp=hp, train_steps=train_steps)
+
+    new_state, new_env_state, metrics = fns.train_sac(
+        state, env, env_params, env_state0, jax.random.key(7)
+    )
+    return state, new_state, new_env_state, metrics
+
+
+class TestTrainSACWarm:
+    def test_return_types_continuous(self):
+        state, new_state, new_env_state, metrics = _make_warm_sac(discrete=False)
+        assert isinstance(new_state, IQLearnState)
+        assert isinstance(new_env_state, _MockEnvState)
+        assert isinstance(metrics, dict)
+
+    def test_return_types_discrete(self):
+        state, new_state, new_env_state, metrics = _make_warm_sac(discrete=True)
+        assert isinstance(new_state, IQLearnState)
+        assert isinstance(new_env_state, _MockEnvState)
+        assert isinstance(metrics, dict)
+
+    def test_expected_metric_keys_continuous(self):
+        _, _, _, metrics = _make_warm_sac(discrete=False)
+        expected = {"q", "entropy", "v", "critic_loss", "target_q", "alpha"}
+        assert expected <= set(metrics.keys()), (
+            f"missing keys: {expected - set(metrics.keys())}"
+        )
+
+    def test_expected_metric_keys_discrete(self):
+        _, _, _, metrics = _make_warm_sac(discrete=True)
+        expected = {"q", "entropy", "v", "critic_loss", "target_q", "alpha"}
+        assert expected <= set(metrics.keys())
+
+    def test_metrics_finite_continuous(self):
+        _, _, _, metrics = _make_warm_sac(discrete=False)
+        for k, v in metrics.items():
+            assert jnp.isfinite(v), f"metric '{k}' is not finite: {v}"
+
+    def test_metrics_finite_discrete(self):
+        _, _, _, metrics = _make_warm_sac(discrete=True)
+        for k, v in metrics.items():
+            assert jnp.isfinite(v), f"metric '{k}' is not finite: {v}"
+
+    def test_actor_params_change_continuous(self):
+        old, new, _, _ = _make_warm_sac(discrete=False)
+        old_leaves = jax.tree.leaves(old.actor)
+        new_leaves = jax.tree.leaves(new.actor)
+        assert any(not (o == n).all() for o, n in zip(old_leaves, new_leaves)), (
+            "actor params should change after warm SAC training"
+        )
+
+    def test_actor_params_change_discrete(self):
+        old, new, _, _ = _make_warm_sac(discrete=True)
+        old_leaves = jax.tree.leaves(old.actor)
+        new_leaves = jax.tree.leaves(new.actor)
+        assert any(not (o == n).all() for o, n in zip(old_leaves, new_leaves)), (
+            "discrete actor params should change after warm SAC training"
+        )
+
+    def test_critic_params_change_continuous(self):
+        old, new, _, _ = _make_warm_sac(discrete=False)
+        old_leaves = jax.tree.leaves(old.critic)
+        new_leaves = jax.tree.leaves(new.critic)
+        assert any(not (o == n).all() for o, n in zip(old_leaves, new_leaves)), (
+            "critic params should change after warm SAC training"
+        )
+
+    def test_online_buffer_fills_up(self):
+        """After train_steps env steps the online buffer should have data."""
+        _, new_state, _, _ = _make_warm_sac(discrete=False, train_steps=20)
+        n_ok = int(new_state.online_buffer.sampling_ok.sum())
+        assert n_ok >= 18, f"expected ≥18 sampleable slots, got {n_ok}"
+
+    def test_env_state_advances(self):
+        """step_count in env_state should increase monotonically."""
+        state, fns, _ = make_iqlearn(train_steps=5)
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state0 = env.reset(jax.random.key(0), env_params)
+        _, new_env_state, _ = fns.train_sac(
+            state, env, env_params, env_state0, jax.random.key(1)
+        )
+        assert int(new_env_state.step_count) == 5
+
+    def test_auto_reset_on_done(self):
+        """When env always terminates the env_state obs should be the reset obs."""
+        env = _MockEnvAlwaysDone()
+        env_params = _MockEnvParams()
+        _, env_state0 = env.reset(jax.random.key(0), env_params)
+        state, fns, _ = make_iqlearn(train_steps=1)
+        _, new_env_state, _ = fns.train_sac(
+            state, env, env_params, env_state0, jax.random.key(0)
+        )
+        # After auto-reset, obs should equal the reset obs (zeros)
+        assert (new_env_state.obs == jnp.zeros(OBS_DIM)).all()
+
+    def test_reproducible_with_same_key(self):
+        state, fns, _ = make_iqlearn(train_steps=5)
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state0 = env.reset(jax.random.key(0), env_params)
+        r1 = fns.train_sac(state, env, env_params, env_state0, jax.random.key(3))
+        r2 = fns.train_sac(state, env, env_params, env_state0, jax.random.key(3))
+        for l1, l2 in zip(jax.tree.leaves(r1[0]), jax.tree.leaves(r2[0])):
+            assert jnp.allclose(l1, l2)
+
+    def test_no_autotune_alpha_continuous(self):
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state0 = env.reset(jax.random.key(0), env_params)
+        hp = Hyperparameters(
+            batch_size=BATCH_SIZE,
+            online_batch_size=8,
+            online_buffer_size=64,
+            autotune_alpha=False,
+        )
+        state, fns, _ = make_iqlearn(hp=hp, train_steps=20, autotune_alpha=False)
+        new_state, _, metrics = fns.train_sac(
+            state, env, env_params, env_state0, jax.random.key(0)
+        )
+        assert jnp.allclose(state.alpha, new_state.alpha), (
+            "alpha should not change when autotune_alpha=False"
+        )
+        assert "alpha" not in metrics
