@@ -152,20 +152,25 @@ def mock_<lib>(monkeypatch):
 Then each test receives `mock_<lib>` as a fixture and constructs fake env
 objects using the fake space classes.
 
-The `test_import_error_when_not_installed` test removes the module from
-`sys.modules` to simulate it being absent:
+The `test_import_error_when_not_installed` test simulates the package being
+absent. **Do not use `del`/`delitem`** — if the package is installed Python
+will simply re-import it from disk. Instead set the relevant `sys.modules`
+entries to `None`; `None` values are treated as import blockers by the import
+machinery and cause `ImportError` without touching the filesystem:
 
 ```python
-def test_import_error_when_not_installed(self, monkeypatch):
-    monkeypatch.delitem(sys.modules, "<lib>", raising=False)
-    monkeypatch.delitem(sys.modules, "<lib>.<spaces_module>", raising=False)
-
-    class FakeEnv:
-        pass
-
-    with pytest.raises(ImportError, match="<lib>"):
-        env_spec_from_<lib>(FakeEnv())
+def test_import_error_when_not_installed(self):
+    # None entries block re-import from disk even when the package is installed.
+    blocked = {k: None for k in list(sys.modules) if k.startswith("<lib>")}
+    blocked.setdefault("<lib>", None)
+    blocked.setdefault("<lib>.<spaces_module>", None)
+    with patch.dict(sys.modules, blocked):
+        with pytest.raises(ImportError, match="<lib>"):
+            env_spec_from_<lib>(object())
 ```
+
+Make sure `from unittest.mock import patch` is imported at the top of the test
+file (it already is in `test_utils.py`).
 
 ---
 

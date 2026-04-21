@@ -16,11 +16,13 @@ src/
 tests/
     __init__.py
     test_buffer.py        ← 26 tests
-    test_iqlearn.py       ← 60 tests
+    test_iqlearn.py       ← 90 tests
     test_utils.py         ← 45 tests
 examples/
-    mountain_car_discrete.py     ← MountainCar-v0 demo (discrete)
-    mountain_car_continuous.py   ← MountainCarContinuous-v0 demo (continuous)
+    mountain_car_discrete.py     ← MountainCar-v0 demo (discrete, gymnasium, IQ-Learn)
+    mountain_car_continuous.py   ← MountainCarContinuous-v0 demo (continuous, gymnasium, IQ-Learn)
+    cartpole_sac.py              ← CartPole-v1 demo (discrete, gymnax, pure SAC)
+    pendulum_sac.py              ← Pendulum-v1 demo (continuous, gymnax, pure SAC)
 pyproject.toml            ← hatchling build, optional extras, pytest config
 ```
 
@@ -82,6 +84,8 @@ Requires Python 3.10+ (uses `X | Y` union type syntax).
 - Train + visualise (discrete): `python examples/mountain_car_discrete.py`
 - Record demos (continuous): `python examples/mountain_car_continuous.py --record`
 - Train + visualise (continuous): `python examples/mountain_car_continuous.py`
+- Train + visualise CartPole SAC (gymnax): `python examples/cartpole_sac.py`
+- Train + visualise Pendulum SAC (gymnax): `python examples/pendulum_sac.py`
 
 ## Conventions
 
@@ -95,7 +99,14 @@ Requires Python 3.10+ (uses `X | Y` union type syntax).
 - Mocking gymnax/jumanji in tests: use `ModuleType` objects (not `MagicMock`) for the full parent-module chain and wire `.spaces`/`.specs` attributes explicitly, so CPython's attribute-traversal in dotted imports resolves to the mock classes rather than auto-generated MagicMock attributes.
 - All imports within the package use relative imports (`from .buffer import ...`).
 - The twin-Q `jnp.min` gradient flow: with continuous actions, only the branch producing the smaller Q receives gradient in a given step. Tests for per-branch parameter changes therefore check the full `TwinCriticState` pytree (not individual branches), and verify branch independence by checking initial parameter divergence rather than per-step updates.
+- **Gymnax auto-reset**: the gymnax base class `Environment.step()` always auto-resets — it runs `reset_env` on every call and returns the reset state/obs when `done=True` (via `jax.lax.select`). Do NOT add a manual `env.reset` call after `env.step` in gymnax code; `run_env_step` in `iqlearn.py` relies on this. Mock gymnax environments used in SAC tests must replicate this behaviour in their `step()` method.
+- **Simulating absent installed packages in tests**: deleting a package from `sys.modules` is not sufficient when the package is actually installed — Python will re-import it from disk. Use `patch.dict(sys.modules, {key: None, ...})` (setting entries to `None`) to block re-import and trigger `ImportError`, as `None` entries are treated as import blockers by the import machinery.
+- **`fns.train_sac()` metric keys**: `"q"`, `"entropy"`, `"v"`, `"critic_loss"`, `"target_q"`, `"alpha"`. Note the SAC critic loss key is `"critic_loss"` (same as in `update_step`), not `"sac_critic_loss"`.
+- **Pure SAC examples with `create_iqlearn_from_env`**: when only `fns.train_sac()` is used (no imitation learning), a placeholder expert buffer is required. Use 1 all-zeros transition with `buffer_size=1` and `batch_size=1` in `Hyperparameters` — this is structurally valid and never sampled.
 
 ## Examples
 
-Scripts in `examples/` are standalone demos — not collected by pytest. They require `gymnasium` and `imitation-gym-wrappers`. Each has `--record` / `--steps` / `--episodes` / `--file` CLI flags; run with `--help` for the full two-step workflow.
+Scripts in `examples/` are standalone demos — not collected by pytest.
+
+- **`mountain_car_discrete.py` / `mountain_car_continuous.py`**: IQ-Learn imitation learning on gymnasium MountainCar environments. Require `gymnasium` and `imitation-gym-wrappers`. Two-step workflow: `--record` to capture expert demos, then train and visualise.
+- **`cartpole_sac.py` / `pendulum_sac.py`**: Pure online SAC (no expert data) on gymnax CartPole-v1 and Pendulum-v1. Require `gymnax` for training; `gymnasium[classic-control]` is optional and only needed for the post-training visualisation window. CLI flags: `--rounds`, `--train-steps`, `--seed`.
