@@ -339,8 +339,8 @@ def create_iqlearn_from_env(
       ``action_scale`` and ``action_bias`` are not used.
     * Creating and pre-filling a replay :class:`~lambda_imitation.buffer.Buffer` from
       ``expert_data``.
-    * Constructing two shared :class:`~lambda_imitation.iqlearn.MLPFeatureExtractor` instances
-      (one for actor, one for critic) with identical architecture.
+    * Constructing three :class:`~lambda_imitation.iqlearn.MLPFeatureExtractor` instances
+      (one for the actor and one per critic Q-branch) with identical architecture.
 
     The expert data is stored as-is; no normalisation is applied.  If
     ``expert_data`` contains more entries than ``buffer_size``, the last
@@ -359,10 +359,11 @@ def create_iqlearn_from_env(
         hp: :class:`~lambda_imitation.iqlearn.Hyperparameters` instance.  When ``None``,
             defaults are used with ``target_entropy`` set appropriately for
             the action space type.
-        fe_hidden_dims: Hidden layer widths for both the actor and critic
-            feature extractors.  Both share the same architecture; construct
-            them manually and call :func:`~lambda_imitation.iqlearn.create_iqlearn` directly
-            if you need different backbones.
+        fe_hidden_dims: Hidden layer widths for the actor and critic
+            feature extractors.  All three share the same architecture;
+            construct them manually and call
+            :func:`~lambda_imitation.iqlearn.create_iqlearn` directly if you need
+            different backbones.
         actor_head_dims: Hidden layer widths for the actor head.  Defaults to
             ``()`` (direct linear projection).
         critic_head_dims: Hidden layer widths for the critic head.  Defaults
@@ -440,15 +441,17 @@ def create_iqlearn_from_env(
     # Feature extractors — identical architecture, independent weights
     input_dim = math.prod(env_spec.obs_shape)
     rngs = nnx.Rngs(seed)
-    actor_fe  = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
-    critic_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
+    actor_fe    = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
+    critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
+    critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
 
     return create_iqlearn(
         params=hp,
         buffer=buffer,
         action_dim=env_spec.action_dim,
         actor_feature_extractor=actor_fe,
-        critic_feature_extractor=critic_fe,
+        critic_q1_feature_extractor=critic_q1_fe,
+        critic_q2_feature_extractor=critic_q2_fe,
         obs_key=obs_key,
         action_key=action_key,
         action_scale=action_scale,

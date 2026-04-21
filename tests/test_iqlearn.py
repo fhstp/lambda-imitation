@@ -11,16 +11,15 @@ from flax import nnx
 
 from lambda_imitation.buffer import create_buffer
 from lambda_imitation.iqlearn import (
-    ActorHead,
-    CriticHead,
-    DiscreteActorHead,
-    DiscreteCriticHead,
+    Head,
     Hyperparameters,
     IQLearnFunctions,
     IQLearnGraphs,
     IQLearnState,
     MLPFeatureExtractor,
+    NetworkGraphs,
     NetworkState,
+    TwinCriticState,
     create_iqlearn,
 )
 
@@ -74,11 +73,15 @@ def make_filled_buffer(
 
 
 def make_feature_extractors(obs_dim=OBS_DIM, hidden_dims=FE_DIMS):
-    """Create a pair of MLPFeatureExtractor instances for actor and critic."""
+    """Create three independent MLPFeatureExtractor instances.
+
+    Returns ``(actor_fe, critic_q1_fe, critic_q2_fe)`` — one per network role.
+    """
     rngs = nnx.Rngs(0)
-    actor_fe = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
-    critic_fe = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
-    return actor_fe, critic_fe
+    actor_fe    = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
+    critic_q1_fe = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
+    critic_q2_fe = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
+    return actor_fe, critic_q1_fe, critic_q2_fe
 
 
 def make_discrete_buffer(
@@ -133,13 +136,14 @@ def make_discrete_iqlearn(
             autotune_alpha=autotune_alpha,
             target_entropy=float(0.98 * math.log(num_actions)),
         )
-    actor_fe, critic_fe = make_feature_extractors(obs_dim=obs_dim)
+    actor_fe, critic_q1_fe, critic_q2_fe = make_feature_extractors(obs_dim=obs_dim)
     return create_iqlearn(
         hp,
         buf,
         num_actions,
         actor_fe,
-        critic_fe,
+        critic_q1_fe,
+        critic_q2_fe,
         train_steps=train_steps,
         critic_head_dims=critic_head_dims,
         is_discrete=True,
@@ -165,13 +169,14 @@ def make_iqlearn(
             batch_size=BATCH_SIZE,
             autotune_alpha=autotune_alpha,
         )
-    actor_fe, critic_fe = make_feature_extractors(obs_dim=obs_dim)
+    actor_fe, critic_q1_fe, critic_q2_fe = make_feature_extractors(obs_dim=obs_dim)
     return create_iqlearn(
         hp,
         buf,
         ACTION_DIM,
         actor_fe,
-        critic_fe,
+        critic_q1_fe,
+        critic_q2_fe,
         train_steps=train_steps,
         action_scale=action_scale,
         action_bias=action_bias,
@@ -229,30 +234,35 @@ class TestMLPFeatureExtractor:
         assert out.shape == (2, 8)
 
 
-class TestActorHead:
-    def test_default_no_hidden(self):
-        head = ActorHead(32, ACTION_DIM, (), rngs=nnx.Rngs(0))
+class TestHead:
+    def test_no_hidden(self):
+        """Direct linear projection: no hidden layers."""
+        head = Head(32, (), 8, rngs=nnx.Rngs(0))
         out = head(jnp.ones((4, 32)))
-        assert out.shape == (4, 2 * ACTION_DIM)
+        assert out.shape == (4, 8)
 
     def test_with_hidden_layers(self):
-        head = ActorHead(32, ACTION_DIM, (16, 16), rngs=nnx.Rngs(0))
+        head = Head(32, (16, 16), 8, rngs=nnx.Rngs(0))
+        out = head(jnp.ones((4, 32)))
+        assert out.shape == (4, 8)
+
+    def test_single_output(self):
+        """output_dim=1 as used by each continuous critic Q-branch."""
+        head = Head(64, (32,), 1, rngs=nnx.Rngs(0))
+        out = head(jnp.ones((3, 64)))
+        assert out.shape == (3, 1)
+
+    def test_large_output(self):
+        """output_dim=2*action_dim as used by the continuous actor head."""
+        head = Head(32, (), 2 * ACTION_DIM, rngs=nnx.Rngs(0))
         out = head(jnp.ones((4, 32)))
         assert out.shape == (4, 2 * ACTION_DIM)
 
-
-class TestCriticHead:
-    def test_default_output(self):
-        head = CriticHead(32, ACTION_DIM, (16,), rngs=nnx.Rngs(0))
-        features = jnp.ones((4, 32))
-        actions = jnp.ones((4, ACTION_DIM))
-        out = head(features, actions)
-        assert out.shape == (4, 2)  # twin Q
-
-    def test_no_hidden(self):
-        head = CriticHead(32, ACTION_DIM, (), rngs=nnx.Rngs(0))
-        out = head(jnp.ones((4, 32)), jnp.ones((4, ACTION_DIM)))
-        assert out.shape == (4, 2)
+    def test_discrete_actor_shape(self):
+        """output_dim=num_actions as used by the discrete actor head."""
+        head = Head(32, (), NUM_ACTIONS, rngs=nnx.Rngs(0))
+        out = head(jnp.ones((4, 32)))
+        assert out.shape == (4, NUM_ACTIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -266,12 +276,23 @@ class TestCreateIQLearn:
         assert isinstance(fns, IQLearnFunctions)
         assert isinstance(graphs, IQLearnGraphs)
 
-    def test_state_fields_are_network_states(self):
+    def test_actor_state_is_network_state(self):
         state, _, _ = make_iqlearn()
-        for field in (state.actor, state.critic, state.actor_target, state.critic_target):
+        for field in (state.actor, state.actor_target):
             assert isinstance(field, NetworkState)
             assert field.fe is not None
             assert field.head is not None
+
+    def test_critic_state_is_twin_critic_state(self):
+        state, _, _ = make_iqlearn()
+        for field in (state.critic, state.critic_target):
+            assert isinstance(field, TwinCriticState)
+            assert isinstance(field.q1, NetworkState)
+            assert isinstance(field.q2, NetworkState)
+            assert field.q1.fe is not None
+            assert field.q1.head is not None
+            assert field.q2.fe is not None
+            assert field.q2.head is not None
 
     def test_optimizer_states_populated(self):
         state, _, _ = make_iqlearn()
@@ -296,40 +317,50 @@ class TestCreateIQLearn:
     def test_custom_alpha(self):
         hp = Hyperparameters(alpha=0.5, batch_size=BATCH_SIZE)
         buf, _ = make_filled_buffer()
-        actor_fe, critic_fe = make_feature_extractors()
+        actor_fe, critic_q1_fe, critic_q2_fe = make_feature_extractors()
         state, _, _ = create_iqlearn(
-            hp, buf, ACTION_DIM, actor_fe, critic_fe, train_steps=TRAIN_STEPS,
+            hp, buf, ACTION_DIM, actor_fe, critic_q1_fe, critic_q2_fe,
+            train_steps=TRAIN_STEPS,
         )
         assert jnp.isclose(state.alpha, 0.5, atol=1e-6)
 
-    def test_graphs_have_four_fields(self):
+    def test_graphs_have_correct_fields(self):
         _, _, graphs = make_iqlearn()
-        assert graphs.actor_fe is not None
-        assert graphs.actor_head is not None
-        assert graphs.critic_fe is not None
-        assert graphs.critic_head is not None
+        assert isinstance(graphs.actor, NetworkGraphs)
+        assert isinstance(graphs.critic_q1, NetworkGraphs)
+        assert isinstance(graphs.critic_q2, NetworkGraphs)
+        assert graphs.actor.fe is not None
+        assert graphs.actor.head is not None
+        assert graphs.critic_q1.fe is not None
+        assert graphs.critic_q1.head is not None
+        assert graphs.critic_q2.fe is not None
+        assert graphs.critic_q2.head is not None
 
     def test_feature_dim_inferred_for_custom_fe(self):
         """A FE with output dim 64 should produce actor head output 2*action_dim."""
         buf, _ = make_filled_buffer()
-        actor_fe = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(1))
-        critic_fe = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(2))
+        actor_fe    = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(1))
+        critic_q1_fe = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(2))
+        critic_q2_fe = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(3))
         hp = Hyperparameters(batch_size=BATCH_SIZE)
         state, fns, _ = create_iqlearn(
-            hp, buf, ACTION_DIM, actor_fe, critic_fe, train_steps=TRAIN_STEPS,
+            hp, buf, ACTION_DIM, actor_fe, critic_q1_fe, critic_q2_fe,
+            train_steps=TRAIN_STEPS,
         )
         # Should be able to predict without shape errors
         action = fns.predict(state, jnp.ones(OBS_DIM), deterministic=True)
         assert action.shape == (ACTION_DIM,)
 
     def test_separate_fe_architectures(self):
-        """Actor and critic can have different FE architectures."""
+        """Actor and critic Q-branches can have different FE architectures."""
         buf, _ = make_filled_buffer()
-        actor_fe = MLPFeatureExtractor(OBS_DIM, (16,), rngs=nnx.Rngs(0))
-        critic_fe = MLPFeatureExtractor(OBS_DIM, (64, 64), rngs=nnx.Rngs(1))
+        actor_fe    = MLPFeatureExtractor(OBS_DIM, (16,), rngs=nnx.Rngs(0))
+        critic_q1_fe = MLPFeatureExtractor(OBS_DIM, (64, 64), rngs=nnx.Rngs(1))
+        critic_q2_fe = MLPFeatureExtractor(OBS_DIM, (64, 64), rngs=nnx.Rngs(2))
         hp = Hyperparameters(batch_size=BATCH_SIZE)
         state, fns, _ = create_iqlearn(
-            hp, buf, ACTION_DIM, actor_fe, critic_fe, train_steps=TRAIN_STEPS,
+            hp, buf, ACTION_DIM, actor_fe, critic_q1_fe, critic_q2_fe,
+            train_steps=TRAIN_STEPS,
         )
         action = fns.predict(state, jnp.ones(OBS_DIM), deterministic=True)
         assert action.shape == (ACTION_DIM,)
@@ -405,11 +436,13 @@ class TestPredict:
                 },
                 i == BUFFER_SIZE - 1,
             )
-        actor_fe = MLPFeatureExtractor(obs_dim, FE_DIMS, rngs=nnx.Rngs(0))
-        critic_fe = MLPFeatureExtractor(obs_dim, FE_DIMS, rngs=nnx.Rngs(1))
+        actor_fe    = MLPFeatureExtractor(obs_dim, FE_DIMS, rngs=nnx.Rngs(0))
+        critic_q1_fe = MLPFeatureExtractor(obs_dim, FE_DIMS, rngs=nnx.Rngs(1))
+        critic_q2_fe = MLPFeatureExtractor(obs_dim, FE_DIMS, rngs=nnx.Rngs(2))
         hp = Hyperparameters(batch_size=BATCH_SIZE)
         state, fns, _ = create_iqlearn(
-            hp, buf2, ACTION_DIM, actor_fe, critic_fe, train_steps=TRAIN_STEPS,
+            hp, buf2, ACTION_DIM, actor_fe, critic_q1_fe, critic_q2_fe,
+            train_steps=TRAIN_STEPS,
         )
         obs = jnp.ones(obs_shape)
         action = fns.predict(state, obs, deterministic=True)
@@ -461,19 +494,22 @@ class TestTrain:
         assert any(not (o == n).all() for o, n in zip(old, new)), \
             "actor head params should change after training"
 
-    def test_critic_fe_params_change(self, trained):
+    def test_critic_params_change(self, trained):
+        """At least one parameter across the twin-critic should change."""
         old_state, new_state, _, _ = trained
-        old = jax.tree.leaves(old_state.critic.fe)
-        new = jax.tree.leaves(new_state.critic.fe)
+        old = jax.tree.leaves(old_state.critic)
+        new = jax.tree.leaves(new_state.critic)
         assert any(not (o == n).all() for o, n in zip(old, new)), \
-            "critic FE params should change after training"
+            "critic params should change after training"
 
-    def test_critic_head_params_change(self, trained):
-        old_state, new_state, _, _ = trained
-        old = jax.tree.leaves(old_state.critic.head)
-        new = jax.tree.leaves(new_state.critic.head)
-        assert any(not (o == n).all() for o, n in zip(old, new)), \
-            "critic head params should change after training"
+    def test_twin_q_branches_independent(self):
+        """Q1 and Q2 must start with different parameters (true independence)."""
+        state, _, _ = make_iqlearn()
+        q1_leaves = jax.tree.leaves(state.critic.q1)
+        q2_leaves = jax.tree.leaves(state.critic.q2)
+        assert any(
+            not jnp.allclose(a, b) for a, b in zip(q1_leaves, q2_leaves)
+        ), "Q1 and Q2 should have independent (different) initial parameters"
 
     def test_targets_lag_behind_online(self, trained):
         """After training with tau < 1, targets should differ from online params."""
@@ -559,46 +595,6 @@ class TestIntegration:
 
 
 # ---------------------------------------------------------------------------
-# Discrete network building blocks
-# ---------------------------------------------------------------------------
-
-class TestDiscreteActorHead:
-    def test_output_shape(self):
-        head = DiscreteActorHead(32, NUM_ACTIONS, (), rngs=nnx.Rngs(0))
-        out = head(jnp.ones((4, 32)))
-        assert out.shape == (4, NUM_ACTIONS)
-
-    def test_with_hidden_dims(self):
-        head = DiscreteActorHead(32, NUM_ACTIONS, (16, 16), rngs=nnx.Rngs(0))
-        out = head(jnp.ones((4, 32)))
-        assert out.shape == (4, NUM_ACTIONS)
-
-    def test_single_action(self):
-        head = DiscreteActorHead(16, 1, (), rngs=nnx.Rngs(0))
-        out = head(jnp.ones((3, 16)))
-        assert out.shape == (3, 1)
-
-
-class TestDiscreteCriticHead:
-    def test_output_shape(self):
-        head = DiscreteCriticHead(32, NUM_ACTIONS, (16,), rngs=nnx.Rngs(0))
-        out = head(jnp.ones((4, 32)))
-        assert out.shape == (4, NUM_ACTIONS, 2)
-
-    def test_no_action_input(self):
-        """Discrete critic takes only features — no action argument."""
-        head = DiscreteCriticHead(32, NUM_ACTIONS, (), rngs=nnx.Rngs(0))
-        out = head(jnp.ones((2, 32)))
-        assert out.shape == (2, NUM_ACTIONS, 2)
-
-    def test_twin_outputs_differ(self):
-        """The two Q branches should produce different values (independent weights)."""
-        head = DiscreteCriticHead(32, NUM_ACTIONS, (16,), rngs=nnx.Rngs(0))
-        out = head(jnp.ones((4, 32)))
-        assert not jnp.allclose(out[..., 0], out[..., 1])
-
-
-# ---------------------------------------------------------------------------
 # create_iqlearn (discrete)
 # ---------------------------------------------------------------------------
 
@@ -609,19 +605,25 @@ class TestCreateIQLearnDiscrete:
         assert isinstance(fns, IQLearnFunctions)
         assert isinstance(graphs, IQLearnGraphs)
 
-    def test_state_fields_are_network_states(self):
+    def test_actor_state_is_network_state(self):
         state, _, _ = make_discrete_iqlearn()
-        for field in (state.actor, state.critic, state.actor_target, state.critic_target):
+        for field in (state.actor, state.actor_target):
             assert isinstance(field, NetworkState)
             assert field.fe is not None
             assert field.head is not None
 
-    def test_graphs_have_four_fields(self):
+    def test_critic_state_is_twin_critic_state(self):
+        state, _, _ = make_discrete_iqlearn()
+        for field in (state.critic, state.critic_target):
+            assert isinstance(field, TwinCriticState)
+            assert isinstance(field.q1, NetworkState)
+            assert isinstance(field.q2, NetworkState)
+
+    def test_graphs_have_correct_fields(self):
         _, _, graphs = make_discrete_iqlearn()
-        assert graphs.actor_fe is not None
-        assert graphs.actor_head is not None
-        assert graphs.critic_fe is not None
-        assert graphs.critic_head is not None
+        assert isinstance(graphs.actor, NetworkGraphs)
+        assert isinstance(graphs.critic_q1, NetworkGraphs)
+        assert isinstance(graphs.critic_q2, NetworkGraphs)
 
     def test_targets_match_initial_params(self):
         state, _, _ = make_discrete_iqlearn()
@@ -635,15 +637,16 @@ class TestCreateIQLearnDiscrete:
     def test_feature_dim_inferred(self):
         """Feature dim should be inferred correctly; predict must not error."""
         buf, _ = make_discrete_buffer()
-        actor_fe = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(1))
-        critic_fe = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(2))
+        actor_fe    = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(1))
+        critic_q1_fe = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(2))
+        critic_q2_fe = MLPFeatureExtractor(OBS_DIM, (64,), rngs=nnx.Rngs(3))
         import math
         hp = Hyperparameters(
             batch_size=BATCH_SIZE,
             target_entropy=float(0.98 * math.log(NUM_ACTIONS)),
         )
         state, fns, _ = create_iqlearn(
-            hp, buf, NUM_ACTIONS, actor_fe, critic_fe,
+            hp, buf, NUM_ACTIONS, actor_fe, critic_q1_fe, critic_q2_fe,
             train_steps=TRAIN_STEPS, is_discrete=True,
         )
         action = fns.predict(state, jnp.ones(OBS_DIM), deterministic=True)
@@ -734,12 +737,19 @@ class TestTrainDiscrete:
         assert any(not (o == n).all() for o, n in zip(old, new)), \
             "actor params should change after training"
 
-    def test_critic_params_change(self, trained):
+    def test_critic_q1_params_change(self, trained):
         old_state, new_state, _, _ = trained
-        old = jax.tree.leaves(old_state.critic)
-        new = jax.tree.leaves(new_state.critic)
+        old = jax.tree.leaves(old_state.critic.q1)
+        new = jax.tree.leaves(new_state.critic.q1)
         assert any(not (o == n).all() for o, n in zip(old, new)), \
-            "critic params should change after training"
+            "critic Q1 params should change after training"
+
+    def test_critic_q2_params_change(self, trained):
+        old_state, new_state, _, _ = trained
+        old = jax.tree.leaves(old_state.critic.q2)
+        new = jax.tree.leaves(new_state.critic.q2)
+        assert any(not (o == n).all() for o, n in zip(old, new)), \
+            "critic Q2 params should change after training"
 
     def test_targets_lag_behind_online(self, trained):
         _, new_state, _, _ = trained

@@ -11,16 +11,15 @@ from lambda_imitation.buffer import (
     create_sample,
 )
 from lambda_imitation.iqlearn import (
-    ActorHead,
-    CriticHead,
-    DiscreteActorHead,
-    DiscreteCriticHead,
+    Head,
     Hyperparameters,
     IQLearnFunctions,
     IQLearnGraphs,
     IQLearnState,
     MLPFeatureExtractor,
+    NetworkGraphs,
     NetworkState,
+    TwinCriticState,
     create_iqlearn,
 )
 from lambda_imitation.utils import (
@@ -39,16 +38,15 @@ __all__ = [
     "create_buffer",
     "create_sample",
     # iqlearn
-    "ActorHead",
-    "CriticHead",
-    "DiscreteActorHead",
-    "DiscreteCriticHead",
+    "Head",
     "Hyperparameters",
     "IQLearnFunctions",
     "IQLearnGraphs",
     "IQLearnState",
     "MLPFeatureExtractor",
+    "NetworkGraphs",
     "NetworkState",
+    "TwinCriticState",
     "create_iqlearn",
     # utils
     "EnvSpec",

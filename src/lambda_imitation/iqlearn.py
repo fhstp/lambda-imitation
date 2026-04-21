@@ -12,6 +12,11 @@ which uses categorical distributions and an all-actions critic (no action
 input to the critic; V(s) is computed as the exact inner product
 ``Σ_a π(a|s)·Q(s,a)`` rather than via Monte-Carlo sampling).
 
+The twin-Q critic is implemented as two fully independent
+``(FeatureExtractor, Head)`` pairs — one per Q-branch — grouped in a
+:class:`TwinCriticState` NamedTuple.  Because ``TwinCriticState`` is a JAX
+pytree, a single optimizer operates on both branches transparently.
+
 All state is held in immutable NamedTuples and the functional design
 (``create_iqlearn`` factory + pure ``train``/``predict`` closures) keeps the
 implementation compatible with ``jax.jit`` and ``jax.lax.scan``.
@@ -19,11 +24,13 @@ implementation compatible with ``jax.jit`` and ``jax.lax.scan``.
 Typical usage (continuous)::
 
     rngs = nnx.Rngs(0)
-    actor_fe  = MLPFeatureExtractor(obs_dim, (256, 256), rngs=rngs)
-    critic_fe = MLPFeatureExtractor(obs_dim, (256, 256), rngs=rngs)
+    actor_fe   = MLPFeatureExtractor(obs_dim, (256, 256), rngs=rngs)
+    critic_q1_fe = MLPFeatureExtractor(obs_dim, (256, 256), rngs=rngs)
+    critic_q2_fe = MLPFeatureExtractor(obs_dim, (256, 256), rngs=rngs)
 
     state, fns, graphs = create_iqlearn(
-        Hyperparameters(), buffer, action_dim, actor_fe, critic_fe,
+        Hyperparameters(), buffer, action_dim,
+        actor_fe, critic_q1_fe, critic_q2_fe,
     )
     state, metrics = fns.train(state, jax.random.key(0))
     action = fns.predict(state, obs, deterministic=True)
@@ -31,7 +38,8 @@ Typical usage (continuous)::
 Typical usage (discrete)::
 
     state, fns, graphs = create_iqlearn(
-        Hyperparameters(), buffer, num_actions, actor_fe, critic_fe,
+        Hyperparameters(), buffer, num_actions,
+        actor_fe, critic_q1_fe, critic_q2_fe,
         is_discrete=True,
     )
     action = fns.predict(state, obs, deterministic=True)  # float32 scalar index
@@ -83,8 +91,7 @@ class MLPFeatureExtractor(nnx.Module):
     ):
         dims = [input_dim] + list(hidden_dims)
         self.layers = [
-            nnx.Linear(dims[i], dims[i + 1], rngs=rngs)
-            for i in range(len(dims) - 1)
+            nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)
         ]
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -103,200 +110,58 @@ class MLPFeatureExtractor(nnx.Module):
         return x
 
 
-class ActorHead(nnx.Module):
-    """Maps feature vectors to Gaussian distribution parameters.
+class Head(nnx.Module):
+    """Generic MLP head: ReLU on hidden layers, linear output.
 
-    Outputs a single tensor of shape ``(batch, 2 * action_dim)`` whose first
-    half is the mean and second half is the (pre-squashed) log-standard-deviation
-    of a diagonal Gaussian policy.
+    Takes a pre-computed feature vector (no flattening) and maps it to an
+    output of the desired dimensionality.  Hidden layers use ReLU activations;
+    the final layer is a plain linear projection.
+
+    This single class replaces the former ``ActorHead``, ``CriticHead``,
+    ``DiscreteActorHead``, and ``DiscreteCriticHead`` specialisations.  The
+    caller controls the role by choosing the appropriate ``output_dim``:
+
+    * **Continuous actor**: ``output_dim = 2 * action_dim``
+      (mean + log-std of a squashed Gaussian).
+    * **Discrete actor**: ``output_dim = num_actions`` (categorical logits).
+    * **Continuous critic Q1 / Q2**: ``output_dim = 1``; the caller
+      concatenates features and actions *before* passing them in.
+    * **Discrete critic Q1 / Q2**: ``output_dim = num_actions``
+      (per-action Q-values).
 
     Args:
-        feature_dim: Dimensionality of the incoming feature vector.
-        action_dim: Number of action dimensions.
-        hidden_dims: Optional hidden layers between features and output.
-            Defaults to ``()`` (single linear projection from features to
-            distribution parameters).
+        feature_dim: Dimensionality of the input feature vector.
+        hidden_dims: Widths of optional hidden layers.  Use ``()`` for a
+            direct linear projection from features to output.
+        output_dim: Dimensionality of the output.
         rngs: Flax NNX RNG container used to initialise parameters.
     """
 
     def __init__(
         self,
         feature_dim: int,
-        action_dim: int,
-        hidden_dims: tuple[int, ...] = (),
+        hidden_dims: tuple[int, ...],
+        output_dim: int,
         *,
         rngs: nnx.Rngs,
     ):
-        dims = [feature_dim] + list(hidden_dims) + [2 * action_dim]
+        dims = [feature_dim] + list(hidden_dims) + [output_dim]
         self.layers = [
-            nnx.Linear(dims[i], dims[i + 1], rngs=rngs)
-            for i in range(len(dims) - 1)
+            nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)
         ]
 
-    def __call__(self, features: jax.Array) -> jax.Array:
-        """Compute distribution parameters from features.
+    def __call__(self, x: jax.Array) -> jax.Array:
+        """Map a feature batch to the output space.
 
         Args:
-            features: Feature batch of shape ``(batch, feature_dim)``.
+            x: Feature batch of shape ``(batch, feature_dim)``.
 
         Returns:
-            Array of shape ``(batch, 2 * action_dim)``.  Slice ``[..., :action_dim]``
-            is the mean; ``[..., action_dim:]`` is the raw log-std (before
-            tanh-squashing and rescaling).
+            Output array of shape ``(batch, output_dim)``.
         """
-        x = features
         for layer in self.layers[:-1]:
             x = nnx.relu(layer(x))
         return self.layers[-1](x)
-
-
-class CriticHead(nnx.Module):
-    """Maps (feature, action) pairs to twin Q-values.
-
-    Concatenates features and actions along the last axis, passes the result
-    through hidden layers, and produces two Q-value estimates simultaneously
-    (double-Q trick to reduce overestimation bias).
-
-    Args:
-        feature_dim: Dimensionality of the incoming feature vector.
-        action_dim: Number of action dimensions.
-        hidden_dims: Hidden layer widths after the feature-action concatenation.
-            Defaults to ``(256, 256)``.
-        rngs: Flax NNX RNG container used to initialise parameters.
-    """
-
-    def __init__(
-        self,
-        feature_dim: int,
-        action_dim: int,
-        hidden_dims: tuple[int, ...] = (256, 256),
-        *,
-        rngs: nnx.Rngs,
-    ):
-        dims = [feature_dim + action_dim] + list(hidden_dims) + [2]
-        self.layers = [
-            nnx.Linear(dims[i], dims[i + 1], rngs=rngs)
-            for i in range(len(dims) - 1)
-        ]
-
-    def __call__(self, features: jax.Array, actions: jax.Array) -> jax.Array:
-        """Estimate twin Q-values for a batch of (feature, action) pairs.
-
-        Args:
-            features: Feature batch of shape ``(batch, feature_dim)``.
-            actions: Action batch of shape ``(batch, action_dim)``.
-
-        Returns:
-            Array of shape ``(batch, 2)`` containing two independent Q estimates.
-            Downstream callers take the element-wise minimum to form a
-            conservative value estimate.
-        """
-        x = jnp.concat((features, actions), axis=-1)
-        for layer in self.layers[:-1]:
-            x = nnx.relu(layer(x))
-        return self.layers[-1](x)
-
-
-class DiscreteActorHead(nnx.Module):
-    """Maps feature vectors to per-action logits for a categorical policy.
-
-    Outputs raw (pre-softmax) logits of shape ``(batch, num_actions)``.
-    The softmax and log-softmax are applied externally when computing the
-    policy distribution and its entropy.
-
-    Args:
-        feature_dim: Dimensionality of the incoming feature vector.
-        num_actions: Number of discrete actions.
-        hidden_dims: Optional hidden layers between features and output.
-            Defaults to ``()`` (direct linear projection).
-        rngs: Flax NNX RNG container used to initialise parameters.
-    """
-
-    def __init__(
-        self,
-        feature_dim: int,
-        num_actions: int,
-        hidden_dims: tuple[int, ...] = (),
-        *,
-        rngs: nnx.Rngs,
-    ):
-        dims = [feature_dim] + list(hidden_dims) + [num_actions]
-        self.layers = [
-            nnx.Linear(dims[i], dims[i + 1], rngs=rngs)
-            for i in range(len(dims) - 1)
-        ]
-
-    def __call__(self, features: jax.Array) -> jax.Array:
-        """Compute per-action logits from features.
-
-        Args:
-            features: Feature batch of shape ``(batch, feature_dim)``.
-
-        Returns:
-            Logit array of shape ``(batch, num_actions)``.
-        """
-        x = features
-        for layer in self.layers[:-1]:
-            x = nnx.relu(layer(x))
-        return self.layers[-1](x)
-
-
-class DiscreteCriticHead(nnx.Module):
-    """Maps feature vectors to twin Q-values for *all* discrete actions.
-
-    Unlike the continuous :class:`CriticHead`, this head takes only features
-    as input and outputs Q-values for every action simultaneously.  Two
-    independent MLP branches implement the double-Q trick.
-
-    Args:
-        feature_dim: Dimensionality of the incoming feature vector.
-        num_actions: Number of discrete actions.
-        hidden_dims: Hidden layer widths for each branch.  Defaults to
-            ``(256, 256)``.
-        rngs: Flax NNX RNG container used to initialise parameters.
-    """
-
-    def __init__(
-        self,
-        feature_dim: int,
-        num_actions: int,
-        hidden_dims: tuple[int, ...] = (256, 256),
-        *,
-        rngs: nnx.Rngs,
-    ):
-        dims = [feature_dim] + list(hidden_dims) + [num_actions]
-        self.q1_layers = [
-            nnx.Linear(dims[i], dims[i + 1], rngs=rngs)
-            for i in range(len(dims) - 1)
-        ]
-        self.q2_layers = [
-            nnx.Linear(dims[i], dims[i + 1], rngs=rngs)
-            for i in range(len(dims) - 1)
-        ]
-
-    def __call__(self, features: jax.Array) -> jax.Array:
-        """Estimate twin Q-values for all actions given a feature batch.
-
-        Args:
-            features: Feature batch of shape ``(batch, feature_dim)``.
-
-        Returns:
-            Array of shape ``(batch, num_actions, 2)`` where the last axis
-            indexes the two independent Q-value estimates.  Callers take
-            ``jnp.minimum(...[..., 0], ...[..., 1])`` to get the conservative
-            per-action Q-values.
-        """
-        x1 = features
-        for layer in self.q1_layers[:-1]:
-            x1 = nnx.relu(layer(x1))
-        q1 = self.q1_layers[-1](x1)  # (batch, num_actions)
-
-        x2 = features
-        for layer in self.q2_layers[:-1]:
-            x2 = nnx.relu(layer(x2))
-        q2 = self.q2_layers[-1](x2)  # (batch, num_actions)
-
-        return jnp.stack([q1, q2], axis=-1)  # (batch, num_actions, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +185,38 @@ class NetworkState(NamedTuple):
     head: nnx.GraphState
 
 
+class TwinCriticState(NamedTuple):
+    """Paired network states for the two independent Q-branches.
+
+    Grouping both branches in a single NamedTuple (which is a JAX pytree)
+    lets a single optimizer and a single ``jax.grad`` call operate over both
+    branches simultaneously without any changes to the loss/update logic.
+
+    Attributes:
+        q1: Network state (FE + head) for the first Q-branch.
+        q2: Network state (FE + head) for the second Q-branch.
+    """
+
+    q1: NetworkState
+    q2: NetworkState
+
+
+class NetworkGraphs(NamedTuple):
+    """Flax NNX graph definitions for a feature-extractor + head pair.
+
+    These are the static (non-parameter) graph descriptions produced by
+    ``nnx.split`` and consumed by ``nnx.merge`` to reconstruct live modules
+    during forward passes.
+
+    Attributes:
+        fe: Graph definition of the feature extractor.
+        head: Graph definition of the head.
+    """
+
+    fe: nnx.GraphDef
+    head: nnx.GraphDef
+
+
 class IQLearnState(NamedTuple):
     """Complete, serialisable state of one IQ-Learn agent.
 
@@ -328,13 +225,14 @@ class IQLearnState(NamedTuple):
 
     Attributes:
         actor: Online actor network state (feature extractor + head).
-        critic: Online critic network state (feature extractor + head).
+        critic: Online twin-critic state (two independent Q-branches).
         actor_target: EMA-smoothed copy of the actor, used as a stable target
             during critic updates.
         critic_target: EMA-smoothed copy of the critic, used for bootstrapping
             next-state values.
         actor_optimizer_state: Optax state for the actor Adam optimiser.
-        critic_optimizer_state: Optax state for the critic Adam optimiser.
+        critic_optimizer_state: Optax state for the critic Adam optimiser;
+            operates on the full :class:`TwinCriticState` pytree.
         alpha_optimizer_state: Optax state for the entropy temperature optimiser.
         alpha: Current entropy temperature (``exp(log_alpha)``).
         log_alpha: Log-space entropy temperature; directly optimised to avoid
@@ -342,14 +240,16 @@ class IQLearnState(NamedTuple):
     """
 
     actor: NetworkState
-    critic: NetworkState
+    critic: TwinCriticState
     actor_target: NetworkState
-    critic_target: NetworkState
+    critic_target: TwinCriticState
     actor_optimizer_state: optax.OptState
     critic_optimizer_state: optax.OptState
     alpha_optimizer_state: optax.OptState
     alpha: jax.Array
     log_alpha: jax.Array
+    online_buffer: Buffer
+    online_buffer_functions: BufferFunctions
 
 
 class IQLearnFunctions(NamedTuple):
@@ -367,7 +267,7 @@ class IQLearnFunctions(NamedTuple):
 
 
 class IQLearnGraphs(NamedTuple):
-    """Flax NNX graph definitions for all four network modules.
+    """Flax NNX graph definitions for all network modules.
 
     These are the static (non-parameter) descriptions produced by
     ``nnx.split`` and consumed by ``nnx.merge`` to reconstruct live modules
@@ -376,16 +276,14 @@ class IQLearnGraphs(NamedTuple):
     custom inference code).
 
     Attributes:
-        actor_fe: Graph definition of the actor feature extractor.
-        actor_head: Graph definition of the actor head.
-        critic_fe: Graph definition of the critic feature extractor.
-        critic_head: Graph definition of the critic head.
+        actor: Graph definitions for the actor (FE + head).
+        critic_q1: Graph definitions for the first critic Q-branch (FE + head).
+        critic_q2: Graph definitions for the second critic Q-branch (FE + head).
     """
 
-    actor_fe: nnx.GraphDef
-    actor_head: nnx.GraphDef
-    critic_fe: nnx.GraphDef
-    critic_head: nnx.GraphDef
+    actor: NetworkGraphs
+    critic_q1: NetworkGraphs
+    critic_q2: NetworkGraphs
 
 
 class Hyperparameters(NamedTuple):
@@ -436,7 +334,8 @@ def create_iqlearn(
     buffer: Buffer,
     action_dim: int,
     actor_feature_extractor: nnx.Module,
-    critic_feature_extractor: nnx.Module,
+    critic_q1_feature_extractor: nnx.Module,
+    critic_q2_feature_extractor: nnx.Module,
     obs_key: str = "observations",
     action_key: str = "actions",
     action_scale: float | jax.Array = 1,
@@ -455,6 +354,12 @@ def create_iqlearn(
     inferred automatically by running a dummy forward pass through each feature
     extractor.
 
+    The twin-Q critic is implemented as two fully independent
+    ``(FeatureExtractor, Head)`` pairs.  Pass separate, independently-seeded
+    feature extractors as ``critic_q1_feature_extractor`` and
+    ``critic_q2_feature_extractor`` so that the two Q-branches diverge from
+    the very first gradient step.
+
     The returned ``train`` function runs ``train_steps`` gradient steps per call
     using ``jax.lax.scan``, keeping the whole loop JIT-compiled after the first
     invocation.
@@ -470,8 +375,12 @@ def create_iqlearn(
             ``(batch, *obs_shape) -> (batch, actor_feature_dim)``.  Ownership
             is transferred; the module is split and should not be used directly
             afterwards.
-        critic_feature_extractor: Same contract as ``actor_feature_extractor``.
-            Actor and critic may have different architectures and output widths.
+        critic_q1_feature_extractor: Same contract as ``actor_feature_extractor``.
+            Used exclusively by the first Q-branch.
+        critic_q2_feature_extractor: Same contract as ``actor_feature_extractor``.
+            Used exclusively by the second Q-branch.  Should be initialised with
+            a different seed from ``critic_q1_feature_extractor`` to ensure the
+            two branches start with different weights.
         obs_key: Key in ``buffer.info`` that holds observations.
         action_key: Key in ``buffer.info`` that holds actions.
         action_scale: Per-dimension scale applied after the tanh squashing
@@ -481,11 +390,11 @@ def create_iqlearn(
         train_steps: Number of gradient steps executed per ``train`` call.
         actor_head_dims: Hidden layer widths for the actor head.  Defaults to
             ``()`` (direct linear projection from features to outputs).
-        critic_head_dims: Hidden layer widths for the critic head.  Defaults to
-            ``(256, 256)``.
+        critic_head_dims: Hidden layer widths for each critic head.  Defaults to
+            ``(256, 256)``.  Applied identically to both Q-branches.
         is_discrete: If True, use a categorical actor and an all-actions critic.
-            The soft value V(s) is computed as the exact inner product
-            ``Σ_a π(a|s)·Q(s,a) + α·H(π(·|s))`` without any sampling.
+            The soft value V(s) is computed as the exact closed-form inner
+            product ``Σ_a π(a|s)·(Q(s,a) − α·log π(a|s))`` without sampling.
             ``predict`` returns the action index as a ``float32`` scalar.
             If False (default), use a squashed-Gaussian actor and a continuous
             critic that takes actions as additional input.
@@ -496,7 +405,7 @@ def create_iqlearn(
         - ``IQLearnState``: initial agent state with online and target networks
           set to the same weights.
         - ``IQLearnFunctions``: named tuple of ``predict`` and ``train`` closures.
-        - ``IQLearnGraphs``: static NNX graph definitions for all four modules,
+        - ``IQLearnGraphs``: static NNX graph definitions for all network modules,
           useful for inspection or custom inference.
     """
     buffer_sample = create_sample(
@@ -509,35 +418,67 @@ def create_iqlearn(
     # Infer feature dims via dummy forward pass (before split)
     dummy_obs = jnp.zeros((1,) + buffer.info[obs_key].shape[1:])
     actor_feature_dim = actor_feature_extractor(dummy_obs).shape[-1]
-    critic_feature_dim = critic_feature_extractor(dummy_obs).shape[-1]
+    critic_q1_feature_dim = critic_q1_feature_extractor(dummy_obs).shape[-1]
+    critic_q2_feature_dim = critic_q2_feature_extractor(dummy_obs).shape[-1]
 
-    # Create heads — discrete and continuous use different classes
+    # Create heads — discrete and continuous differ only in output_dim and
+    # whether actions are concatenated to features before the head.
     rngs = nnx.Rngs(0)
     if is_discrete:
-        actor_head_model = DiscreteActorHead(
-            actor_feature_dim, action_dim, actor_head_dims, rngs=rngs,
+        actor_head_model = Head(
+            actor_feature_dim,
+            actor_head_dims,
+            action_dim,
+            rngs=rngs,
         )
-        critic_head_model = DiscreteCriticHead(
-            critic_feature_dim, action_dim, critic_head_dims, rngs=rngs,
+        critic_q1_head_model = Head(
+            critic_q1_feature_dim,
+            critic_head_dims,
+            action_dim,
+            rngs=rngs,
+        )
+        critic_q2_head_model = Head(
+            critic_q2_feature_dim,
+            critic_head_dims,
+            action_dim,
+            rngs=rngs,
         )
     else:
-        actor_head_model = ActorHead(
-            actor_feature_dim, action_dim, actor_head_dims, rngs=rngs,
+        actor_head_model = Head(
+            actor_feature_dim,
+            actor_head_dims,
+            2 * action_dim,
+            rngs=rngs,
         )
-        critic_head_model = CriticHead(
-            critic_feature_dim, action_dim, critic_head_dims, rngs=rngs,
+        # For continuous critics, features and actions are concatenated before
+        # the head, so input_dim = feature_dim + action_dim, output_dim = 1.
+        critic_q1_head_model = Head(
+            critic_q1_feature_dim + action_dim,
+            critic_head_dims,
+            1,
+            rngs=rngs,
+        )
+        critic_q2_head_model = Head(
+            critic_q2_feature_dim + action_dim,
+            critic_head_dims,
+            1,
+            rngs=rngs,
         )
 
-    # Split all four modules into (graph_def, state)
-    actor_fe_graph, actor_fe = nnx.split(actor_feature_extractor)
-    actor_head_graph, actor_head = nnx.split(actor_head_model)
-    critic_fe_graph, critic_fe = nnx.split(critic_feature_extractor)
-    critic_head_graph, critic_head = nnx.split(critic_head_model)
+    # Split all six modules into (graph_def, state)
+    actor_fe_graph, actor_fe_st = nnx.split(actor_feature_extractor)
+    actor_head_graph, actor_head_st = nnx.split(actor_head_model)
+    critic_q1_fe_graph, critic_q1_fe_st = nnx.split(critic_q1_feature_extractor)
+    critic_q1_head_graph, critic_q1_head_st = nnx.split(critic_q1_head_model)
+    critic_q2_fe_graph, critic_q2_fe_st = nnx.split(critic_q2_feature_extractor)
+    critic_q2_head_graph, critic_q2_head_st = nnx.split(critic_q2_head_model)
 
-    actor_state = NetworkState(actor_fe, actor_head)
-    critic_state = NetworkState(critic_fe, critic_head)
+    actor_state = NetworkState(actor_fe_st, actor_head_st)
+    critic_q1_state = NetworkState(critic_q1_fe_st, critic_q1_head_st)
+    critic_q2_state = NetworkState(critic_q2_fe_st, critic_q2_head_st)
+    critic_state = TwinCriticState(critic_q1_state, critic_q2_state)
 
-    # Optimizers operate on NetworkState pytrees (fe + head jointly)
+    # Optimizers: actor operates on NetworkState; critic on TwinCriticState.
     actor_optimizer = optax.adam(params.actor_lr)
     critic_optimizer = optax.adam(params.critic_lr)
     alpha_optimizer = optax.adam(params.alpha_lr)
@@ -557,7 +498,7 @@ def create_iqlearn(
     iqlearn = IQLearnState(
         remove_weak_types(actor_state),
         remove_weak_types(critic_state),
-        remove_weak_types(actor_state),   # targets start equal to online weights
+        remove_weak_types(actor_state),  # targets start equal to online weights
         remove_weak_types(critic_state),
         remove_weak_types(actor_optimizer_state),
         remove_weak_types(critic_optimizer_state),
@@ -582,19 +523,28 @@ def create_iqlearn(
 
     if is_discrete:
 
-        def run_critic(critic: NetworkState, x: jax.Array) -> jax.Array:
-            """Reconstruct and run the discrete critic, returning twin Q for all actions."""
-            fe = nnx.merge(critic_fe_graph, critic.fe)
-            head = nnx.merge(critic_head_graph, critic.head)
-            return head(fe(x))  # (batch, num_actions, 2)
+        def run_critic(critic: TwinCriticState, x: jax.Array) -> jax.Array:
+            """Reconstruct and run both discrete critic branches.
+
+            Returns:
+                Array of shape ``(batch, num_actions, 2)`` where the last axis
+                indexes the two independent Q estimates.
+            """
+            fe1 = nnx.merge(critic_q1_fe_graph, critic.q1.fe)
+            head1 = nnx.merge(critic_q1_head_graph, critic.q1.head)
+            fe2 = nnx.merge(critic_q2_fe_graph, critic.q2.fe)
+            head2 = nnx.merge(critic_q2_head_graph, critic.q2.head)
+            q1 = head1(fe1(x))  # (batch, num_actions)
+            q2 = head2(fe2(x))  # (batch, num_actions)
+            return jnp.stack([q1, q2], axis=-1)  # (batch, num_actions, 2)
 
         def get_q(
-            critic: NetworkState, x: jax.Array, expert_actions: jax.Array
+            critic: TwinCriticState, x: jax.Array, expert_actions: jax.Array
         ) -> jax.Array:
             """Conservative Q-value for each expert transition.
 
             Args:
-                critic: Critic network state.
+                critic: Twin-critic network state.
                 x: Observation batch.
                 expert_actions: Float32 array of shape ``(batch, 1)`` holding
                     action indices stored as floats (e.g. 0.0, 1.0, 2.0).
@@ -609,7 +559,7 @@ def create_iqlearn(
 
         def get_v(
             actor: NetworkState,
-            critic: NetworkState,
+            critic: TwinCriticState,
             alpha: jax.Array,
             x: jax.Array,
             key: jax.Array,
@@ -624,7 +574,7 @@ def create_iqlearn(
 
             Args:
                 actor: Actor network state.
-                critic: Critic network state.
+                critic: Twin-critic network state.
                 alpha: Current entropy temperature.
                 x: Observation batch.
                 key: Unused PRNG key (present for API compatibility).
@@ -638,12 +588,12 @@ def create_iqlearn(
                 When ``include_log=False``: value array of shape ``(batch,)``.
                 When ``include_log=True``: ``(values, metrics_dict)``.
             """
-            logits = run_actor(actor, x)                        # (batch, num_actions)
-            probs = jax.nn.softmax(logits)                      # (batch, num_actions)
-            log_probs = jax.nn.log_softmax(logits)              # (batch, num_actions)
-            q_twin = run_critic(critic, x)                      # (batch, num_actions, 2)
+            logits = run_actor(actor, x)  # (batch, num_actions)
+            probs = jax.nn.softmax(logits)  # (batch, num_actions)
+            log_probs = jax.nn.log_softmax(logits)  # (batch, num_actions)
+            q_twin = run_critic(critic, x)  # (batch, num_actions, 2)
             q_min = jnp.minimum(q_twin[..., 0], q_twin[..., 1])  # (batch, num_actions)
-            entropy = -(probs * log_probs).sum(-1)              # (batch,) — exact H(π)
+            entropy = -(probs * log_probs).sum(-1)  # (batch,) — exact H(π)
             if include_entropy:
                 v = (probs * q_min).sum(-1) + alpha * entropy
                 if include_log:
@@ -687,15 +637,26 @@ def create_iqlearn(
         # ------------------------------------------------------------------
 
         def run_critic(
-            critic: NetworkState, x: jax.Array, actions: jax.Array
+            critic: TwinCriticState, x: jax.Array, actions: jax.Array
         ) -> jax.Array:
-            """Reconstruct and run the critic (FE then head) returning twin Q-values."""
-            fe = nnx.merge(critic_fe_graph, critic.fe)
-            head = nnx.merge(critic_head_graph, critic.head)
-            return head(fe(x), actions)
+            """Reconstruct and run both continuous critic branches.
+
+            Features and actions are concatenated before each head so each
+            branch has a fully independent view of the (obs, action) pair.
+
+            Returns:
+                Array of shape ``(batch, 2)`` containing two independent Q estimates.
+            """
+            fe1 = nnx.merge(critic_q1_fe_graph, critic.q1.fe)
+            head1 = nnx.merge(critic_q1_head_graph, critic.q1.head)
+            fe2 = nnx.merge(critic_q2_fe_graph, critic.q2.fe)
+            head2 = nnx.merge(critic_q2_head_graph, critic.q2.head)
+            q1 = head1(jnp.concat((fe1(x), actions), axis=-1))  # (batch, 1)
+            q2 = head2(jnp.concat((fe2(x), actions), axis=-1))  # (batch, 1)
+            return jnp.concat([q1, q2], axis=-1)  # (batch, 2)
 
         def get_q(
-            critic: NetworkState, x: jax.Array, actions: jax.Array
+            critic: TwinCriticState, x: jax.Array, actions: jax.Array
         ) -> jax.Array:
             """Return the conservative (min over twin) Q-value for each transition."""
             return jnp.min(run_critic(critic, x, actions), axis=-1)
@@ -754,7 +715,7 @@ def create_iqlearn(
 
         def get_v(
             actor: NetworkState,
-            critic: NetworkState,
+            critic: TwinCriticState,
             alpha: jax.Array,
             x: jax.Array,
             key: jax.Array,
@@ -765,7 +726,7 @@ def create_iqlearn(
 
             Args:
                 actor: Actor network state used to sample actions.
-                critic: Critic network state used to evaluate Q-values.
+                critic: Twin-critic network state used to evaluate Q-values.
                 alpha: Current entropy temperature.
                 x: Observation batch.
                 key: JAX PRNG key for action sampling.
@@ -783,7 +744,10 @@ def create_iqlearn(
             q = get_q(critic, x, action)
             if include_entropy:
                 if include_log:
-                    return q - alpha * logprob, {"q": q.mean(), "entropy": -logprob.mean()}
+                    return q - alpha * logprob, {
+                        "q": q.mean(),
+                        "entropy": -logprob.mean(),
+                    }
                 else:
                     return q - alpha * logprob
             else:
@@ -845,7 +809,7 @@ def create_iqlearn(
 
     def loss_actor(
         actor: NetworkState,
-        critic: NetworkState,
+        critic: TwinCriticState,
         buffer: Buffer,
         buffer_sample: Callable[[Buffer, jax.Array], Tuple[BufferSample, Tuple[int]]],
         alpha: jax.Array,
@@ -876,8 +840,8 @@ def create_iqlearn(
 
     def loss_critic(
         actor_target: NetworkState,
-        critic: NetworkState,
-        critic_target: NetworkState,
+        critic: TwinCriticState,
+        critic_target: TwinCriticState,
         buffer: Buffer,
         buffer_sample: Callable[[Buffer, jax.Array], Tuple[BufferSample, Tuple[int]]],
         alpha: jax.Array,
@@ -936,9 +900,7 @@ def create_iqlearn(
             "critic_loss": loss,
         }
 
-    def update_step(
-        iqlearn: IQLearnState, key: jax.Array
-    ) -> Tuple[IQLearnState, dict]:
+    def update_step(iqlearn: IQLearnState, key: jax.Array) -> Tuple[IQLearnState, dict]:
         """Execute one full SAC-style update (actor + critic + alpha + EMA targets).
 
         Computes gradients for the actor and critic independently, applies
@@ -965,7 +927,7 @@ def create_iqlearn(
             iqlearn.alpha,
             key_actor,
         )
-        # critic gradients
+        # critic gradients — grad w.r.t. TwinCriticState (both branches jointly)
         grads_critic, metrics_critic = jax.grad(loss_critic, argnums=1, has_aux=True)(
             iqlearn.actor_target,
             iqlearn.critic,
@@ -984,7 +946,7 @@ def create_iqlearn(
         )
         new_actor = optax.apply_updates(iqlearn.actor, updates)  # type: ignore
 
-        # update critic (fe + head jointly)
+        # update critic (both Q-branches jointly via TwinCriticState pytree)
         updates, new_critic_optimizer_state = critic_optimizer.update(
             grads_critic, iqlearn.critic_optimizer_state
         )
@@ -1048,6 +1010,7 @@ def create_iqlearn(
             ``(new_state, metrics)`` where each metric scalar is the mean over
             all ``train_steps`` steps.
         """
+
         def scan_fun(carry, x):
             iqlearn, key = carry
             key, next_key = jax.random.split(key)
@@ -1060,5 +1023,9 @@ def create_iqlearn(
         metrics = jax.tree.map(lambda x: x.mean(), metrics)
         return iqlearn, metrics
 
-    graphs = IQLearnGraphs(actor_fe_graph, actor_head_graph, critic_fe_graph, critic_head_graph)
+    graphs = IQLearnGraphs(
+        actor=NetworkGraphs(actor_fe_graph, actor_head_graph),
+        critic_q1=NetworkGraphs(critic_q1_fe_graph, critic_q1_head_graph),
+        critic_q2=NetworkGraphs(critic_q2_fe_graph, critic_q2_head_graph),
+    )
     return iqlearn, IQLearnFunctions(predict, train), graphs
