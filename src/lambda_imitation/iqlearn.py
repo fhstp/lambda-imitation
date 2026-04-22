@@ -90,9 +90,9 @@ class MLPFeatureExtractor(nnx.Module):
         rngs: nnx.Rngs,
     ):
         dims = [input_dim] + list(hidden_dims)
-        self.layers = [
-            nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)
-        ]
+        self.layers = nnx.List(
+            [nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)]
+        )
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Encode a batch of observations.
@@ -146,9 +146,9 @@ class Head(nnx.Module):
         rngs: nnx.Rngs,
     ):
         dims = [feature_dim] + list(hidden_dims) + [output_dim]
-        self.layers = [
-            nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)
-        ]
+        self.layers = nnx.List(
+            [nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)]
+        )
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Map a feature batch to the output space.
