@@ -1202,3 +1202,115 @@ class TestTrainSACWarm:
             "alpha should not change when autotune_alpha=False"
         )
         assert "alpha" not in metrics
+
+
+# ---------------------------------------------------------------------------
+# get_importance_ratios — discrete
+# ---------------------------------------------------------------------------
+
+class TestGetImportanceRatiosDiscrete:
+    """Tests for fns.get_importance_ratios with a discrete action space."""
+
+    @pytest.fixture()
+    def setup(self):
+        state, fns, _ = make_discrete_iqlearn()
+        obs = jax.random.normal(jax.random.key(0), (BATCH_SIZE, OBS_DIM))
+        # Integer action indices stored as float32, shape (BATCH_SIZE, 1)
+        actions = jax.random.randint(
+            jax.random.key(1), (BATCH_SIZE, 1), 0, NUM_ACTIONS
+        ).astype(jnp.float32)
+        behaviour_probs = jnp.full((BATCH_SIZE,), 1.0 / NUM_ACTIONS)
+        return state, fns, obs, actions, behaviour_probs
+
+    def test_output_shape(self, setup):
+        state, fns, obs, actions, behaviour_probs = setup
+        ratios = fns.get_importance_ratios(state.actor, obs, actions, behaviour_probs)
+        assert ratios.shape == (BATCH_SIZE,)
+
+    def test_output_dtype(self, setup):
+        state, fns, obs, actions, behaviour_probs = setup
+        ratios = fns.get_importance_ratios(state.actor, obs, actions, behaviour_probs)
+        assert ratios.dtype == jnp.float32
+
+    def test_values_positive(self, setup):
+        state, fns, obs, actions, behaviour_probs = setup
+        ratios = fns.get_importance_ratios(state.actor, obs, actions, behaviour_probs)
+        assert jnp.all(ratios > 0)
+
+    def test_ratio_is_one_for_policy_probs(self, setup):
+        """When behaviour_probs equal π(a|s), every ratio should be ≈ 1."""
+        state, fns, obs, actions, behaviour_probs = setup
+        # Compute the true policy probabilities for these (obs, action) pairs
+        # by calling get_importance_ratios with a uniform unit denominator.
+        policy_probs = fns.get_importance_ratios(
+            state.actor, obs, actions, jnp.ones(BATCH_SIZE)
+        )
+        ratios = fns.get_importance_ratios(state.actor, obs, actions, policy_probs)
+        assert jnp.allclose(ratios, jnp.ones(BATCH_SIZE), atol=1e-5)
+
+    def test_ratio_doubles_when_behaviour_halved(self, setup):
+        """Halving behaviour_probs should exactly double the ratios."""
+        state, fns, obs, actions, behaviour_probs = setup
+        ratios = fns.get_importance_ratios(state.actor, obs, actions, behaviour_probs)
+        ratios_halved = fns.get_importance_ratios(
+            state.actor, obs, actions, behaviour_probs / 2
+        )
+        assert jnp.allclose(ratios_halved, 2 * ratios, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# get_importance_ratios — continuous
+# ---------------------------------------------------------------------------
+
+class TestGetImportanceRatiosContinuous:
+    """Tests for fns.get_importance_ratios with a continuous action space."""
+
+    @pytest.fixture()
+    def setup(self):
+        state, fns, _ = make_iqlearn()
+        obs = jax.random.normal(jax.random.key(0), (BATCH_SIZE, OBS_DIM))
+        # Use the policy's own unsquashed mean actions (returned by deterministic
+        # predict) so that the evaluation points are at the mode of each
+        # per-observation Gaussian.  This guarantees a non-negligible density for
+        # any network initialisation, avoiding float32 underflow in tests.
+        unsquashed_actions = jnp.stack([
+            fns.predict(state, obs[i], deterministic=True, return_unsquashed=True)[1]
+            for i in range(BATCH_SIZE)
+        ])
+        behaviour_probs = jnp.ones(BATCH_SIZE)
+        return state, fns, obs, unsquashed_actions, behaviour_probs
+
+    def test_output_shape(self, setup):
+        state, fns, obs, actions, behaviour_probs = setup
+        ratios = fns.get_importance_ratios(state.actor, obs, actions, behaviour_probs)
+        assert ratios.shape == (BATCH_SIZE,)
+
+    def test_output_dtype(self, setup):
+        state, fns, obs, actions, behaviour_probs = setup
+        ratios = fns.get_importance_ratios(state.actor, obs, actions, behaviour_probs)
+        assert ratios.dtype == jnp.float32
+
+    def test_values_positive(self, setup):
+        state, fns, obs, actions, behaviour_probs = setup
+        ratios = fns.get_importance_ratios(state.actor, obs, actions, behaviour_probs)
+        assert jnp.all(ratios > 0)
+
+    def test_ratio_is_one_for_policy_probs(self, setup):
+        """When behaviour_probs equal π(a|s), every ratio should be ≈ 1."""
+        state, fns, obs, actions, _ = setup
+        # First call with unit denominator to recover the policy densities
+        policy_densities = fns.get_importance_ratios(
+            state.actor, obs, actions, jnp.ones(BATCH_SIZE)
+        )
+        # Second call: ratio π / π should be all-ones
+        ratios = fns.get_importance_ratios(state.actor, obs, actions, policy_densities)
+        assert jnp.allclose(ratios, jnp.ones(BATCH_SIZE), atol=1e-5)
+
+    def test_ratio_doubles_when_behaviour_halved(self, setup):
+        """Halving behaviour_probs should exactly double the ratios."""
+        state, fns, obs, actions, behaviour_probs = setup
+        ratios = fns.get_importance_ratios(state.actor, obs, actions, behaviour_probs)
+        ratios_halved = fns.get_importance_ratios(
+            state.actor, obs, actions, behaviour_probs / 2
+        )
+        assert jnp.allclose(ratios_halved, 2 * ratios, atol=1e-5)

@@ -67,7 +67,6 @@ from .iqlearn import (
     create_iqlearn,
 )
 
-
 # ---------------------------------------------------------------------------
 # Common spec container
 # ---------------------------------------------------------------------------
@@ -153,8 +152,12 @@ def env_spec_from_gymnasium(env) -> EnvSpec:
             obs_shape=tuple(obs_space.shape),
             action_dim=action_dim,
             is_discrete=False,
-            action_low=jnp.asarray(act_space.low.reshape(action_dim), dtype=jnp.float32),
-            action_high=jnp.asarray(act_space.high.reshape(action_dim), dtype=jnp.float32),
+            action_low=jnp.asarray(
+                act_space.low.reshape(action_dim), dtype=jnp.float32
+            ),
+            action_high=jnp.asarray(
+                act_space.high.reshape(action_dim), dtype=jnp.float32
+            ),
         )
 
     raise ValueError(
@@ -324,6 +327,7 @@ def create_iqlearn_from_env(
     train_steps: int = 1000,
     obs_key: str = "observations",
     action_key: str = "actions",
+    approximate_mc: bool = False,
     seed: int = 0,
 ) -> Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs]:
     """Build a ready-to-use IQ-Learn agent from an :class:`EnvSpec`.
@@ -418,7 +422,7 @@ def create_iqlearn_from_env(
         #   scale  = (high - low) / 2
         #   bias   = (high + low) / 2
         action_scale = (env_spec.action_high - env_spec.action_low) / 2.0
-        action_bias  = (env_spec.action_high + env_spec.action_low) / 2.0
+        action_bias = (env_spec.action_high + env_spec.action_low) / 2.0
 
     # Build shapes dict from expert_data (strip leading N dimension)
     shapes = {k: v.shape[1:] for k, v in expert_data.items()}
@@ -441,9 +445,11 @@ def create_iqlearn_from_env(
     # Feature extractors — identical architecture, independent weights
     input_dim = math.prod(env_spec.obs_shape)
     rngs = nnx.Rngs(seed)
-    actor_fe    = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
+    actor_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
     critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
     critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
+    mc_critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
+    mc_critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
 
     return create_iqlearn(
         params=hp,
@@ -452,6 +458,8 @@ def create_iqlearn_from_env(
         actor_feature_extractor=actor_fe,
         critic_q1_feature_extractor=critic_q1_fe,
         critic_q2_feature_extractor=critic_q2_fe,
+        mc_critic_q1_feature_extractor=mc_critic_q1_fe,
+        mc_critic_q2_feature_extractor=mc_critic_q2_fe,
         obs_key=obs_key,
         action_key=action_key,
         action_scale=action_scale,
@@ -460,4 +468,5 @@ def create_iqlearn_from_env(
         actor_head_dims=actor_head_dims,
         critic_head_dims=critic_head_dims,
         is_discrete=env_spec.is_discrete,
+        approximate_mc=approximate_mc,
     )
