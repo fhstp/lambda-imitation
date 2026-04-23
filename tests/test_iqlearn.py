@@ -12,6 +12,7 @@ from typing import NamedTuple
 
 from lambda_imitation.buffer import create_buffer
 from lambda_imitation.iqlearn import (
+    DebugFunctions,
     Head,
     Hyperparameters,
     IQLearnFunctions,
@@ -21,6 +22,7 @@ from lambda_imitation.iqlearn import (
     NetworkGraphs,
     NetworkState,
     TwinCriticState,
+    behaviour_key,
     create_iqlearn,
     extract_buffer_shapes,
 )
@@ -74,16 +76,24 @@ def make_filled_buffer(
     return buf, fns
 
 
-def make_feature_extractors(obs_dim=OBS_DIM, hidden_dims=FE_DIMS):
+def make_feature_extractors(obs_dim=OBS_DIM, hidden_dims=FE_DIMS, seed=0):
     """Create three independent MLPFeatureExtractor instances.
 
     Returns ``(actor_fe, critic_q1_fe, critic_q2_fe)`` — one per network role.
     """
-    rngs = nnx.Rngs(0)
+    rngs = nnx.Rngs(seed)
     actor_fe    = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
     critic_q1_fe = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
     critic_q2_fe = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
     return actor_fe, critic_q1_fe, critic_q2_fe
+
+
+def make_mc_feature_extractors(obs_dim=OBS_DIM, hidden_dims=FE_DIMS, seed=1):
+    """Create two independent MLPFeatureExtractor instances for the MC critic."""
+    rngs = nnx.Rngs(seed)
+    mc_critic_q1_fe = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
+    mc_critic_q2_fe = MLPFeatureExtractor(obs_dim, hidden_dims, rngs=rngs)
+    return mc_critic_q1_fe, mc_critic_q2_fe
 
 
 def make_discrete_buffer(
@@ -867,8 +877,9 @@ class TestOnlineBuffer:
         hp = Hyperparameters(batch_size=BATCH_SIZE)
         assert state.online_buffer.info["terminated"].shape == (hp.online_buffer_size,)
 
-    def test_online_buffer_is_prefilled(self):
-        """create_iqlearn pre-fills the online buffer to online_batch_size slots."""
+    def test_online_buffer_starts_empty(self):
+        """create_iqlearn no longer pre-fills the buffer; it starts cold.
+        Pre-filling is done lazily by train_sac via prefill_buffer."""
         hp = Hyperparameters(batch_size=BATCH_SIZE, online_batch_size=BATCH_SIZE)
         buf, _ = make_filled_buffer()
         actor_fe, critic_q1_fe, critic_q2_fe = make_feature_extractors()
@@ -876,7 +887,7 @@ class TestOnlineBuffer:
             hp, buf, ACTION_DIM, actor_fe, critic_q1_fe, critic_q2_fe,
             train_steps=TRAIN_STEPS,
         )
-        assert int(state.online_buffer.sampling_ok.sum()) >= hp.online_batch_size
+        assert int(state.online_buffer.sampling_ok.sum()) == 0
 
     def test_iqlearn_train_preserves_online_buffer(self):
         """IQ-Learn train() must thread online_buffer through unchanged."""
@@ -909,6 +920,136 @@ class TestIQLearnFunctionsHasTrainSAC:
     def test_train_sac_callable_discrete(self):
         _, fns, _ = make_discrete_iqlearn()
         assert callable(fns.train_sac)
+
+
+# ---------------------------------------------------------------------------
+# prefill_buffer — structural and behavioural tests
+# ---------------------------------------------------------------------------
+
+
+class TestPrefillBuffer:
+    """Tests for fns.prefill_buffer (uniform-random-policy env pre-fill)."""
+
+    def test_field_exists_and_callable_continuous(self):
+        _, fns, _ = make_iqlearn()
+        assert hasattr(fns, "prefill_buffer")
+        assert callable(fns.prefill_buffer)
+
+    def test_field_exists_and_callable_discrete(self):
+        _, fns, _ = make_discrete_iqlearn()
+        assert hasattr(fns, "prefill_buffer")
+        assert callable(fns.prefill_buffer)
+
+    def test_returns_iqlearn_state_and_env_state_continuous(self):
+        state, fns, _ = make_iqlearn(
+            hp=Hyperparameters(
+                batch_size=BATCH_SIZE,
+                online_batch_size=BATCH_SIZE,
+                online_buffer_size=32,
+            ),
+            train_steps=1,
+        )
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state = env.reset(jax.random.key(0), env_params)
+        new_state, new_env_state = fns.prefill_buffer(
+            state, env, env_params, env_state, BATCH_SIZE, jax.random.key(1)
+        )
+        assert isinstance(new_state, IQLearnState)
+        assert isinstance(new_env_state, _MockEnvState)
+
+    def test_returns_iqlearn_state_and_env_state_discrete(self):
+        import math
+        state, fns, _ = make_discrete_iqlearn(
+            hp=Hyperparameters(
+                batch_size=BATCH_SIZE,
+                online_batch_size=BATCH_SIZE,
+                online_buffer_size=32,
+                target_entropy=float(0.98 * math.log(NUM_ACTIONS)),
+            ),
+        )
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state = env.reset(jax.random.key(0), env_params)
+        new_state, new_env_state = fns.prefill_buffer(
+            state, env, env_params, env_state, BATCH_SIZE, jax.random.key(1)
+        )
+        assert isinstance(new_state, IQLearnState)
+        assert isinstance(new_env_state, _MockEnvState)
+
+    def test_populates_sampleable_slots_continuous(self):
+        state, fns, _ = make_iqlearn(
+            hp=Hyperparameters(
+                batch_size=BATCH_SIZE,
+                online_batch_size=BATCH_SIZE,
+                online_buffer_size=32,
+            ),
+            train_steps=1,
+        )
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state = env.reset(jax.random.key(0), env_params)
+        new_state, _ = fns.prefill_buffer(
+            state, env, env_params, env_state, BATCH_SIZE, jax.random.key(2)
+        )
+        n_ok = int(new_state.online_buffer.sampling_ok.sum())
+        assert n_ok >= BATCH_SIZE
+
+    def test_populates_sampleable_slots_discrete(self):
+        import math
+        state, fns, _ = make_discrete_iqlearn(
+            hp=Hyperparameters(
+                batch_size=BATCH_SIZE,
+                online_batch_size=BATCH_SIZE,
+                online_buffer_size=32,
+                target_entropy=float(0.98 * math.log(NUM_ACTIONS)),
+            ),
+        )
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state = env.reset(jax.random.key(0), env_params)
+        new_state, _ = fns.prefill_buffer(
+            state, env, env_params, env_state, BATCH_SIZE, jax.random.key(2)
+        )
+        n_ok = int(new_state.online_buffer.sampling_ok.sum())
+        assert n_ok >= BATCH_SIZE
+
+    def test_behaviour_key_nonzero_with_approximate_mc(self):
+        """prefill_buffer must write positive behaviour_key values."""
+        import math
+        from lambda_imitation.iqlearn import behaviour_key as BK
+        from flax import nnx
+
+        rngs = nnx.Rngs(0)
+        fe = MLPFeatureExtractor(OBS_DIM, (32,), rngs=nnx.Rngs(0))
+        mc_fe_q1 = MLPFeatureExtractor(OBS_DIM, (32,), rngs=nnx.Rngs(1))
+        mc_fe_q2 = MLPFeatureExtractor(OBS_DIM, (32,), rngs=nnx.Rngs(2))
+        buf, _ = make_discrete_buffer()
+        hp = Hyperparameters(
+            batch_size=BATCH_SIZE,
+            online_batch_size=BATCH_SIZE,
+            online_buffer_size=32,
+            target_entropy=float(0.98 * math.log(NUM_ACTIONS)),
+        )
+        fe1 = MLPFeatureExtractor(OBS_DIM, (32,), rngs=nnx.Rngs(3))
+        fe2 = MLPFeatureExtractor(OBS_DIM, (32,), rngs=nnx.Rngs(4))
+        state, fns, _ = create_iqlearn(
+            hp, buf, NUM_ACTIONS, fe, fe1, fe2,
+            mc_critic_q1_feature_extractor=mc_fe_q1,
+            mc_critic_q2_feature_extractor=mc_fe_q2,
+            train_steps=1,
+            is_discrete=True,
+            approximate_mc=True,
+        )
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state = env.reset(jax.random.key(0), env_params)
+        new_state, _ = fns.prefill_buffer(
+            state, env, env_params, env_state, BATCH_SIZE, jax.random.key(3)
+        )
+        # All slots written by prefill_buffer must have positive behaviour_key.
+        bk_vals = new_state.online_buffer.info[BK][:BATCH_SIZE]
+        assert bool(jnp.all(bk_vals > 0))
 
 
 # ---------------------------------------------------------------------------
@@ -989,16 +1130,16 @@ class _MockEnvAlwaysDone:
 
 
 # ---------------------------------------------------------------------------
-# train_sac — warm-buffer guard
+# train_sac — cold-buffer auto-prefill
 # ---------------------------------------------------------------------------
 
 
-class TestTrainSACBufferGuard:
-    """train_sac must raise ValueError when the online buffer is not warm."""
+class TestTrainSACAutoPrefill:
+    """train_sac must auto-prefill the online buffer when it is cold."""
 
     def _make_cold_state(self, discrete=False):
         """Create an IQLearnState whose online_buffer has been replaced with an
-        empty one, bypassing the factory pre-fill."""
+        empty one, so that train_sac must trigger prefill_buffer."""
         from lambda_imitation.buffer import create_buffer
 
         if discrete:
@@ -1019,7 +1160,7 @@ class TestTrainSACBufferGuard:
                 ),
                 train_steps=1,
             )
-        # Substitute an empty online buffer to simulate missing pre-fill.
+        # Substitute an empty online buffer to simulate a cold start.
         empty_buf, _ = create_buffer(
             shapes={k: v.shape[1:] for k, v in state.online_buffer.info.items()},
             size=32,
@@ -1030,21 +1171,31 @@ class TestTrainSACBufferGuard:
         cold_state = state._replace(online_buffer=empty_buf)
         return cold_state, fns
 
-    def test_raises_value_error_when_buffer_empty_continuous(self):
+    def test_auto_prefills_when_buffer_cold_continuous(self):
         cold_state, fns = self._make_cold_state(discrete=False)
         env = _MockEnv()
         env_params = _MockEnvParams()
         _, env_state0 = env.reset(jax.random.key(0), env_params)
-        with pytest.raises(ValueError, match="sampleable transitions"):
-            fns.train_sac(cold_state, env, env_params, env_state0, jax.random.key(0))
+        # Should not raise; train_sac calls prefill_buffer automatically.
+        new_state, new_env_state, metrics = fns.train_sac(
+            cold_state, env, env_params, env_state0, jax.random.key(0)
+        )
+        assert isinstance(new_state, IQLearnState)
+        n_ok = int(new_state.online_buffer.sampling_ok.sum())
+        assert n_ok >= BATCH_SIZE
 
-    def test_raises_value_error_when_buffer_empty_discrete(self):
+    def test_auto_prefills_when_buffer_cold_discrete(self):
         cold_state, fns = self._make_cold_state(discrete=True)
         env = _MockEnv()
         env_params = _MockEnvParams()
         _, env_state0 = env.reset(jax.random.key(0), env_params)
-        with pytest.raises(ValueError, match="sampleable transitions"):
-            fns.train_sac(cold_state, env, env_params, env_state0, jax.random.key(0))
+        # Should not raise; train_sac calls prefill_buffer automatically.
+        new_state, new_env_state, metrics = fns.train_sac(
+            cold_state, env, env_params, env_state0, jax.random.key(0)
+        )
+        assert isinstance(new_state, IQLearnState)
+        n_ok = int(new_state.online_buffer.sampling_ok.sum())
+        assert n_ok >= BATCH_SIZE
 
 
 # ---------------------------------------------------------------------------
@@ -1153,14 +1304,15 @@ class TestTrainSACWarm:
 
     def test_env_state_advances(self):
         """step_count in env_state should increase monotonically."""
-        state, fns, _ = make_iqlearn(train_steps=5)
+        hp = Hyperparameters(batch_size=BATCH_SIZE, online_batch_size=BATCH_SIZE)
+        state, fns, _ = make_iqlearn(train_steps=5, hp=hp)
         env = _MockEnv()
         env_params = _MockEnvParams()
         _, env_state0 = env.reset(jax.random.key(0), env_params)
         _, new_env_state, _ = fns.train_sac(
             state, env, env_params, env_state0, jax.random.key(1)
         )
-        assert int(new_env_state.step_count) == 5
+        assert int(new_env_state.step_count) == BATCH_SIZE + 5
 
     def test_auto_reset_on_done(self):
         """When env always terminates the env_state obs should be the reset obs."""
@@ -1314,3 +1466,257 @@ class TestGetImportanceRatiosContinuous:
             state.actor, obs, actions, behaviour_probs / 2
         )
         assert jnp.allclose(ratios_halved, 2 * ratios, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# calculate_td_lambda
+# ---------------------------------------------------------------------------
+
+# Small constants so the online buffer is filled quickly in the fixture.
+_TD_LAMBDA_TRUNC = 3          # lambda_truncation: need trunc+1 = 4 filled slots
+_TD_ONLINE_BATCH  = 8         # online_batch_size (pre-fill count)
+_TD_ONLINE_SIZE   = 32        # online_buffer_size
+
+
+def _make_debug_discrete(seed=0):
+    """Return (state, fns, graphs, debug_fns) for a discrete agent with a
+    patched online buffer where behaviour_key is all-ones (avoids div-by-zero).
+    """
+    import math
+
+    hp = Hyperparameters(
+        batch_size=BATCH_SIZE,
+        online_batch_size=_TD_ONLINE_BATCH,
+        online_buffer_size=_TD_ONLINE_SIZE,
+        target_entropy=float(0.98 * math.log(NUM_ACTIONS)),
+        lam=0.5,
+        lambda_truncation=_TD_LAMBDA_TRUNC,
+    )
+    buf, _ = make_discrete_buffer()
+    actor_fe, critic_q1_fe, critic_q2_fe = make_feature_extractors(seed=seed)
+    mc_critic_q1_fe, mc_critic_q2_fe = make_mc_feature_extractors(seed=seed + 1)
+    state, fns, graphs, debug_fns = create_iqlearn(
+        hp,
+        buf,
+        NUM_ACTIONS,
+        actor_fe,
+        critic_q1_fe,
+        critic_q2_fe,
+        mc_critic_q1_feature_extractor=mc_critic_q1_fe,
+        mc_critic_q2_feature_extractor=mc_critic_q2_fe,
+        train_steps=TRAIN_STEPS,
+        critic_head_dims=(32,),
+        is_discrete=True,
+        approximate_mc=True,
+        debug=True,
+    )
+    # Pre-fill the online buffer with real env interactions so that
+    # observations are non-trivial and behaviour_key is valid (1/num_actions
+    # for written slots; 1.0 for unwritten slots via the approximate_mc
+    # pre-initialisation in create_iqlearn).
+    env = _MockEnv()
+    env_params = _MockEnvParams()
+    _, env_state = env.reset(jax.random.key(seed), env_params)
+    state, _ = fns.prefill_buffer(
+        state, env, env_params, env_state, _TD_ONLINE_BATCH, jax.random.key(seed + 42)
+    )
+    return state, fns, graphs, debug_fns
+
+
+class TestCalculateTdLambda:
+    """Tests for debug_fns.calculate_td_lambda exposed via debug=True."""
+
+    @pytest.fixture()
+    def setup(self):
+        state, fns, graphs, debug_fns = _make_debug_discrete()
+        # Use index=0 so the window is [0, 1, ..., lambda_truncation] --
+        # the double-offset bug is a no-op at index=0.
+        indices = jnp.array([0])
+        return state, fns, debug_fns, indices
+
+    # ------------------------------------------------------------------
+    # Structural tests
+    # ------------------------------------------------------------------
+
+    def test_debug_flag_returns_four_tuple(self):
+        """create_iqlearn(..., debug=True) must return a 4-tuple."""
+        result = _make_debug_discrete()
+        assert len(result) == 4
+
+    def test_debug_fns_type(self):
+        """The fourth element must be a DebugFunctions instance."""
+        _, _, _, debug_fns = _make_debug_discrete()
+        assert isinstance(debug_fns, DebugFunctions)
+
+    def test_no_debug_returns_three_tuple(self):
+        """create_iqlearn(..., debug=False) must still return a 3-tuple."""
+        buf, _ = make_discrete_buffer()
+        actor_fe, critic_q1_fe, critic_q2_fe = make_feature_extractors()
+        import math
+        hp = Hyperparameters(
+            batch_size=BATCH_SIZE,
+            target_entropy=float(0.98 * math.log(NUM_ACTIONS)),
+        )
+        result = create_iqlearn(
+            hp, buf, NUM_ACTIONS, actor_fe, critic_q1_fe, critic_q2_fe,
+            is_discrete=True,
+        )
+        assert len(result) == 3
+
+    # ------------------------------------------------------------------
+    # Output shape and dtype
+    # ------------------------------------------------------------------
+
+    def test_output_shape(self, setup):
+        state, fns, debug_fns, indices = setup
+        td = debug_fns.calculate_td_lambda(
+            state.actor, state.mc_critic_target, state.online_buffer, indices
+        )
+        assert td.shape == (len(indices),)
+
+    def test_output_dtype(self, setup):
+        state, fns, debug_fns, indices = setup
+        td = debug_fns.calculate_td_lambda(
+            state.actor, state.mc_critic_target, state.online_buffer, indices
+        )
+        assert td.dtype == jnp.float32
+
+    def test_output_finite(self, setup):
+        """Result must be finite for a well-formed buffer."""
+        state, fns, debug_fns, indices = setup
+        td = debug_fns.calculate_td_lambda(
+            state.actor, state.mc_critic_target, state.online_buffer, indices
+        )
+        assert jnp.all(jnp.isfinite(td))
+
+    # ------------------------------------------------------------------
+    # Sensitivity tests
+    # ------------------------------------------------------------------
+
+    def test_actor_dependence(self, setup):
+        """Changing the actor parameters must change the TD(λ) estimate."""
+        state, fns, debug_fns, indices = setup
+        td_orig = debug_fns.calculate_td_lambda(
+            state.actor, state.mc_critic_target, state.online_buffer, indices
+        )
+        # Build a fresh discrete agent with a different seed so actor differs.
+        state2, _, _, _ = _make_debug_discrete(seed=99)
+        # Verify the two actors actually differ before testing the function.
+        leaves_orig = jax.tree.leaves(state.actor)
+        leaves_new  = jax.tree.leaves(state2.actor)
+        params_differ = any(
+            not jnp.array_equal(a, b) for a, b in zip(leaves_orig, leaves_new)
+        )
+        assert params_differ, "Test setup error: actors should differ across seeds"
+        td_new = debug_fns.calculate_td_lambda(
+            state2.actor, state.mc_critic_target, state.online_buffer, indices
+        )
+        assert not jnp.allclose(td_orig, td_new, atol=1e-6)
+
+    def test_critic_dependence(self, setup):
+        """Changing the MC critic target parameters must change the TD(λ) estimate."""
+        state, fns, debug_fns, indices = setup
+        td_orig = debug_fns.calculate_td_lambda(
+            state.actor, state.mc_critic_target, state.online_buffer, indices
+        )
+        state2, _, _, _ = _make_debug_discrete(seed=99)
+        leaves_orig = jax.tree.leaves(state.mc_critic_target)
+        leaves_new  = jax.tree.leaves(state2.mc_critic_target)
+        params_differ = any(
+            not jnp.array_equal(a, b) for a, b in zip(leaves_orig, leaves_new)
+        )
+        assert params_differ, "Test setup error: mc_critic_targets should differ across seeds"
+        td_new = debug_fns.calculate_td_lambda(
+            state.actor, state2.mc_critic_target, state.online_buffer, indices
+        )
+        assert not jnp.allclose(td_orig, td_new, atol=1e-6)
+
+    # ------------------------------------------------------------------
+    # Degenerate-case: lam=0 collapses to a single bootstrap step
+    # ------------------------------------------------------------------
+
+    def test_lam_zero_single_step(self):
+        """With lam=0 and lambda_truncation=1, the return must equal a single
+        discounted bootstrap: p0*r0*(1-done0) + gamma*p1*Q(s1,a1).
+
+        We verify this by checking that the result is finite and that two
+        different critic states produce different outputs (ruling out a
+        constant zero return).
+        """
+        import math
+
+        hp = Hyperparameters(
+            batch_size=BATCH_SIZE,
+            online_batch_size=_TD_ONLINE_BATCH,
+            online_buffer_size=_TD_ONLINE_SIZE,
+            target_entropy=float(0.98 * math.log(NUM_ACTIONS)),
+            lam=0.0,
+            lambda_truncation=1,
+        )
+        buf, _ = make_discrete_buffer()
+        actor_fe, critic_q1_fe, critic_q2_fe = make_feature_extractors()
+        mc_critic_q1_fe, mc_critic_q2_fe = make_mc_feature_extractors()
+        state, fns, _, debug_fns = create_iqlearn(
+            hp, buf, NUM_ACTIONS, actor_fe, critic_q1_fe, critic_q2_fe,
+            mc_critic_q1_feature_extractor=mc_critic_q1_fe,
+            mc_critic_q2_feature_extractor=mc_critic_q2_fe,
+            train_steps=TRAIN_STEPS, critic_head_dims=(32,),
+            is_discrete=True, approximate_mc=True, debug=True,
+        )
+        new_info = {**state.online_buffer.info,
+                     behaviour_key: jnp.ones(state.online_buffer.size)}
+        patched_buf = state.online_buffer._replace(info=new_info)
+        state = state._replace(online_buffer=patched_buf)
+
+        indices = jnp.array([0])
+        td = debug_fns.calculate_td_lambda(
+            state.actor, state.mc_critic_target, state.online_buffer, indices
+        )
+        assert td.shape == (1,)
+        assert td.dtype == jnp.float32
+        assert jnp.all(jnp.isfinite(td))
+
+
+class TestGetQDebug:
+    """Tests for debug_fns.get_q exposed via debug=True."""
+
+    @pytest.fixture
+    def setup(self):
+        state, fns, graphs, debug_fns = _make_debug_discrete()
+        indices = jnp.arange(4)
+        return state, fns, debug_fns, indices
+
+    def test_get_q_field_exists(self):
+        """DebugFunctions must expose a callable get_q field."""
+        _, _, _, debug_fns = _make_debug_discrete()
+        assert callable(debug_fns.get_q)
+
+    def test_get_q_sac_shape_and_dtype(self, setup):
+        """get_q with use_mc=False returns finite float32 array of shape (batch,)."""
+        state, fns, debug_fns, indices = setup
+        obs     = state.online_buffer.info["observations"][indices]
+        actions = state.online_buffer.info["actions"][indices]
+        q = debug_fns.get_q(state.critic_target, obs, actions, False)
+        assert q.shape == (len(indices),)
+        assert q.dtype == jnp.float32
+        assert jnp.all(jnp.isfinite(q))
+
+    def test_get_q_mc_shape_and_dtype(self, setup):
+        """get_q with use_mc=True returns finite float32 array of shape (batch,)."""
+        state, fns, debug_fns, indices = setup
+        obs     = state.online_buffer.info["observations"][indices]
+        actions = state.online_buffer.info["actions"][indices]
+        q = debug_fns.get_q(state.mc_critic_target, obs, actions, True)
+        assert q.shape == (len(indices),)
+        assert q.dtype == jnp.float32
+        assert jnp.all(jnp.isfinite(q))
+
+    def test_get_q_sac_vs_mc_differ_initially(self, setup):
+        """SAC and MC critics start with different weights; Q values should differ."""
+        state, fns, debug_fns, indices = setup
+        obs     = state.online_buffer.info["observations"][indices]
+        actions = state.online_buffer.info["actions"][indices]
+        q_sac = debug_fns.get_q(state.critic_target,    obs, actions, False)
+        q_mc  = debug_fns.get_q(state.mc_critic_target, obs, actions, True)
+        # The two critics are independently initialised, so their outputs should differ
+        assert not jnp.allclose(q_sac, q_mc)

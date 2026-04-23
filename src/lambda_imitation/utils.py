@@ -59,6 +59,7 @@ from flax import nnx
 
 from .buffer import Buffer, create_buffer
 from .iqlearn import (
+    DebugFunctions,
     Hyperparameters,
     IQLearnFunctions,
     IQLearnGraphs,
@@ -328,8 +329,12 @@ def create_iqlearn_from_env(
     obs_key: str = "observations",
     action_key: str = "actions",
     approximate_mc: bool = False,
+    debug: bool = False,
     seed: int = 0,
-) -> Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs]:
+) -> (
+    "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs] | "
+    "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs, DebugFunctions]"
+):
     """Build a ready-to-use IQ-Learn agent from an :class:`EnvSpec`.
 
     This is a high-level convenience wrapper around :func:`~lambda_imitation.iqlearn.create_iqlearn`
@@ -378,12 +383,26 @@ def create_iqlearn_from_env(
             observations.
         action_key: Key in ``expert_data`` (and in the buffer) that holds
             actions.
+        approximate_mc: If True, enable the MC critic branch (passed through
+            to :func:`~lambda_imitation.iqlearn.create_iqlearn`).
+        debug: If True, return a 4-tuple whose fourth element is a
+            :class:`~lambda_imitation.iqlearn.DebugFunctions` named tuple
+            exposing ``calculate_td_lambda`` and ``get_q``.  Passed through
+            unchanged to :func:`~lambda_imitation.iqlearn.create_iqlearn`.
         seed: Integer seed passed to ``nnx.Rngs`` when constructing the
             feature extractors.
 
     Returns:
-        A ``(IQLearnState, IQLearnFunctions, IQLearnGraphs)`` triple ready for
-        training; see :func:`~lambda_imitation.iqlearn.create_iqlearn` for details.
+        When ``debug=False`` (default): a
+        ``(IQLearnState, IQLearnFunctions, IQLearnGraphs)`` triple ready for
+        training.
+
+        When ``debug=True``: a
+        ``(IQLearnState, IQLearnFunctions, IQLearnGraphs, DebugFunctions)``
+        4-tuple.
+
+        See :func:`~lambda_imitation.iqlearn.create_iqlearn` for details on
+        each element.
 
     Raises:
         ValueError: If ``expert_data`` does not contain ``obs_key`` or
@@ -409,7 +428,7 @@ def create_iqlearn_from_env(
         # Default target_entropy = 0.98 * log(num_actions) (Christodoulou 2019)
         if hp is None:
             hp = Hyperparameters(
-                target_entropy=float(0.98 * math.log(env_spec.action_dim))
+                target_entropy=0.2  # float(0.98 * math.log(env_spec.action_dim))
             )
         action_scale = 1.0
         action_bias = 0.0
@@ -469,4 +488,5 @@ def create_iqlearn_from_env(
         critic_head_dims=critic_head_dims,
         is_discrete=env_spec.is_discrete,
         approximate_mc=approximate_mc,
+        debug=debug,
     )

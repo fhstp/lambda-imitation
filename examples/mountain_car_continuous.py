@@ -74,6 +74,23 @@ parser.add_argument(
     metavar="PATH",
     help="path to the demo .npz file (default: mountain_car_continuous_demos.npz)",
 )
+parser.add_argument(
+    "--wandb",
+    action="store_true",
+    help="enable Weights & Biases logging (train mode only)",
+)
+parser.add_argument(
+    "--wandb-project",
+    default="lambda-imitation",
+    metavar="PROJECT",
+    help="W&B project name (default: lambda-imitation)",
+)
+parser.add_argument(
+    "--wandb-run-name",
+    default=None,
+    metavar="NAME",
+    help="W&B run name (default: auto-generated)",
+)
 args = parser.parse_args()
 
 # ── shared imports ────────────────────────────────────────────────────────────
@@ -163,11 +180,36 @@ else:
         train_steps=args.steps,
     )
 
+    # --- wandb (optional) ---
+    _wandb = None
+    if args.wandb:
+        try:
+            import wandb as _wandb_mod
+            _wandb = _wandb_mod
+        except ImportError:
+            print("wandb not installed — skipping.  Install with:  pip install wandb")
+        else:
+            _wandb.init(
+                project=args.wandb_project,
+                name=args.wandb_run_name,
+                config={
+                    "env": "MountainCarContinuous-v0",
+                    "algo": "IQ-Learn",
+                    "action_space": "continuous",
+                    "train_steps": args.steps,
+                    "n_expert_transitions": n_demos,
+                },
+            )
+
     # --- train ---
     print(f"Training for {args.steps} gradient steps (first call JIT-compiles)…")
     state, metrics = fns.train(state, jax.random.key(0))
     print("Training complete.")
     print("Metrics:", {k: f"{float(v):.4f}" for k, v in metrics.items()})
+
+    if _wandb is not None:
+        _wandb.log({k: float(v) for k, v in metrics.items()})
+        _wandb.finish()
 
     # --- visualise ---
     print(

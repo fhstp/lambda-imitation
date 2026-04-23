@@ -51,6 +51,23 @@ parser.add_argument(
     metavar="S",
     help="JAX random seed (default: 0)",
 )
+parser.add_argument(
+    "--wandb",
+    action="store_true",
+    help="enable Weights & Biases logging",
+)
+parser.add_argument(
+    "--wandb-project",
+    default="lambda-imitation",
+    metavar="PROJECT",
+    help="W&B project name (default: lambda-imitation)",
+)
+parser.add_argument(
+    "--wandb-run-name",
+    default=None,
+    metavar="NAME",
+    help="W&B run name (default: auto-generated)",
+)
 args = parser.parse_args()
 
 # ── imports ───────────────────────────────────────────────────────────────────
@@ -140,6 +157,29 @@ def evaluate(agent_state, rng_key, n_episodes: int = 5) -> float:
     return total / n_episodes
 
 
+# ── wandb (optional) ─────────────────────────────────────────────────────────
+
+_wandb = None
+if args.wandb:
+    try:
+        import wandb as _wandb_mod
+        _wandb = _wandb_mod
+    except ImportError:
+        print("wandb not installed — skipping.  Install with:  pip install wandb")
+    else:
+        _wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config={
+                "env": "Pendulum-v1",
+                "algo": "SAC",
+                "action_space": "continuous",
+                "rounds": args.rounds,
+                "train_steps": args.train_steps,
+                "seed": args.seed,
+            },
+        )
+
 # ── training loop ─────────────────────────────────────────────────────────────
 
 total_steps = args.rounds * args.train_steps
@@ -164,10 +204,24 @@ for rnd in range(1, args.rounds + 1):
         f"critic_loss={float(metrics['critic_loss']):.4f}"
     )
 
+    if _wandb is not None:
+        _wandb.log(
+            {
+                "round": rnd,
+                "step": rnd * args.train_steps,
+                "mean_return": mean_return,
+                **{k: float(v) for k, v in metrics.items()},
+            }
+        )
+
 print("\nTraining complete.")
 key, eval_key = jax.random.split(key)
 final_return = evaluate(state, eval_key, n_episodes=10)
 print(f"Final evaluation (10 episodes): mean_return={final_return:.1f}")
+
+if _wandb is not None:
+    _wandb.log({"final_mean_return": final_return})
+    _wandb.finish()
 
 # ── visualise ─────────────────────────────────────────────────────────────────
 
