@@ -52,6 +52,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from flax import nnx
+from jax.tree_util import Partial
 
 from .buffer import (Buffer, BufferFunctions, BufferSample, create_buffer,
                      create_sample)
@@ -280,12 +281,24 @@ class IQLearnFunctions(NamedTuple):
             ``unsquashed_action_key`` in the online buffer.
             ``behaviour_probs`` are probabilities (discrete) or probability
             densities (continuous) under ``b``, shape ``(batch,)``.
+        prefill_buffer: ``(state, env, env_params, env_state, n_steps, key) ->
+            (state, env_state)`` -- collect ``n_steps`` transitions using a
+            uniform random policy and write them into the online buffer.
+            Discrete: action drawn uniformly from ``{0, …, action_dim-1}``,
+            ``behaviour_key = 1/action_dim``.  Continuous: ``u ~ N(0, I)``,
+            action squashed through tanh, ``behaviour_key = exp(log_prob)``
+            using the same change-of-variables as ``get_importance_ratios``.
+            The last step is force-terminated so that all ``n_steps`` written
+            slots are immediately sampleable.  Called automatically by
+            ``train_sac`` when the online buffer has fewer than
+            ``params.online_batch_size`` sampleable transitions.
     """
 
     predict: Callable
     train: Callable
     train_sac: Callable
     get_importance_ratios: Callable
+    prefill_buffer: Callable
 
 
 class IQLearnGraphs(NamedTuple):
@@ -306,6 +319,41 @@ class IQLearnGraphs(NamedTuple):
     actor: NetworkGraphs
     critic_q1: NetworkGraphs
     critic_q2: NetworkGraphs
+
+
+class DebugFunctions(NamedTuple):
+    """Optional debug helpers returned by :func:`create_iqlearn` when ``debug=True``.
+
+    These functions expose internal computations that are useful for
+    introspection and unit testing but are not required for normal training.
+
+    Attributes:
+        calculate_td_lambda: ``(actor, mc_critic_target, online_buffer, indices) ->
+            td_returns`` -- compute a V-trace TD(λ) return estimate for each
+            index in ``indices`` (vmapped).  ``actor`` is the current
+            :class:`NetworkState` from :class:`IQLearnState`.
+            ``mc_critic_target`` is the EMA target for the MC critic
+            (i.e. ``state.mc_critic_target``); the function uses it to
+            bootstrap Q-values.  ``online_buffer`` is the online replay
+            buffer (e.g. ``state.online_buffer``); it must contain at least
+            ``params.lambda_truncation + 1`` filled slots starting from the
+            smallest index requested.  ``indices`` is a 1-D integer array of
+            buffer start positions.  Returns a float32 array of shape
+            ``(len(indices),)``.
+        get_q: ``(critic, obs, actions, use_mc) -> q_values`` -- evaluate the
+            conservative (min over twin) Q-values for a batch of
+            ``(obs, actions)`` pairs.  Pass ``state.critic_target`` with
+            ``use_mc=False`` for the regular SAC critic; pass
+            ``state.mc_critic_target`` with ``use_mc=True`` for the MC
+            critic.  ``obs`` has shape ``(batch, *obs_shape)``; ``actions``
+            has shape ``(batch, action_dim)`` for continuous spaces or
+            ``(batch, 1)`` (float32 action indices) for discrete spaces.
+            Returns a float32 array of shape ``(batch,)``.
+    """
+
+    calculate_td_lambda: Callable
+    get_q: Callable
+    get_entropy: Callable
 
 
 class Hyperparameters(NamedTuple):
@@ -339,10 +387,20 @@ class Hyperparameters(NamedTuple):
             very first call.
         tau: Soft update coefficient for EMA target networks.  A value of
             ``0.005`` means targets lag significantly behind online weights.
+        lam: TD(λ) mixing coefficient for the Monte-Carlo critic target.
+            ``lam=0`` collapses to a single one-step bootstrap; ``lam→1``
+            approaches a full Monte-Carlo return.  (Named ``lam`` because
+            ``lambda`` is a Python keyword.)
+        lambda_truncation: Number of look-ahead steps used when computing the
+            TD(λ) return in :func:`calculate_td_lambda`.  The function reads
+            ``lambda_truncation + 1`` consecutive slots from the online buffer
+            per target estimate, so the online buffer must hold at least that
+            many transitions.
     """
 
     actor_lr: float = 1e-3
     critic_lr: float = 1e-3
+    mc_critic_lr: float = 1e-2
     alpha_lr: float = 1e-3
     alpha: float = 1.0
     autotune_alpha: bool = True
@@ -353,6 +411,8 @@ class Hyperparameters(NamedTuple):
     online_buffer_size: int = 10_000
     online_batch_size: int = 256
     tau: float = 0.005
+    lam: float = 0.5  # lambda is a reserved keyword...
+    lambda_truncation: int = 15
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +467,11 @@ def create_iqlearn(
     mc_critic_head_dims: tuple[int, ...] = (256, 256),
     is_discrete: bool = False,
     approximate_mc: bool = False,
-) -> Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs]:
+    debug: bool = False,
+) -> (
+    "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs] | "
+    "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs, DebugFunctions]"
+):
     """Construct an IQ-Learn agent from a pre-filled buffer and user-supplied FEs.
 
     The feature extractors are taken as-is (already initialised by the caller),
@@ -467,15 +531,27 @@ def create_iqlearn(
             ``predict`` returns the action index as a ``float32`` scalar.
             If False (default), use a squashed-Gaussian actor and a continuous
             critic that takes actions as additional input.
+        debug: If True, return a 4-tuple whose fourth element is a
+            :class:`DebugFunctions` named tuple exposing internal computations
+            (currently: ``calculate_td_lambda`` and ``get_q``).  If False
+            (default), return the usual 3-tuple and the debug helpers are not
+            constructed.
 
     Returns:
-        A ``(IQLearnState, IQLearnFunctions, IQLearnGraphs)`` triple.
+        When ``debug=False`` (default): a
+        ``(IQLearnState, IQLearnFunctions, IQLearnGraphs)`` triple.
+
+        When ``debug=True``: a
+        ``(IQLearnState, IQLearnFunctions, IQLearnGraphs, DebugFunctions)``
+        4-tuple.
 
         - ``IQLearnState``: initial agent state with online and target networks
           set to the same weights.
         - ``IQLearnFunctions``: named tuple of ``predict`` and ``train`` closures.
         - ``IQLearnGraphs``: static NNX graph definitions for all network modules,
           useful for inspection or custom inference.
+        - ``DebugFunctions`` *(only when debug=True)*: named tuple of internal
+          helper functions, including ``calculate_td_lambda`` and ``get_q``.
     """
     assert (
         not approximate_mc or mc_critic_q1_feature_extractor is not None
@@ -521,25 +597,16 @@ def create_iqlearn(
             online_mc_this_keys,
             online_mc_next_keys,
         )
-
-    # Pre-fill the online buffer with params.online_batch_size random
-    # transitions so that train_sac can update from the very first call.
-    # All rewards are zero and terminated flags are 0 in the stored data;
-    # the final transition is passed terminated=True to the buffer's add()
-    # so that every pre-filled slot becomes sampleable immediately.
-    _prefill_key = jax.random.key(42)
-    for _i in range(params.online_batch_size):
-        _prefill_key, _k_obs, _k_act = jax.random.split(_prefill_key, 3)
-        _transition = {
-            obs_key: jax.random.normal(_k_obs, online_shapes[obs_key]),
-            action_key: jax.random.normal(_k_act, online_shapes[action_key]),
-            reward_key: jnp.zeros(()),
-            terminated_key: jnp.zeros(()),
-        }
-        online_buffer = online_buffer_functions.add(
-            online_buffer,
-            _transition,
-            terminated=(_i == params.online_batch_size - 1),
+        # Pre-initialise every behaviour_key slot to 1.0 so that slots which
+        # have never been written by run_env_step (pre-fill and as-yet-unwritten
+        # slots) contribute an IS denominator of 1.0 rather than 0.0.
+        # Division by zero would otherwise produce NaN in calculate_td_lambda.
+        # Real transitions overwrite their slot with the true policy probability.
+        online_buffer = online_buffer._replace(
+            info={
+                **online_buffer.info,
+                behaviour_key: jnp.ones_like(online_buffer.info[behaviour_key]),
+            }
         )
 
     # Infer feature dims via dummy forward pass (before split)
@@ -655,7 +722,7 @@ def create_iqlearn(
     actor_optimizer = optax.adam(params.actor_lr)
     critic_optimizer = optax.adam(params.critic_lr)
     if approximate_mc:
-        mc_critic_optimizer = optax.adam(params.critic_lr)
+        mc_critic_optimizer = optax.adam(params.mc_critic_lr)
     alpha_optimizer = optax.adam(params.alpha_lr)
 
     log_alpha = jnp.array(jnp.log(params.alpha))
@@ -825,6 +892,14 @@ def create_iqlearn(
             else:
                 return (probs * q_min).sum(-1)
 
+        def get_entropy(actor, obs, _key):
+            logits = run_actor(actor, obs)  # (batch, num_actions)
+            probs = jax.nn.softmax(logits)  # (batch, num_actions)
+            log_probs = jax.nn.log_softmax(logits)  # (batch, num_actions)
+            entropy = -(probs * log_probs).sum(-1)  # (batch,) — exact H(π)
+            return entropy
+
+
         @partial(jax.jit, static_argnames=["deterministic", "return_prob"])
         def predict(
             iqlearn: IQLearnState,
@@ -852,7 +927,7 @@ def create_iqlearn(
             else:
                 action = jax.random.categorical(key, logits)
             if return_prob:
-                return action.astype(jnp.float32), logits[action]
+                return action.astype(jnp.float32), jax.nn.softmax(logits)[action]
             return action.astype(jnp.float32)
 
         @jax.jit
@@ -875,10 +950,10 @@ def create_iqlearn(
             Returns:
                 Importance ratios of shape ``(batch,)``.
             """
-            logits = run_actor(actor, obs)                    # (batch, num_actions)
-            probs = jax.nn.softmax(logits)                    # (batch, num_actions)
-            idx = actions.reshape(-1).astype(jnp.int32)       # (batch,)
-            pi_a = probs[jnp.arange(idx.shape[0]), idx]       # (batch,)
+            logits = run_actor(actor, obs)  # (batch, num_actions)
+            probs = jax.nn.softmax(logits)  # (batch, num_actions)
+            idx = actions.reshape(-1).astype(jnp.int32)  # (batch,)
+            pi_a = probs[jnp.arange(idx.shape[0]), idx]  # (batch,)
             return pi_a / behaviour_probs
 
     else:
@@ -1015,15 +1090,17 @@ def create_iqlearn(
             Returns:
                 Importance ratios of shape ``(batch,)``.
             """
-            mean, std = get_dist_params(actor, obs)           # (batch, action_dim)
-            u = actions                                       # pre-tanh, no inversion needed
+            mean, std = get_dist_params(actor, obs)  # (batch, action_dim)
+            u = actions  # pre-tanh, no inversion needed
             y_t = jnp.tanh(u)
             log_prob = (
                 -((u - mean) ** 2) / (2 * std**2)
                 - 0.5 * jnp.log(2 * jnp.pi)
                 - jnp.log(std)
                 - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
-            ).sum(axis=-1)                                    # (batch,)
+            ).sum(
+                axis=-1
+            )  # (batch,)
             return jnp.exp(log_prob) / behaviour_probs
 
         def get_v(
@@ -1067,6 +1144,10 @@ def create_iqlearn(
             else:
                 return q
 
+        def get_entropy(actor, obs, key):
+            _action, _unsquashed, logprob = sample_action_logprob(actor, obs, key)
+            return -logprob
+
         @partial(jax.jit, static_argnames=["deterministic", "return_unsquashed"])
         def predict(
             iqlearn: IQLearnState,
@@ -1102,9 +1183,97 @@ def create_iqlearn(
             return action[0]
 
     # ------------------------------------------------------------------
-    # Loss functions — structurally identical for both action space types;
-    # differences are absorbed by the action-space-specific helpers above.
+    # Loss functions and other helpers which are structurally identical
+    # for both action space types; differences are absorbed by the
+    # action-space-specific helpers above.
     # ------------------------------------------------------------------
+
+    @Partial(jax.vmap, in_axes=[None, None, None, None, None, 0])
+    def calculate_td_lambda(actor, critic, alpha, key, online_buffer: Buffer, index: int):
+        """Compute a V-trace TD(λ) return estimate starting at buffer position ``index``.
+
+        This function is vmapped over ``index`` via ``@Partial(jax.vmap, ...)``;
+        it operates on a single start index and produces a single scalar return.
+
+        **Algorithm overview**
+
+        1. Collect ``lambda_truncation + 1`` consecutive buffer slots:
+           ``indices = index + jnp.arange(lambda_truncation + 1)``.
+
+        2. Compute per-step importance ratios
+           ``c_k = π(a_k|s_k) / b(a_k|s_k)`` via :func:`get_importance_ratios`.
+
+        3. Compute V-trace truncated cumulative IS weights:
+           ``p_k = clip(∏_{j≤k} c_j, max=1.0)``.
+           Clipping to 1 prevents variance explosion from large off-policy
+           corrections (V-trace truncation level ``ρ̄ = 1``).
+
+        4. Compute the done mask: ``done_mask[k] = 1`` if any step
+           ``j < k`` was terminal, else 0 (first step is always 0).
+           Rewards at and after a terminal are zeroed out by this mask.
+
+        5. Accumulate partial n-step returns:
+           ``rn[n] = Σ_{k=0}^{n-1} γ^k p_k r_k (1−done_mask[k])
+                    + γ^{n} p_{n} Q(s_n, a_n)``.
+
+        6. Mix with geometric weights:
+           ``TD(λ) = (1 − λ) Σ_{n=0}^{lambda_truncation-1} λ^n rn[n]``.
+
+        Args:
+            actor: Current actor network state (:class:`NetworkState`).
+            critic: MC critic target state (:class:`TwinCriticState`), i.e.
+                ``state.mc_critic_target``.  The function calls ``get_q``
+                with ``use_mc=True``, which selects the MC critic graph
+                definitions for reconstruction.
+            online_buffer: Online replay buffer containing at least
+                ``lambda_truncation + 1`` filled transitions from the start
+                index onward.  Must include keys ``obs_key``, ``action_key``,
+                ``behaviour_key``, ``reward_key``, and ``terminated_key``.
+            index: Scalar integer start position in the buffer (before vmap).
+
+        Returns:
+            Scalar ``float32`` TD(λ) return estimate for the transition at
+            ``index``.
+        """
+        # Equivalent to the original ``index + jnp.arange(index, index + n + 1)``
+        # (which produces ``index + [0, 1, ..., n]``), but uses a concrete
+        # length so the expression is valid under jax.vmap.
+        indices = index + jnp.arange(params.lambda_truncation + 1)
+        key_ent, key_v = jax.random.split(key)
+
+        c_k = get_importance_ratios(
+            actor,
+            online_buffer.info[obs_key][indices],
+            online_buffer.info[action_key][indices],
+            online_buffer.info[behaviour_key][indices],
+        )
+        p_k = jnp.clip(jnp.prod(c_k), max=1.0)
+        gammas = params.gamma ** jnp.arange(params.lambda_truncation + 1)
+        lambdas = params.lam ** jnp.arange(params.lambda_truncation)
+        done_mask = 1-jnp.concatenate(
+            (
+                jnp.array([0]),
+                jnp.maximum.accumulate(
+                    online_buffer.info[terminated_key][indices[:-1]]
+                ),
+            ),
+            dtype=jnp.float32,
+        )
+        entropies = get_entropy(actor, online_buffer.info[obs_key][indices], key_ent)
+        rn = jnp.cumsum(
+            gammas[:-1]
+            * (online_buffer.info[reward_key][indices[:-1]] + alpha*entropies[:-1])
+            * done_mask[:-1]
+        )
+        rn = rn + gammas[1:] * done_mask[1:]* get_v( # type: ignore
+            actor,
+            critic,
+            alpha,
+            online_buffer.info[obs_key][indices][1:],
+            key_v,
+            include_entropy=True
+        )
+        return (1 - params.lam) * jnp.sum(lambdas * rn), p_k
 
     def loss_alpha(log_alpha: jax.Array, log_pi: jax.Array) -> jax.Array:
         """Entropy temperature loss.
@@ -1269,35 +1438,25 @@ def create_iqlearn(
         return loss, {"critic_loss": loss, "target_q": target_q.mean()}
 
     def loss_mc_critic_sac(
+        actor: NetworkState,
         mc_critic: TwinCriticState,
-        mc_critic_target: TwinCriticState,
+        critic_target: TwinCriticState,
         online_buf: Buffer,
         alpha: jax.Array,
         key: jax.Array,
     ) -> Tuple[jax.Array, dict]:
-        key_sample, key_v = jax.random.split(key, 2)
-        sample, _ = online_buffer_sample(online_buf, key_sample)
+        key_sample, key_td_lambda = jax.random.split(key, 2)
+        sample, indices = online_buffer_sample(online_buf, key_sample)
         obs = sample.this_info[obs_key]
         actions = sample.this_info[action_key]
-        rewards = sample.this_info[reward_key].reshape(-1)
-        terminated = sample.this_info[terminated_key].reshape(-1)
 
-        next_v = get_v(
-            actor_target,
-            critic_target,
-            alpha,
-            sample.next_info[obs_key],
-            key_v,
-            include_entropy=True,
-        )
-        target_q = jax.lax.stop_gradient(
-            rewards + params.gamma * (1.0 - terminated) * next_v
+        target_q, coefs = jax.lax.stop_gradient(
+            calculate_td_lambda(actor, critic_target, alpha, key_td_lambda, online_buf, indices)  # type: ignore
         )
 
-        q1, q2 = get_q_both(critic, obs, actions)
-        loss = 0.5 * (jnp.mean((q1 - target_q) ** 2) + jnp.mean((q2 - target_q) ** 2))
-        return loss, {"critic_loss": loss, "target_q": target_q.mean()}
-
+        q1, q2 = get_q_both(mc_critic, obs, actions, use_mc=True)
+        loss = 0.5 * (jnp.mean(coefs*(q1 - target_q) ** 2) + jnp.mean(coefs*(q2 - target_q) ** 2))
+        return loss, {"mc_critic_loss": loss, "target_q": target_q.mean()}
 
     # ------------------------------------------------------------------
     # Online helpers: environment interaction and SAC update
@@ -1364,7 +1523,8 @@ def create_iqlearn(
         environment rewards) and the same soft-value actor objective as
         IQ-Learn.  The online buffer must already hold at least
         ``params.online_batch_size`` sampleable transitions before this
-        function is called (guaranteed by the :func:`create_iqlearn` pre-fill).
+        function is called (guaranteed by :func:`prefill_buffer`, which
+        :func:`train_sac` calls automatically when the buffer is cold).
 
         Args:
             sac: Current agent state.
@@ -1404,8 +1564,9 @@ def create_iqlearn(
             grads_mc_critic, metrics_mc_critic = jax.grad(
                 loss_mc_critic_sac, argnums=1, has_aux=True
             )(
+                sac.actor,
                 sac.mc_critic,
-                sac.mc_critic_target,
+                sac.critic_target,
                 sac.online_buffer,
                 sac.alpha,
                 key_mc_critic,
@@ -1452,7 +1613,7 @@ def create_iqlearn(
             new_critic,
         )
         if approximate_mc:
-            new_critic_target = jax.tree.map(
+            new_mc_critic_target = jax.tree.map(
                 lambda x, y: (1 - params.tau) * x + params.tau * y,
                 sac.mc_critic_target,
                 new_mc_critic,
@@ -1620,10 +1781,10 @@ def create_iqlearn(
 
         A Python-level check is performed on every call to ensure the online
         buffer is warm (at least ``params.online_batch_size`` sampleable
-        transitions).  :func:`create_iqlearn` pre-fills the buffer to this
-        size, so under normal usage the check never fails.  If you replace
-        ``sac.online_buffer`` manually you must ensure it satisfies this
-        invariant or a ``ValueError`` is raised.
+        transitions).  If the buffer is cold, :func:`prefill_buffer` is called
+        automatically with the provided environment before the JIT-compiled
+        training loop runs.  This happens transparently on the first call when
+        starting from a freshly constructed agent.
 
         Args:
             sac: Current agent state.
@@ -1638,20 +1799,12 @@ def create_iqlearn(
         Returns:
             ``(new_sac, new_env_state, metrics)`` where each metric scalar is
             the mean over all ``train_steps`` steps.
-
-        Raises:
-            ValueError: If the online buffer holds fewer than
-                ``params.online_batch_size`` sampleable transitions.
         """
         n_ok = int(sac.online_buffer.sampling_ok.sum())
         if n_ok < params.online_batch_size:
-            raise ValueError(
-                f"train_sac requires at least {params.online_batch_size} "
-                f"sampleable transitions in the online buffer, but found "
-                f"{n_ok}. Under normal usage create_iqlearn pre-fills the "
-                f"buffer to params.online_batch_size={params.online_batch_size}"
-                f" slots. If you replaced sac.online_buffer manually, ensure "
-                f"it has at least that many sampleable slots."
+            key, prefill_key = jax.random.split(key)
+            sac, env_state = prefill_buffer(
+                sac, env, env_params, env_state, params.online_batch_size, prefill_key
             )
         return _train_sac_jit(sac, env, env_params, env_state, key)
 
@@ -1683,9 +1836,90 @@ def create_iqlearn(
         metrics = jax.tree.map(lambda x: x.mean(), metrics)
         return iqlearn, metrics
 
+    def prefill_buffer(
+        sac: IQLearnState,
+        env,
+        env_params,
+        env_state,
+        n_steps: int,
+        key: jax.Array,
+    ):
+        """Pre-fill the online buffer with real environment interactions.
+
+        Runs ``n_steps`` steps using a uniform random policy and writes the
+        resulting transitions into ``sac.online_buffer``.  The last step is
+        force-terminated so that all ``n_steps`` written slots are immediately
+        sampleable by :func:`update_step_sac`.
+
+        For discrete action spaces the action is drawn uniformly from
+        ``{0, …, action_dim-1}`` and ``behaviour_key`` is set to
+        ``1/action_dim``.  For continuous spaces ``u ~ N(0, I)`` is sampled,
+        squashed through tanh with optional affine rescaling, and
+        ``behaviour_key`` is set to ``exp(log_prob)`` using the same
+        change-of-variables formula as :func:`get_importance_ratios`.
+
+        Args:
+            sac: Current agent state.  Only ``sac.online_buffer`` is mutated.
+            env: Gymnax environment object (static — not traced by JAX).
+            env_params: Gymnax environment parameters pytree.
+            env_state: Current gymnax environment state pytree.
+            n_steps: Number of transitions to collect.
+            key: JAX PRNG key; split internally for each action sample and
+                environment step.
+
+        Returns:
+            ``(new_sac, new_env_state)`` where ``new_sac`` has an updated
+            ``online_buffer`` and ``new_env_state`` is the post-step gymnax
+            state.
+        """
+        for i in range(n_steps):
+            key, key_act, key_step = jax.random.split(key, 3)
+            obs = env.get_obs(env_state, env_params)
+            if is_discrete:
+                action_idx = jax.random.randint(key_act, (), 0, action_dim)
+                action = action_idx.astype(jnp.float32)
+                prob = jnp.float32(1.0 / action_dim)
+                env_action = action_idx
+            else:
+                u = jax.random.normal(key_act, (action_dim,))
+                y_t = jnp.tanh(u)
+                action = y_t * action_scale + action_bias
+                log_prob = (
+                    -(u**2) / 2
+                    - 0.5 * jnp.log(2 * jnp.pi)
+                    - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
+                ).sum()
+                prob = jnp.exp(log_prob)
+                env_action = action
+            _next_obs, env_state, reward, done, _ = env.step(
+                key_step, env_state, env_action, env_params
+            )
+            # Force-terminate the last step so that all n_steps slots are
+            # immediately sampleable (terminal transitions need no successor).
+            terminated = bool(done) | (i == n_steps - 1)
+            transition = {
+                obs_key: obs,
+                action_key: jnp.atleast_1d(action),
+                reward_key: jnp.asarray(reward, dtype=jnp.float32),
+                terminated_key: jnp.asarray(terminated, dtype=jnp.float32),
+            }
+            if approximate_mc:
+                transition[behaviour_key] = prob
+                if not is_discrete:
+                    transition[unsquashed_action_key] = jnp.atleast_1d(u)
+            sac = sac._replace(
+                online_buffer=online_buffer_functions.add(
+                    sac.online_buffer, transition, terminated=terminated
+                )
+            )
+        return sac, env_state
+
     graphs = IQLearnGraphs(
         actor=NetworkGraphs(actor_fe_graph, actor_head_graph),
         critic_q1=NetworkGraphs(critic_q1_fe_graph, critic_q1_head_graph),
         critic_q2=NetworkGraphs(critic_q2_fe_graph, critic_q2_head_graph),
     )
-    return iqlearn, IQLearnFunctions(predict, train, train_sac, get_importance_ratios), graphs
+    fns = IQLearnFunctions(predict, train, train_sac, get_importance_ratios, prefill_buffer)
+    if debug:
+        return (iqlearn, fns, graphs, DebugFunctions(calculate_td_lambda, get_q, get_entropy))
+    return (iqlearn, fns, graphs)

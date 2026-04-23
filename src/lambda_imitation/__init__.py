@@ -11,6 +11,7 @@ from lambda_imitation.buffer import (
     create_sample,
 )
 from lambda_imitation.iqlearn import (
+    DebugFunctions,
     Head,
     Hyperparameters,
     IQLearnFunctions,
@@ -39,6 +40,7 @@ __all__ = [
     "create_buffer",
     "create_sample",
     # iqlearn
+    "DebugFunctions",
     "Head",
     "Hyperparameters",
     "IQLearnFunctions",
