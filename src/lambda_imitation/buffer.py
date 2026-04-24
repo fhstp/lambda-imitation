@@ -71,6 +71,92 @@ class BufferFunctions(NamedTuple):
     sample: Callable[[Buffer, jax.Array], Tuple[BufferSample, Tuple[int]]]
 
 
+class SequenceSample(NamedTuple):
+    """A batch of contiguous sequences drawn from the buffer.
+
+    Attributes:
+        info: Dict mapping string keys to arrays of shape
+            ``(batch, T, *item_shape)``.  Each row is a contiguous run of T
+            consecutive buffer slots (wrapping circularly).
+        mask: Float32 array of shape ``(batch, T)``.  Entry ``[b, t]`` is 1.0
+            for every timestep up to and including the first terminal in
+            sequence ``b``, and 0.0 for all timesteps that follow the first
+            terminal.  Use this to mask out loss contributions from
+            post-episode junk data.
+        start_index: Integer array of shape ``(batch,)`` giving the buffer
+            slot at which each sequence starts.
+    """
+
+    info: dict[str, jax.Array]
+    mask: jax.Array
+    start_index: jax.Array
+
+
+def create_sequence_sample(
+    buffer_size: int,
+    batch_size: int,
+    burn_in: int,
+    sequence_length: int,
+    keys: list[str],
+    *,
+    terminal_key: str,
+) -> Callable[[Buffer, jax.Array], SequenceSample]:
+    """Build a sequence-sampling function for a fixed buffer layout.
+
+    A sequence of length ``sequence_length`` is valid to sample only when all
+    ``sequence_length`` consecutive slots (wrapping circularly) have
+    ``sampling_ok=True``.  The probability of each start position is uniform
+    over valid starts.
+
+    Args:
+        buffer_size: Total capacity of the buffer (number of slots).
+        batch_size: Number of sequences to draw per call.
+        sequence_length: Length ``T`` of each sampled sequence.
+        keys: Buffer keys to gather into ``SequenceSample.info``.  Must
+            include ``terminal_key``.
+        terminal_key: Key in ``buffer.info`` whose values are 0/1 float32
+            flags marking episode termination.  Used to compute the mask.
+
+    Returns:
+        A pure function ``sample(buffer, key) -> SequenceSample``.  Assumes
+        the buffer holds at least ``sequence_length`` valid consecutive slots;
+        behaviour is undefined (NaN probabilities) if no valid start exists.
+    """
+    B = burn_in
+    T = sequence_length
+
+    # Precompute offset array — used every call but never changes.
+    offsets = jnp.arange(-B, T)  # (T,)
+
+    def sample(buffer: Buffer, key: jax.Array) -> SequenceSample:
+        # Valid-start mask: every slot in the T-window must be sampling_ok.
+        all_slots = jnp.arange(buffer_size)
+        window = (all_slots[:, None] + offsets[None, :]) % buffer_size  # (size, T)
+        valid = jnp.all(buffer.sampling_ok[window], axis=-1)  # (size,) bool
+
+        probs = valid.astype(jnp.float32)
+        probs = probs / probs.sum()
+        starts = jax.random.choice(key, buffer_size, (batch_size,), p=probs)  # (batch,)
+
+        # Gather contiguous sequences for every requested key.
+        seq_idx = (starts[:, None] + offsets[None, :]) % buffer_size  # (batch, T)
+        gathered = {k: buffer.info[k][seq_idx] for k in keys}
+
+        # Mask: 1 up to and including the first terminal, 0 afterwards.
+        # cummax over the terminal flags detects the first terminal position;
+        # shifting right by one makes the terminal timestep itself included.
+        term = gathered[terminal_key][:, B:].astype(jnp.float32)  # (batch, T)
+        cummax = jnp.maximum.accumulate(term, axis=1)  # (batch, T)
+        shifted = jnp.concatenate(
+            [jnp.zeros((batch_size, B + 1), dtype=jnp.float32), cummax[:, :-1]], axis=1
+        )
+        mask = 1.0 - shifted  # (batch, T)
+
+        return SequenceSample(info=gathered, mask=mask, start_index=starts), seq_idx
+
+    return sample
+
+
 def create_sample(
     buffer_size: int,
     sampling_size: int,

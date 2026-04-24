@@ -54,14 +54,25 @@ import optax
 from flax import nnx
 from jax.tree_util import Partial
 
-from .buffer import (Buffer, BufferFunctions, BufferSample, create_buffer,
-                     create_sample)
+from .buffer import (Buffer, BufferFunctions, BufferSample, SequenceSample,
+                     create_buffer, create_sample, create_sequence_sample)
 
 # Bounds for the squashed log-standard-deviation of the policy distribution.
 # The raw output is tanh-squashed and then rescaled into this range to keep
 # the distribution numerically stable while remaining expressive.
 LOG_STD_MIN = -5
 LOG_STD_MAX = 2
+
+
+def _h(x: jax.Array, eps: float) -> jax.Array:
+    """Invertible value rescaling h (Pohlen 2018 / R2D2 §2.3)."""
+    return jnp.sign(x) * (jnp.sqrt(jnp.abs(x) + 1.0) - 1.0) + eps * x
+
+
+def _h_inv(z: jax.Array, eps: float) -> jax.Array:
+    """Inverse of _h."""
+    n = jnp.sqrt(4.0 * eps * (jnp.abs(z) + 1.0 + eps) + 1.0) - 1.0
+    return jnp.sign(z) * ((n / (2.0 * eps)) ** 2 - 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -92,9 +103,9 @@ class MLPFeatureExtractor(nnx.Module):
         rngs: nnx.Rngs,
     ):
         dims = [input_dim] + list(hidden_dims)
-        self.layers = nnx.List(
-            [nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)]
-        )
+        self.layers = [
+            nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)
+        ]
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Encode a batch of observations.
@@ -148,9 +159,9 @@ class Head(nnx.Module):
         rngs: nnx.Rngs,
     ):
         dims = [feature_dim] + list(hidden_dims) + [output_dim]
-        self.layers = nnx.List(
-            [nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)]
-        )
+        self.layers = [
+            nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)
+        ]
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Map a feature batch to the output space.
@@ -166,24 +177,129 @@ class Head(nnx.Module):
         return self.layers[-1](x)
 
 
+class IdentityMemory(nnx.Module):
+    """No-op memory module — passes features through unchanged.
+
+    Structurally identical to ``LSTMMemory`` so the factory can treat all
+    memory slots uniformly.  The carry is a zero-length array that costs
+    nothing to carry through optimisers and env-step loops.
+
+    Use this (or ``None`` in ``create_iqlearn``) to keep purely feedforward
+    behaviour while preserving the three-module (FE → memory → head) structure.
+
+    Args:
+        feature_dim: Dimensionality of the incoming feature vector.  Stored
+            so ``initial_carry`` can produce a correctly-shaped dummy carry.
+        rngs: Accepted for API compatibility; not used (no parameters).
+    """
+
+    def __init__(self, feature_dim: int, *, rngs: nnx.Rngs):
+        self.feature_dim = feature_dim
+
+    def __call__(self, x: jax.Array, carry: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return carry, x
+
+    def scan(self, xs: jax.Array, carry: jax.Array) -> tuple[jax.Array, jax.Array]:
+        """Run over a sequence — identity, so carry and output are unchanged.
+
+        Args:
+            xs: Feature sequence of shape ``(batch, T, feature_dim)``.
+            carry: Current carry ``(batch, 0)``.
+
+        Returns:
+            ``(carry, xs)`` — carry unchanged, output equals input.
+        """
+        return carry, xs
+
+    def initial_carry(self, batch_size: int) -> jax.Array:
+        return jnp.zeros((batch_size, 0))
+
+
+class LSTMMemory(nnx.Module):
+    """LSTM recurrent memory — wraps ``nnx.LSTMCell``.
+
+    Inserts an LSTM between the feature extractor and the head.  The carry is
+    an ``LSTMState(c, h)`` NamedTuple where each component has shape
+    ``(batch, hidden_dim)``.
+
+    The caller is responsible for threading the carry between timesteps during
+    environment interaction (via ``IQLearnState.actor_online_carry``) and
+    during sequence training (via explicit carry arguments).
+
+    Args:
+        feature_dim: Dimensionality of the incoming feature vector (i.e. the
+            output of the feature extractor).
+        hidden_dim: Number of LSTM hidden units.
+        rngs: Flax NNX RNG container used to initialise cell parameters.
+    """
+
+    def __init__(self, feature_dim: int, hidden_dim: int, *, rngs: nnx.Rngs):
+        self.cell = nnx.LSTMCell(feature_dim, hidden_dim, rngs=rngs)
+        self.hidden_dim = hidden_dim
+
+    def __call__(self, x: jax.Array, carry) -> tuple[any, jax.Array]:
+        """Run one LSTM step.
+
+        Args:
+            x: Feature batch of shape ``(batch, feature_dim)``.
+            carry: ``LSTMState(c, h)`` from the previous step, each component
+                of shape ``(batch, hidden_dim)``.
+
+        Returns:
+            ``(new_carry, y)`` where ``y`` has shape ``(batch, hidden_dim)``.
+        """
+        carry = (carry[:, : self.hidden_dim], carry[:, self.hidden_dim :])
+        new_carry, y = self.cell(carry, x)
+        new_carry = jnp.concatenate(new_carry, axis=1)
+        return new_carry, y
+
+    def scan(self, xs: jax.Array, initial_carry) -> tuple[any, jax.Array]:
+        """Run the LSTM over a full sequence via ``jax.lax.scan``.
+
+        Args:
+            xs: Feature sequence of shape ``(batch, T, feature_dim)``.
+            initial_carry: ``LSTMState(c, h)`` each of shape ``(batch, hidden_dim)``.
+
+        Returns:
+            ``(final_carry, ys)`` where ``ys`` has shape ``(batch, T, hidden_dim)``.
+        """
+
+        def step(carry, x_t):
+            carry = (carry[:, : self.hidden_dim], carry[:, self.hidden_dim :])
+            new_carry, y_t = self.cell(carry, x_t)
+            new_carry = jnp.concatenate(new_carry, axis=1)
+            return new_carry, y_t
+
+        xs_T = xs.swapaxes(0, 1)  # (T, batch, feature_dim)
+        final_carry, ys_T = jax.lax.scan(step, initial_carry, xs_T)
+        return final_carry, ys_T.swapaxes(0, 1)  # (batch, T, hidden_dim)
+
+    def initial_carry(self, batch_size: int):
+        """Return zero-initialised (c, h) each of shape ``(batch_size, hidden_dim)``."""
+        return jnp.zeros((batch_size, self.hidden_dim * 2))
+
+
 # ---------------------------------------------------------------------------
 # State / function / graph containers
 # ---------------------------------------------------------------------------
 
 
 class NetworkState(NamedTuple):
-    """Flax NNX graph states for a feature-extractor + head pair.
+    """Flax NNX graph states for a feature-extractor + memory + head triple.
 
-    Both fields are ``nnx.GraphState`` objects produced by ``nnx.split``.
+    All fields are ``nnx.GraphState`` objects produced by ``nnx.split``.
     Together they form a JAX pytree, so optimizer updates and EMA target
     updates work on them transparently via ``jax.tree.map``.
 
     Attributes:
         fe: Graph state of the feature extractor module.
+        memory: Graph state of the recurrent memory module (empty for
+            :class:`IdentityMemory`).
         head: Graph state of the task-specific head module.
     """
 
     fe: nnx.GraphState
+    memory: nnx.GraphState
     head: nnx.GraphState
 
 
@@ -204,7 +320,7 @@ class TwinCriticState(NamedTuple):
 
 
 class NetworkGraphs(NamedTuple):
-    """Flax NNX graph definitions for a feature-extractor + head pair.
+    """Flax NNX graph definitions for a feature-extractor + memory + head triple.
 
     These are the static (non-parameter) graph descriptions produced by
     ``nnx.split`` and consumed by ``nnx.merge`` to reconstruct live modules
@@ -212,10 +328,12 @@ class NetworkGraphs(NamedTuple):
 
     Attributes:
         fe: Graph definition of the feature extractor.
+        memory: Graph definition of the recurrent memory module.
         head: Graph definition of the head.
     """
 
     fe: nnx.GraphDef
+    memory: nnx.GraphDef
     head: nnx.GraphDef
 
 
@@ -254,6 +372,7 @@ class IQLearnState(NamedTuple):
     alpha: jax.Array
     log_alpha: jax.Array
     online_buffer: Buffer
+    actor_online_carry: any
 
 
 class IQLearnFunctions(NamedTuple):
@@ -354,6 +473,8 @@ class DebugFunctions(NamedTuple):
     calculate_td_lambda: Callable
     get_q: Callable
     get_entropy: Callable
+    run_actor_scan: Callable
+    run_critic_scan: Callable
 
 
 class Hyperparameters(NamedTuple):
@@ -413,6 +534,14 @@ class Hyperparameters(NamedTuple):
     tau: float = 0.005
     lam: float = 0.5  # lambda is a reserved keyword...
     lambda_truncation: int = 15
+    # R2D2 sequence replay (sequence_length=1 keeps the IID code path)
+    sequence_length: int = 1
+    burn_in_length: int = 0
+    # n-step bootstrapping (1 = standard 1-step TD)
+    n_step: int = 1
+    # Invertible value rescaling (Pohlen 2018 / R2D2 §2.3)
+    value_rescaling: bool = False
+    value_rescaling_eps: float = 1e-3
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +575,11 @@ reward_key = "rewards"
 terminated_key = "terminated"
 return_key = "returns"
 behaviour_key = "behaviour_weight"
+actor_carry_key = "carry_actor"
+critic_q1_carry_key = "carry_critic_q1"
+critic_q2_carry_key = "carry_critic_q2"
+mc_critic_q1_carry_key = "carry_mc_critic_q1"
+mc_critic_q2_carry_key = "carry_mc_critic_q2"
 
 
 def create_iqlearn(
@@ -457,6 +591,11 @@ def create_iqlearn(
     critic_q2_feature_extractor: nnx.Module,
     mc_critic_q1_feature_extractor: nnx.Module | None = None,
     mc_critic_q2_feature_extractor: nnx.Module | None = None,
+    actor_memory: nnx.Module | None = None,
+    critic_q1_memory: nnx.Module | None = None,
+    critic_q2_memory: nnx.Module | None = None,
+    mc_critic_q1_memory: nnx.Module | None = None,
+    mc_critic_q2_memory: nnx.Module | None = None,
     obs_key: str = "observations",
     action_key: str = "actions",
     action_scale: float | jax.Array = 1,
@@ -567,6 +706,98 @@ def create_iqlearn(
         this_keys=this_keys,
         next_keys=next_keys,
     )
+
+    # Synthesise IdentityMemory for any slot where no memory was provided.
+    # All memory modules share the same RNG; they have no learned parameters
+    # for IdentityMemory, and LSTMMemory weight divergence is not required.
+    _mem_rngs = nnx.Rngs(0)
+
+    # Infer FE output dims via dummy forward pass (before split)
+    dummy_obs = jnp.zeros((1,) + buffer.info[obs_key].shape[1:])
+    actor_feature_dim = actor_feature_extractor(dummy_obs).shape[-1]
+    critic_q1_feature_dim = critic_q1_feature_extractor(dummy_obs).shape[-1]
+    critic_q2_feature_dim = critic_q2_feature_extractor(dummy_obs).shape[-1]
+    if approximate_mc:
+        mc_critic_q1_feature_dim = mc_critic_q1_feature_extractor(dummy_obs).shape[-1]
+        mc_critic_q2_feature_dim = mc_critic_q2_feature_extractor(dummy_obs).shape[-1]
+
+    # Synthesise IdentityMemory when caller passes None
+    if actor_memory is None:
+        actor_memory = IdentityMemory(actor_feature_dim, rngs=_mem_rngs)
+    if critic_q1_memory is None:
+        critic_q1_memory = IdentityMemory(critic_q1_feature_dim, rngs=_mem_rngs)
+    if critic_q2_memory is None:
+        critic_q2_memory = IdentityMemory(critic_q2_feature_dim, rngs=_mem_rngs)
+    if approximate_mc:
+        if mc_critic_q1_memory is None:
+            mc_critic_q1_memory = IdentityMemory(
+                mc_critic_q1_feature_dim, rngs=_mem_rngs
+            )
+        if mc_critic_q2_memory is None:
+            mc_critic_q2_memory = IdentityMemory(
+                mc_critic_q2_feature_dim, rngs=_mem_rngs
+            )
+
+    # Infer memory output dims via second dummy forward pass
+    _dummy_feat_actor = actor_feature_extractor(dummy_obs)
+    _dummy_carry_actor = actor_memory.initial_carry(1)
+    _, _dummy_mem_out_actor = actor_memory(_dummy_feat_actor, _dummy_carry_actor)
+    actor_memory_out_dim = _dummy_mem_out_actor.shape[-1]
+
+    _dummy_feat_q1 = critic_q1_feature_extractor(dummy_obs)
+    _dummy_carry_q1 = critic_q1_memory.initial_carry(1)
+    _, _dummy_mem_out_q1 = critic_q1_memory(_dummy_feat_q1, _dummy_carry_q1)
+    critic_q1_memory_out_dim = _dummy_mem_out_q1.shape[-1]
+
+    _dummy_feat_q2 = critic_q2_feature_extractor(dummy_obs)
+    _dummy_carry_q2 = critic_q2_memory.initial_carry(1)
+    _, _dummy_mem_out_q2 = critic_q2_memory(_dummy_feat_q2, _dummy_carry_q2)
+    critic_q2_memory_out_dim = _dummy_mem_out_q2.shape[-1]
+
+    if approximate_mc:
+        _dummy_feat_mc_q1 = mc_critic_q1_feature_extractor(dummy_obs)
+        _dummy_carry_mc_q1 = mc_critic_q1_memory.initial_carry(1)
+        _, _dummy_mem_out_mc_q1 = mc_critic_q1_memory(
+            _dummy_feat_mc_q1, _dummy_carry_mc_q1
+        )
+        mc_critic_q1_memory_out_dim = _dummy_mem_out_mc_q1.shape[-1]
+
+        _dummy_feat_mc_q2 = mc_critic_q2_feature_extractor(dummy_obs)
+        _dummy_carry_mc_q2 = mc_critic_q2_memory.initial_carry(1)
+        _, _dummy_mem_out_mc_q2 = mc_critic_q2_memory(
+            _dummy_feat_mc_q2, _dummy_carry_mc_q2
+        )
+        mc_critic_q2_memory_out_dim = _dummy_mem_out_mc_q2.shape[-1]
+
+    # Carry templates (shape (1, *carry_shape)) used to build zero carries at
+    # any batch size without calling initial_carry again inside JIT.
+    _actor_carry_template = actor_memory.initial_carry(1)
+    _critic_q1_carry_template = critic_q1_memory.initial_carry(1)
+    _critic_q2_carry_template = critic_q2_memory.initial_carry(1)
+    if approximate_mc:
+        _mc_critic_q1_carry_template = mc_critic_q1_memory.initial_carry(1)
+        _mc_critic_q2_carry_template = mc_critic_q2_memory.initial_carry(1)
+
+    def _make_zero_carry(template, batch_size: int):
+        return jax.tree.map(lambda t: jnp.zeros((batch_size,) + t.shape[1:]), template)
+
+    def _make_actor_carry(batch_size: int):
+        return _make_zero_carry(_actor_carry_template, batch_size)
+
+    def _make_critic_q1_carry(batch_size: int):
+        return _make_zero_carry(_critic_q1_carry_template, batch_size)
+
+    def _make_critic_q2_carry(batch_size: int):
+        return _make_zero_carry(_critic_q2_carry_template, batch_size)
+
+    if approximate_mc:
+
+        def _make_mc_critic_q1_carry(batch_size: int):
+            return _make_zero_carry(_mc_critic_q1_carry_template, batch_size)
+
+        def _make_mc_critic_q2_carry(batch_size: int):
+            return _make_zero_carry(_mc_critic_q2_carry_template, batch_size)
+
     # Online buffer: same obs/action shapes as the expert buffer, plus scalar
     # reward and terminated fields written by run_env_step / train_sac.
     online_shapes = {
@@ -575,9 +806,18 @@ def create_iqlearn(
         return_key: (),
         terminated_key: (),
         behaviour_key: (),
+        actor_carry_key: _actor_carry_template.shape[1:],
+        critic_q1_carry_key: _critic_q1_carry_template.shape[1:],
+        critic_q2_carry_key: _critic_q2_carry_template.shape[1:],
     }
+
     if not is_discrete:
         online_shapes[unsquashed_action_key] = online_shapes[action_key]
+    if approximate_mc:
+        online_shapes[mc_critic_q1_carry_key] = _mc_critic_q1_carry_template.shape[1:]
+        online_shapes[mc_critic_q2_carry_key] = _mc_critic_q2_carry_template.shape[1:]
+
+    # TODO: this is old, non LSTM code, replace in create_buffer
     online_this_keys = [obs_key, action_key, reward_key, terminated_key]
     online_next_keys = [obs_key]
     online_buffer, online_buffer_functions = create_buffer(
@@ -587,16 +827,75 @@ def create_iqlearn(
         online_this_keys,
         online_next_keys,
     )
+    # set last index in buffer to terminated for correct carry burn in
+    online_buffer = online_buffer._replace(
+        info={
+            **online_buffer.info,
+            terminated_key: online_buffer.info[terminated_key].at[-1].set(1),
+        }
+    )
+
     online_buffer_sample = online_buffer_functions.sample
+    _seq_keys = [obs_key, action_key, reward_key, terminated_key]
     if approximate_mc:
-        online_mc_this_keys = [obs_key, action_key, return_key, behaviour_key]
-        online_mc_next_keys = []
-        online_buffer_mc_sample = create_sample(
-            online_buffer.size,
-            params.online_batch_size,
-            online_mc_this_keys,
-            online_mc_next_keys,
-        )
+        _seq_keys.append(behaviour_key)
+    if params.sequence_length > 1 or params.burn_in_length > 0:
+        _seq_keys.append(actor_carry_key)
+        _seq_keys.append(critic_q1_carry_key)
+        _seq_keys.append(critic_q2_carry_key)
+        if approximate_mc:
+            _seq_keys.append(mc_critic_q1_carry_key)
+            _seq_keys.append(mc_critic_q2_carry_key)
+    online_sequence_sample_fn = create_sequence_sample(
+        params.online_buffer_size,
+        params.online_batch_size,
+        params.burn_in_length,
+        params.sequence_length
+        + 1,  # +1 to always have the next obs available for updates
+        _seq_keys,
+        terminal_key=terminated_key,
+    )
+
+    # burn-in helper
+    def sample_with_burn_in(online_buffer, actor, critic, key_sample):
+        _B = params.burn_in_length
+        _SL = params.sequence_length + 1
+        _bs = params.online_batch_size
+
+        seq, seq_idx = online_sequence_sample_fn(online_buffer, key_sample)
+        obs = seq.info[obs_key][:, _B:]
+        act = seq.info[action_key][:, _B:]
+        rew = seq.info[reward_key][:, _B:].reshape(_bs, _SL)
+        done = seq.info[terminated_key][:, _B:].reshape(_bs, _SL)
+        mask = seq.mask[:, _B:]
+
+        if _B > 0:
+            _burn_obs = seq.info[obs_key][:, :_B]
+            _burn_ac, _ = jax.lax.stop_gradient(
+                run_actor_scan(actor, _burn_obs, _make_actor_carry(_bs))
+            )
+            if is_discrete:
+                _burn_cq1, _burn_cq2, _ = jax.lax.stop_gradient(
+                    run_critic_scan(critic, _burn_obs, False, None, None)
+                )
+            else:
+                _burn_cq1, _burn_cq2, _ = jax.lax.stop_gradient(
+                    run_critic_scan(
+                        critic,
+                        _burn_obs,
+                        seq.info[action_key][:, :_B],
+                        False,
+                        None,
+                        None,
+                    )
+                )
+        else:
+            _burn_ac = _make_actor_carry(_bs)
+            _burn_cq1 = _make_critic_q1_carry(_bs)
+            _burn_cq2 = _make_critic_q2_carry(_bs)
+        return obs, act, rew, done, mask, _burn_ac, _burn_cq1, _burn_cq2, seq_idx
+
+    if approximate_mc:
         # Pre-initialise every behaviour_key slot to 1.0 so that slots which
         # have never been written by run_env_step (pre-fill and as-yet-unwritten
         # slots) contribute an IS denominator of 1.0 rather than 0.0.
@@ -609,95 +908,92 @@ def create_iqlearn(
             }
         )
 
-    # Infer feature dims via dummy forward pass (before split)
-    dummy_obs = jnp.zeros((1,) + buffer.info[obs_key].shape[1:])
-    actor_feature_dim = actor_feature_extractor(dummy_obs).shape[-1]
-    critic_q1_feature_dim = critic_q1_feature_extractor(dummy_obs).shape[-1]
-    critic_q2_feature_dim = critic_q2_feature_extractor(dummy_obs).shape[-1]
-    if approximate_mc:
-        mc_critic_q1_feature_dim = mc_critic_q1_feature_extractor(dummy_obs).shape[-1]
-        mc_critic_q2_feature_dim = mc_critic_q2_feature_extractor(dummy_obs).shape[-1]
-
     # Create heads — discrete and continuous differ only in output_dim and
     # whether actions are concatenated to features before the head.
     rngs = nnx.Rngs(0)
     if is_discrete:
         actor_head_model = Head(
-            actor_feature_dim,
+            actor_memory_out_dim,
             actor_head_dims,
             action_dim,
             rngs=rngs,
         )
         critic_q1_head_model = Head(
-            critic_q1_feature_dim,
+            critic_q1_memory_out_dim,
             critic_head_dims,
             action_dim,
             rngs=rngs,
         )
         critic_q2_head_model = Head(
-            critic_q2_feature_dim,
+            critic_q2_memory_out_dim,
             critic_head_dims,
             action_dim,
             rngs=rngs,
         )
         if approximate_mc:
             mc_critic_q1_head_model = Head(
-                mc_critic_q1_feature_dim,
+                mc_critic_q1_memory_out_dim,
                 mc_critic_head_dims,
                 action_dim,
                 rngs=rngs,
             )
             mc_critic_q2_head_model = Head(
-                mc_critic_q2_feature_dim,
+                mc_critic_q2_memory_out_dim,
                 mc_critic_head_dims,
                 action_dim,
                 rngs=rngs,
             )
     else:
         actor_head_model = Head(
-            actor_feature_dim,
+            actor_memory_out_dim,
             actor_head_dims,
             2 * action_dim,
             rngs=rngs,
         )
         # For continuous critics, features and actions are concatenated before
-        # the head, so input_dim = feature_dim + action_dim, output_dim = 1.
+        # the head, so input_dim = memory_out_dim + action_dim, output_dim = 1.
         critic_q1_head_model = Head(
-            critic_q1_feature_dim + action_dim,
+            critic_q1_memory_out_dim + action_dim,
             critic_head_dims,
             1,
             rngs=rngs,
         )
         critic_q2_head_model = Head(
-            critic_q2_feature_dim + action_dim,
+            critic_q2_memory_out_dim + action_dim,
             critic_head_dims,
             1,
             rngs=rngs,
         )
         if approximate_mc:
             mc_critic_q1_head_model = Head(
-                mc_critic_q1_feature_dim + action_dim,
+                mc_critic_q1_memory_out_dim + action_dim,
                 mc_critic_head_dims,
                 1,
                 rngs=rngs,
             )
             mc_critic_q2_head_model = Head(
-                mc_critic_q2_feature_dim + action_dim,
+                mc_critic_q2_memory_out_dim + action_dim,
                 mc_critic_head_dims,
                 1,
                 rngs=rngs,
             )
 
-    # Split all six modules into (graph_def, state)
+    # Split all modules into (graph_def, state) — FE, memory, and head per network
     actor_fe_graph, actor_fe_st = nnx.split(actor_feature_extractor)
+    actor_memory_graph, actor_memory_st = nnx.split(actor_memory)
     actor_head_graph, actor_head_st = nnx.split(actor_head_model)
     critic_q1_fe_graph, critic_q1_fe_st = nnx.split(critic_q1_feature_extractor)
+    critic_q1_memory_graph, critic_q1_memory_st = nnx.split(critic_q1_memory)
     critic_q1_head_graph, critic_q1_head_st = nnx.split(critic_q1_head_model)
     critic_q2_fe_graph, critic_q2_fe_st = nnx.split(critic_q2_feature_extractor)
+    critic_q2_memory_graph, critic_q2_memory_st = nnx.split(critic_q2_memory)
     critic_q2_head_graph, critic_q2_head_st = nnx.split(critic_q2_head_model)
     if approximate_mc:
         mc_critic_q1_fe_graph, mc_critic_q1_fe_st = nnx.split(
             mc_critic_q1_feature_extractor
+        )
+        mc_critic_q1_memory_graph, mc_critic_q1_memory_st = nnx.split(
+            mc_critic_q1_memory
         )
         mc_critic_q1_head_graph, mc_critic_q1_head_st = nnx.split(
             mc_critic_q1_head_model
@@ -705,17 +1001,28 @@ def create_iqlearn(
         mc_critic_q2_fe_graph, mc_critic_q2_fe_st = nnx.split(
             mc_critic_q2_feature_extractor
         )
+        mc_critic_q2_memory_graph, mc_critic_q2_memory_st = nnx.split(
+            mc_critic_q2_memory
+        )
         mc_critic_q2_head_graph, mc_critic_q2_head_st = nnx.split(
             mc_critic_q2_head_model
         )
 
-    actor_state = NetworkState(actor_fe_st, actor_head_st)
-    critic_q1_state = NetworkState(critic_q1_fe_st, critic_q1_head_st)
-    critic_q2_state = NetworkState(critic_q2_fe_st, critic_q2_head_st)
+    actor_state = NetworkState(actor_fe_st, actor_memory_st, actor_head_st)
+    critic_q1_state = NetworkState(
+        critic_q1_fe_st, critic_q1_memory_st, critic_q1_head_st
+    )
+    critic_q2_state = NetworkState(
+        critic_q2_fe_st, critic_q2_memory_st, critic_q2_head_st
+    )
     critic_state = TwinCriticState(critic_q1_state, critic_q2_state)
     if approximate_mc:
-        mc_critic_q1_state = NetworkState(mc_critic_q1_fe_st, mc_critic_q1_head_st)
-        mc_critic_q2_state = NetworkState(mc_critic_q2_fe_st, mc_critic_q2_head_st)
+        mc_critic_q1_state = NetworkState(
+            mc_critic_q1_fe_st, mc_critic_q1_memory_st, mc_critic_q1_head_st
+        )
+        mc_critic_q2_state = NetworkState(
+            mc_critic_q2_fe_st, mc_critic_q2_memory_st, mc_critic_q2_head_st
+        )
         mc_critic_state = TwinCriticState(mc_critic_q1_state, mc_critic_q2_state)
 
     # Optimizers: actor operates on NetworkState; critic on TwinCriticState.
@@ -739,6 +1046,9 @@ def create_iqlearn(
             state,
         )
 
+    # Initial actor online carry (batch_size=1 for single-step env interaction)
+    actor_online_carry_init = remove_weak_types(actor_memory.initial_carry(1))
+
     iqlearn = IQLearnState(
         remove_weak_types(actor_state),
         remove_weak_types(critic_state),
@@ -753,17 +1063,48 @@ def create_iqlearn(
         remove_weak_types(jnp.exp(log_alpha)),
         remove_weak_types(log_alpha),
         remove_weak_types(online_buffer),
+        actor_online_carry_init,
     )
 
     # ------------------------------------------------------------------
     # Shared helper: actor forward pass (same for both action space types)
     # ------------------------------------------------------------------
 
-    def run_actor(actor: NetworkState, x: jax.Array) -> jax.Array:
-        """Reconstruct and run the actor (FE then head) on observation batch x."""
+    def run_actor(actor: NetworkState, x: jax.Array, carry) -> tuple[any, jax.Array]:
+        """Reconstruct and run the actor (FE → memory → head) on observation batch x."""
         fe = nnx.merge(actor_fe_graph, actor.fe)
+        memory = nnx.merge(actor_memory_graph, actor.memory)
         head = nnx.merge(actor_head_graph, actor.head)
-        return head(fe(x))
+        new_carry, mem_out = memory(fe(x), carry)
+        return new_carry, head(mem_out)
+
+    def run_actor_scan(
+        actor: NetworkState, xs: jax.Array, initial_carry
+    ) -> tuple[any, jax.Array]:
+        """Run the actor over a sequence of observations.
+
+        Applies the feature extractor to all timesteps in one batched call,
+        then threads the carry through the memory via ``memory.scan``, then
+        applies the head to all memory outputs.
+
+        Args:
+            actor: Actor network state.
+            xs: Observation sequence of shape ``(batch, T, *obs_shape)``.
+            initial_carry: Initial memory carry from ``memory.initial_carry``.
+
+        Returns:
+            ``(final_carry, ys)`` where ``ys`` has shape
+            ``(batch, T, output_dim)``.
+        """
+        fe = nnx.merge(actor_fe_graph, actor.fe)
+        memory = nnx.merge(actor_memory_graph, actor.memory)
+        head = nnx.merge(actor_head_graph, actor.head)
+        batch, T = xs.shape[0], xs.shape[1]
+        flat_feats = fe(xs.reshape(batch * T, *xs.shape[2:]))
+        feats = flat_feats.reshape(batch, T, -1)
+        final_carry, mem_outs = memory.scan(feats, initial_carry)
+        ys = head(mem_outs.reshape(batch * T, -1)).reshape(batch, T, -1)
+        return final_carry, ys
 
     # ------------------------------------------------------------------
     # Action-space-specific helpers
@@ -772,7 +1113,11 @@ def create_iqlearn(
     if is_discrete:
 
         def run_critic(
-            critic: TwinCriticState, x: jax.Array, use_mc: bool = False
+            critic: TwinCriticState,
+            x: jax.Array,
+            carry1: jax.Array,
+            carry2: jax.Array,
+            use_mc: bool = False,
         ) -> jax.Array:
             """Reconstruct and run both discrete critic branches.
 
@@ -783,6 +1128,10 @@ def create_iqlearn(
             fe1 = nnx.merge(
                 mc_critic_q1_fe_graph if use_mc else critic_q1_fe_graph, critic.q1.fe
             )
+            mem1 = nnx.merge(
+                mc_critic_q1_memory_graph if use_mc else critic_q1_memory_graph,
+                critic.q1.memory,
+            )
             head1 = nnx.merge(
                 mc_critic_q1_head_graph if use_mc else critic_q1_head_graph,
                 critic.q1.head,
@@ -790,17 +1139,96 @@ def create_iqlearn(
             fe2 = nnx.merge(
                 mc_critic_q2_fe_graph if use_mc else critic_q2_fe_graph, critic.q2.fe
             )
+            mem2 = nnx.merge(
+                mc_critic_q2_memory_graph if use_mc else critic_q2_memory_graph,
+                critic.q2.memory,
+            )
             head2 = nnx.merge(
                 mc_critic_q2_head_graph if use_mc else critic_q2_head_graph,
                 critic.q2.head,
             )
-            q1 = head1(fe1(x))  # (batch, num_actions)
-            q2 = head2(fe2(x))  # (batch, num_actions)
-            return jnp.stack([q1, q2], axis=-1)  # (batch, num_actions, 2)
+            batch = x.shape[0]
+            new_carry1, mem_out1 = mem1(fe1(x), carry1)
+            new_carry2, mem_out2 = mem2(fe2(x), carry2)
+            q1 = head1(mem_out1)  # (batch, num_actions)
+            q2 = head2(mem_out2)  # (batch, num_actions)
+            return (
+                jnp.stack([q1, q2], axis=-1),
+                new_carry1,
+                new_carry2,
+            )  # (batch, num_actions, 2)
+
+        def run_critic_scan(
+            critic: TwinCriticState,
+            xs: jax.Array,
+            use_mc: bool = False,
+            initial_carry_q1=None,
+            initial_carry_q2=None,
+        ) -> tuple[any, any, jax.Array]:
+            """Run both discrete critic branches over an observation sequence.
+
+            Args:
+                critic: Twin-critic network state.
+                xs: Observation sequence of shape ``(batch, T, *obs_shape)``.
+                use_mc: If True, use MC critic graph definitions.
+                initial_carry_q1: Initial carry for Q1 branch.  If ``None``,
+                    a zero carry is created from the carry template.
+                initial_carry_q2: Initial carry for Q2 branch.  If ``None``,
+                    a zero carry is created from the carry template.
+
+            Returns:
+                ``(final_carry_q1, final_carry_q2, qs)`` where ``qs`` has
+                shape ``(batch, T, num_actions, 2)``.
+            """
+            fe1 = nnx.merge(
+                mc_critic_q1_fe_graph if use_mc else critic_q1_fe_graph, critic.q1.fe
+            )
+            mem1 = nnx.merge(
+                mc_critic_q1_memory_graph if use_mc else critic_q1_memory_graph,
+                critic.q1.memory,
+            )
+            head1 = nnx.merge(
+                mc_critic_q1_head_graph if use_mc else critic_q1_head_graph,
+                critic.q1.head,
+            )
+            fe2 = nnx.merge(
+                mc_critic_q2_fe_graph if use_mc else critic_q2_fe_graph, critic.q2.fe
+            )
+            mem2 = nnx.merge(
+                mc_critic_q2_memory_graph if use_mc else critic_q2_memory_graph,
+                critic.q2.memory,
+            )
+            head2 = nnx.merge(
+                mc_critic_q2_head_graph if use_mc else critic_q2_head_graph,
+                critic.q2.head,
+            )
+            batch, T = xs.shape[0], xs.shape[1]
+            flat_xs = xs.reshape(batch * T, *xs.shape[2:])
+            feats1 = fe1(flat_xs).reshape(batch, T, -1)
+            feats2 = fe2(flat_xs).reshape(batch, T, -1)
+            if initial_carry_q1 is None:
+                initial_carry_q1 = (
+                    _make_mc_critic_q1_carry(batch)
+                    if use_mc
+                    else _make_critic_q1_carry(batch)
+                )
+            if initial_carry_q2 is None:
+                initial_carry_q2 = (
+                    _make_mc_critic_q2_carry(batch)
+                    if use_mc
+                    else _make_critic_q2_carry(batch)
+                )
+            fc1, mem_outs1 = mem1.scan(feats1, initial_carry_q1)
+            fc2, mem_outs2 = mem2.scan(feats2, initial_carry_q2)
+            q1 = head1(mem_outs1.reshape(batch * T, -1)).reshape(batch, T, -1)
+            q2 = head2(mem_outs2.reshape(batch * T, -1)).reshape(batch, T, -1)
+            return fc1, fc2, jnp.stack([q1, q2], axis=-1)  # (batch, T, num_actions, 2)
 
         def get_q_both(
             critic: TwinCriticState,
             x: jax.Array,
+            carry1: jax.Array,
+            carry2: jax.Array,
             expert_actions: jax.Array,
             use_mc: bool = False,
         ) -> Tuple[jax.Array, jax.Array]:
@@ -815,17 +1243,23 @@ def create_iqlearn(
             Returns:
                 ``(q1, q2)`` each of shape ``(batch,)``.
             """
-            q_twin = run_critic(critic, x, use_mc)  # (batch, num_actions, 2)
+            q_twin, new_carry1, new_carry2 = run_critic(
+                critic, x, carry1, carry2, use_mc
+            )  # (batch, num_actions, 2)
             indices = jnp.round(expert_actions.reshape(-1)).astype(jnp.int32)
             batch = q_twin.shape[0]
             return (
                 q_twin[jnp.arange(batch), indices, 0],  # (batch,)
                 q_twin[jnp.arange(batch), indices, 1],
+                new_carry1,
+                new_carry2,
             )  # (batch,)
 
         def get_q(
             critic: TwinCriticState,
             x: jax.Array,
+            carry1: jax.Array,
+            carry2: jax.Array,
             expert_actions: jax.Array,
             use_mc: bool = False,
         ) -> jax.Array:
@@ -840,14 +1274,19 @@ def create_iqlearn(
             Returns:
                 Per-transition Q-value of shape ``(batch,)``.
             """
-            q1, q2 = get_q_both(critic, x, expert_actions, use_mc)
-            return jnp.minimum(q1, q2)
+            q1, q2, new_carry1, new_carry2 = get_q_both(
+                critic, x, carry1, carry2, expert_actions, use_mc
+            )
+            return jnp.minimum(q1, q2), new_carry1, new_carry2
 
         def get_v(
             actor: NetworkState,
             critic: TwinCriticState,
             alpha: jax.Array,
             x: jax.Array,
+            actor_carry: jax.Array,
+            q_carry1: jax.Array,
+            q_carry2: jax.Array,
             key: jax.Array,
             include_entropy: bool = True,
             include_log: bool = False,
@@ -875,35 +1314,45 @@ def create_iqlearn(
                 When ``include_log=False``: value array of shape ``(batch,)``.
                 When ``include_log=True``: ``(values, metrics_dict)``.
             """
-            logits = run_actor(actor, x)  # (batch, num_actions)
+            new_actor_carry, logits = run_actor(actor, x, actor_carry)
             probs = jax.nn.softmax(logits)  # (batch, num_actions)
             log_probs = jax.nn.log_softmax(logits)  # (batch, num_actions)
-            q_twin = run_critic(critic, x, use_mc)  # (batch, num_actions, 2)
+            q_twin, new_q_carry1, new_q_carry2 = run_critic(
+                critic, x, q_carry1, q_carry2, use_mc
+            )  # (batch, num_actions, 2)
             q_min = jnp.minimum(q_twin[..., 0], q_twin[..., 1])  # (batch, num_actions)
             entropy = -(probs * log_probs).sum(-1)  # (batch,) — exact H(π)
             if include_entropy:
                 v = (probs * q_min).sum(-1) + alpha * entropy
                 if include_log:
-                    return v, {
-                        "q": (probs * q_min).sum(-1).mean(),
-                        "entropy": entropy.mean(),
-                    }
-                return v
+                    return (
+                        v,
+                        (new_actor_carry, new_q_carry1, new_q_carry2),
+                        {
+                            "q": (probs * q_min).sum(-1).mean(),
+                            "entropy": entropy.mean(),
+                        },
+                    )
+                return v, (new_actor_carry, new_q_carry1, new_q_carry2)
             else:
-                return (probs * q_min).sum(-1)
+                return (probs * q_min).sum(-1), (
+                    new_actor_carry,
+                    new_q_carry1,
+                    new_q_carry2,
+                )
 
-        def get_entropy(actor, obs, _key):
-            logits = run_actor(actor, obs)  # (batch, num_actions)
+        def get_entropy(actor, obs, actor_carry, _key):
+            _, logits = run_actor(actor, obs, actor_carry)
             probs = jax.nn.softmax(logits)  # (batch, num_actions)
             log_probs = jax.nn.log_softmax(logits)  # (batch, num_actions)
             entropy = -(probs * log_probs).sum(-1)  # (batch,) — exact H(π)
             return entropy
 
-
         @partial(jax.jit, static_argnames=["deterministic", "return_prob"])
         def predict(
             iqlearn: IQLearnState,
             obs: jax.Array,
+            carry: jax.Array,
             key: jax.Array = jnp.array(0),
             deterministic: bool = False,
             return_prob: bool = False,
@@ -921,19 +1370,25 @@ def create_iqlearn(
                 Action index as a ``float32`` scalar.
             """
             obs_batch = jnp.expand_dims(obs, 0)
-            logits = run_actor(iqlearn.actor, obs_batch)[0]  # (num_actions,)
+            new_carry, logits_batch = run_actor(iqlearn.actor, obs_batch, carry)
+            logits = logits_batch[0]  # (num_actions,)
             if deterministic:
                 action = jnp.argmax(logits)
             else:
                 action = jax.random.categorical(key, logits)
             if return_prob:
-                return action.astype(jnp.float32), jax.nn.softmax(logits)[action]
-            return action.astype(jnp.float32)
+                return (
+                    action.astype(jnp.float32),
+                    new_carry,
+                    jax.nn.softmax(logits)[action],
+                )
+            return action.astype(jnp.float32), new_carry
 
         @jax.jit
         def get_importance_ratios(
             actor: NetworkState,
             obs: jax.Array,
+            carry: jax.Array,
             actions: jax.Array,
             behaviour_probs: jax.Array,
         ) -> jax.Array:
@@ -950,11 +1405,11 @@ def create_iqlearn(
             Returns:
                 Importance ratios of shape ``(batch,)``.
             """
-            logits = run_actor(actor, obs)  # (batch, num_actions)
+            _new_carry, logits = run_actor(actor, obs, carry)
             probs = jax.nn.softmax(logits)  # (batch, num_actions)
             idx = actions.reshape(-1).astype(jnp.int32)  # (batch,)
             pi_a = probs[jnp.arange(idx.shape[0]), idx]  # (batch,)
-            return pi_a / behaviour_probs
+            return pi_a / behaviour_probs, _new_carry
 
     else:
         # ------------------------------------------------------------------
@@ -969,14 +1424,19 @@ def create_iqlearn(
         ) -> jax.Array:
             """Reconstruct and run both continuous critic branches.
 
-            Features and actions are concatenated before each head so each
-            branch has a fully independent view of the (obs, action) pair.
+            Features pass through the memory then are concatenated with actions
+            before each head so each branch has a fully independent view of the
+            (obs, action) pair.
 
             Returns:
                 Array of shape ``(batch, 2)`` containing two independent Q estimates.
             """
             fe1 = nnx.merge(
                 mc_critic_q1_fe_graph if use_mc else critic_q1_fe_graph, critic.q1.fe
+            )
+            mem1 = nnx.merge(
+                mc_critic_q1_memory_graph if use_mc else critic_q1_memory_graph,
+                critic.q1.memory,
             )
             head1 = nnx.merge(
                 mc_critic_q1_head_graph if use_mc else critic_q1_head_graph,
@@ -985,13 +1445,99 @@ def create_iqlearn(
             fe2 = nnx.merge(
                 mc_critic_q2_fe_graph if use_mc else critic_q2_fe_graph, critic.q2.fe
             )
+            mem2 = nnx.merge(
+                mc_critic_q2_memory_graph if use_mc else critic_q2_memory_graph,
+                critic.q2.memory,
+            )
             head2 = nnx.merge(
                 mc_critic_q2_head_graph if use_mc else critic_q2_head_graph,
                 critic.q2.head,
             )
-            q1 = head1(jnp.concat((fe1(x), actions), axis=-1))  # (batch, 1)
-            q2 = head2(jnp.concat((fe2(x), actions), axis=-1))  # (batch, 1)
+            batch = x.shape[0]
+            if use_mc:
+                c1 = _make_mc_critic_q1_carry(batch)
+                c2 = _make_mc_critic_q2_carry(batch)
+            else:
+                c1 = _make_critic_q1_carry(batch)
+                c2 = _make_critic_q2_carry(batch)
+            _, mem_out1 = mem1(fe1(x), c1)
+            _, mem_out2 = mem2(fe2(x), c2)
+            q1 = head1(jnp.concat((mem_out1, actions), axis=-1))  # (batch, 1)
+            q2 = head2(jnp.concat((mem_out2, actions), axis=-1))  # (batch, 1)
             return jnp.concat([q1, q2], axis=-1)  # (batch, 2)
+
+        def run_critic_scan(
+            critic: TwinCriticState,
+            xs: jax.Array,
+            actions: jax.Array,
+            use_mc: bool = False,
+            initial_carry_q1=None,
+            initial_carry_q2=None,
+        ) -> tuple[any, any, jax.Array]:
+            """Run both continuous critic branches over an observation sequence.
+
+            Args:
+                critic: Twin-critic network state.
+                xs: Observation sequence of shape ``(batch, T, *obs_shape)``.
+                actions: Action sequence of shape ``(batch, T, action_dim)``.
+                use_mc: If True, use MC critic graph definitions.
+                initial_carry_q1: Initial carry for Q1.  ``None`` → zero carry.
+                initial_carry_q2: Initial carry for Q2.  ``None`` → zero carry.
+
+            Returns:
+                ``(final_carry_q1, final_carry_q2, qs)`` where ``qs`` has
+                shape ``(batch, T, 2)``.
+            """
+            fe1 = nnx.merge(
+                mc_critic_q1_fe_graph if use_mc else critic_q1_fe_graph, critic.q1.fe
+            )
+            mem1 = nnx.merge(
+                mc_critic_q1_memory_graph if use_mc else critic_q1_memory_graph,
+                critic.q1.memory,
+            )
+            head1 = nnx.merge(
+                mc_critic_q1_head_graph if use_mc else critic_q1_head_graph,
+                critic.q1.head,
+            )
+            fe2 = nnx.merge(
+                mc_critic_q2_fe_graph if use_mc else critic_q2_fe_graph, critic.q2.fe
+            )
+            mem2 = nnx.merge(
+                mc_critic_q2_memory_graph if use_mc else critic_q2_memory_graph,
+                critic.q2.memory,
+            )
+            head2 = nnx.merge(
+                mc_critic_q2_head_graph if use_mc else critic_q2_head_graph,
+                critic.q2.head,
+            )
+            batch, T = xs.shape[0], xs.shape[1]
+            flat_xs = xs.reshape(batch * T, *xs.shape[2:])
+            feats1 = fe1(flat_xs).reshape(batch, T, -1)
+            feats2 = fe2(flat_xs).reshape(batch, T, -1)
+            if initial_carry_q1 is None:
+                initial_carry_q1 = (
+                    _make_mc_critic_q1_carry(batch)
+                    if use_mc
+                    else _make_critic_q1_carry(batch)
+                )
+            if initial_carry_q2 is None:
+                initial_carry_q2 = (
+                    _make_mc_critic_q2_carry(batch)
+                    if use_mc
+                    else _make_critic_q2_carry(batch)
+                )
+            fc1, mem_outs1 = mem1.scan(feats1, initial_carry_q1)
+            fc2, mem_outs2 = mem2.scan(feats2, initial_carry_q2)
+            flat_actions = actions.reshape(batch * T, -1)
+            flat_mem1 = mem_outs1.reshape(batch * T, -1)
+            flat_mem2 = mem_outs2.reshape(batch * T, -1)
+            q1 = head1(jnp.concat((flat_mem1, flat_actions), axis=-1)).reshape(
+                batch, T, 1
+            )
+            q2 = head2(jnp.concat((flat_mem2, flat_actions), axis=-1)).reshape(
+                batch, T, 1
+            )
+            return fc1, fc2, jnp.concat([q1, q2], axis=-1)  # (batch, T, 2)
 
         def get_q_both(
             critic: TwinCriticState,
@@ -1028,7 +1574,7 @@ def create_iqlearn(
             Returns:
                 ``(mean, std)`` each of shape ``(batch, action_dim)``.
             """
-            dist_params = run_actor(actor, x)
+            _, dist_params = run_actor(actor, x, _make_actor_carry(x.shape[0]))
             mean, log_std = (
                 dist_params[..., :action_dim],
                 dist_params[..., action_dim:],
@@ -1170,8 +1716,8 @@ def create_iqlearn(
                 Action array of shape ``(action_dim,)``, scaled and shifted by
                 ``action_scale`` and ``action_bias``.
             """
-            obs = jnp.expand_dims(obs, 0)
-            mean, std = get_dist_params(iqlearn.actor, obs)
+            obs_batch = jnp.expand_dims(obs, 0)
+            mean, std = get_dist_params(iqlearn.actor, obs_batch)
             if deterministic:
                 unsquashed_action = mean
             else:
@@ -1189,7 +1735,9 @@ def create_iqlearn(
     # ------------------------------------------------------------------
 
     @Partial(jax.vmap, in_axes=[None, None, None, None, None, 0])
-    def calculate_td_lambda(actor, critic, alpha, key, online_buffer: Buffer, index: int):
+    def calculate_td_lambda(
+        actor, critic, carry, alpha, key, online_buffer: Buffer, index: int
+    ):
         """Compute a V-trace TD(λ) return estimate starting at buffer position ``index``.
 
         This function is vmapped over ``index`` via ``@Partial(jax.vmap, ...)``;
@@ -1241,16 +1789,17 @@ def create_iqlearn(
         indices = index + jnp.arange(params.lambda_truncation + 1)
         key_ent, key_v = jax.random.split(key)
 
-        c_k = get_importance_ratios(
+        c_k, new_carry = get_importance_ratios(
             actor,
             online_buffer.info[obs_key][indices],
+            carry,
             online_buffer.info[action_key][indices],
             online_buffer.info[behaviour_key][indices],
         )
         p_k = jnp.clip(jnp.prod(c_k), max=1.0)
         gammas = params.gamma ** jnp.arange(params.lambda_truncation + 1)
         lambdas = params.lam ** jnp.arange(params.lambda_truncation)
-        done_mask = 1-jnp.concatenate(
+        done_mask = 1 - jnp.concatenate(
             (
                 jnp.array([0]),
                 jnp.maximum.accumulate(
@@ -1262,18 +1811,19 @@ def create_iqlearn(
         entropies = get_entropy(actor, online_buffer.info[obs_key][indices], key_ent)
         rn = jnp.cumsum(
             gammas[:-1]
-            * (online_buffer.info[reward_key][indices[:-1]] + alpha*entropies[:-1])
+            * (online_buffer.info[reward_key][indices[:-1]] + alpha * entropies[:-1])
             * done_mask[:-1]
         )
-        rn = rn + gammas[1:] * done_mask[1:]* get_v( # type: ignore
+        rn = rn + gammas[1:] * done_mask[1:] * get_v(  # type: ignore
             actor,
             critic,
             alpha,
             online_buffer.info[obs_key][indices][1:],
             key_v,
-            include_entropy=True
+            include_entropy=True,
+            # use_mc=True,
         )
-        return (1 - params.lam) * jnp.sum(lambdas * rn), p_k
+        return (1 - params.lam) * jnp.sum(lambdas * rn), p_k, new_carry
 
     def loss_alpha(log_alpha: jax.Array, log_pi: jax.Array) -> jax.Array:
         """Entropy temperature loss.
@@ -1311,18 +1861,43 @@ def create_iqlearn(
             ``"entropy"``, and ``"v"``.
         """
         key_sample, key_v = jax.random.split(key, 2)
-        sample, _ = buffer_sample(buffer, key_sample)
-        v, metrics = get_v(
-            actor,
-            critic,
-            alpha,
-            sample.this_info[obs_key],
-            key_v,
-            include_entropy=True,
-            include_log=True,
+        obs, _act, _rew, _done, mask, burn_ac, burn_cq1, burn_cq2, _seq_idx = (
+            sample_with_burn_in(buffer, actor, critic, key_sample)
         )
-        metrics.update({"v": v.mean()})
-        return -v.mean(), metrics
+        key_sample, key_v = jax.random.split(key, 2)
+        # TODO: should this actually also burn in critic_target? does this add to instability?
+        obs, act, rew, done, mask, burn_ac, burn_cq1, burn_cq2, seq_idx = (
+            sample_with_burn_in(buffer, actor, critic, key_sample)
+        )
+        xs = (
+            jnp.swapaxes(obs, 0, 1),
+            jnp.swapaxes(mask, 0, 1),
+        )
+
+        def scan_fun(carry, x):
+            actor_carry, q_carry1, q_carry2 = carry
+            actor_carry = jax.lax.stop_gradient(actor_carry)
+            q_carry1 = jax.lax.stop_gradient(q_carry1)
+            q_carry2 = jax.lax.stop_gradient(q_carry2)
+            obs, mask = x
+            v, new_carries, metrics = get_v(
+                actor,
+                critic,
+                alpha,
+                obs,
+                actor_carry,
+                q_carry1,
+                q_carry2,
+                key_v,
+                include_entropy=True,
+                include_log=True,
+            )
+            return new_carries, (-(v * jnp.reshape(mask, -1)).mean(), metrics)
+
+        _, (losses, metrics) = jax.lax.scan(scan_fun, (burn_ac, burn_cq1, burn_cq2), xs)
+
+        metrics.update({"loss_actor": losses})
+        return losses.mean(), jax.tree.map(lambda x: x.mean(), metrics)
 
     def loss_critic(
         actor_target: NetworkState,
@@ -1390,7 +1965,7 @@ def create_iqlearn(
         actor_target: NetworkState,
         critic: TwinCriticState,
         critic_target: TwinCriticState,
-        online_buf: Buffer,
+        buffer: Buffer,
         alpha: jax.Array,
         key: jax.Array,
     ) -> Tuple[jax.Array, dict]:
@@ -1415,27 +1990,50 @@ def create_iqlearn(
             ``"critic_loss"`` and ``"target_q"``.
         """
         key_sample, key_v = jax.random.split(key, 2)
-        sample, _ = online_buffer_sample(online_buf, key_sample)
-        obs = sample.this_info[obs_key]
-        actions = sample.this_info[action_key]
-        rewards = sample.this_info[reward_key].reshape(-1)
-        terminated = sample.this_info[terminated_key].reshape(-1)
-
-        next_v = get_v(
-            actor_target,
-            critic_target,
-            alpha,
-            sample.next_info[obs_key],
-            key_v,
-            include_entropy=True,
+        # TODO: should this actually also burn in critic_target? does this add to instability?
+        obs, act, rew, done, mask, burn_ac, burn_cq1, burn_cq2, seq_idx = (
+            sample_with_burn_in(buffer, actor_target, critic, key_sample)
         )
-        target_q = jax.lax.stop_gradient(
-            rewards + params.gamma * (1.0 - terminated) * next_v
+        xs = (
+            jnp.swapaxes(obs, 0, 1),
+            jnp.swapaxes(act, 0, 1),
+            jnp.swapaxes(rew, 0, 1),
+            jnp.swapaxes(done, 0, 1),
+            jnp.swapaxes(mask, 0, 1),
         )
 
-        q1, q2 = get_q_both(critic, obs, actions)
-        loss = 0.5 * (jnp.mean((q1 - target_q) ** 2) + jnp.mean((q2 - target_q) ** 2))
-        return loss, {"critic_loss": loss, "target_q": target_q.mean()}
+        def scan_fun(carry, x):
+            actor_carry, q_carry1, q_carry2 = carry
+            actor_carry = jax.lax.stop_gradient(actor_carry)
+            q_carry1 = jax.lax.stop_gradient(q_carry1)
+            q_carry2 = jax.lax.stop_gradient(q_carry2)
+            obs, act, rew, done, mask = x
+            next_v, (new_actor_carry, _new_q_carry1, _new_q_carry2) = get_v(
+                actor_target,
+                critic_target,
+                alpha,
+                obs,
+                actor_carry,
+                q_carry1,
+                q_carry2,
+                key_v,
+                include_entropy=True,
+            )
+            target_q = jax.lax.stop_gradient(
+                rew + params.gamma * (1.0 - done) * next_v
+            )
+
+            q1, q2, new_q_carry1, new_q_carry2 = get_q_both(
+                critic, obs, q_carry1, q_carry2, act
+            )
+            loss = 0.5 * (
+                jnp.mean(mask * (q1 - target_q) ** 2)
+                + jnp.mean(mask * (q2 - target_q) ** 2)
+            )
+            return (new_actor_carry, new_q_carry1, new_q_carry2), loss
+
+        _, losses = jax.lax.scan(scan_fun, (burn_ac, burn_cq1, burn_cq2), xs)
+        return losses.mean(), {"critic_loss": losses.mean(), "target_q": 0}
 
     def loss_mc_critic_sac(
         actor: NetworkState,
@@ -1450,13 +2048,42 @@ def create_iqlearn(
         obs = sample.this_info[obs_key]
         actions = sample.this_info[action_key]
 
-        target_q, coefs = jax.lax.stop_gradient(
-            calculate_td_lambda(actor, critic_target, alpha, key_td_lambda, online_buf, indices)  # type: ignore
+
+        key_sample, key_v = jax.random.split(key, 2)
+        obs, _act, _rew, _done, mask, burn_ac, burn_cq1, burn_cq2, _seq_idx = (
+            sample_with_burn_in(buffer, actor, mc_critic, key_sample)
+        )
+        key_sample, key_v = jax.random.split(key, 2)
+        # TODO: should this actually also burn in critic_target? does this add to instability?
+        obs, act, rew, done, mask, burn_ac, burn_cq1, burn_cq2, seq_idx = (
+            sample_with_burn_in(buffer, actor, mc_critic, key_sample)
+        )
+        xs = (
+            jnp.swapaxes(obs, 0, 1),
+            jnp.swapaxes(mask, 0, 1),
         )
 
-        q1, q2 = get_q_both(mc_critic, obs, actions, use_mc=True)
-        loss = 0.5 * (jnp.mean(coefs*(q1 - target_q) ** 2) + jnp.mean(coefs*(q2 - target_q) ** 2))
-        return loss, {"mc_critic_loss": loss, "target_q": target_q.mean()}
+        def scan_fun(carry, x):
+            actor_carry, q_carry1, q_carry2, key = carry
+            key, new_key = jax.random.split(key)
+            actor_carry = jax.lax.stop_gradient(actor_carry)
+            q_carry1 = jax.lax.stop_gradient(q_carry1)
+            q_carry2 = jax.lax.stop_gradient(q_carry2)
+            obs, mask = x
+            target_q, coefs, new_actor_carry = jax.lax.stop_gradient(
+                calculate_td_lambda(actor, critic_target, alpha, key, online_buf, indices)  # type: ignore
+            )
+
+            q1, q2, new_carry_q1, new_carry_q2 = get_q_both(mc_critic, obs, actions, use_mc=True)
+            loss = 0.5 * (
+                jnp.mean(mask*coefs * (q1 - target_q) ** 2)
+                + jnp.mean(mask*coefs * (q2 - target_q) ** 2)
+            )
+            return (new_actor_carry, new_carry_q1, new_carry_q2, new_key), loss
+
+        _, losses = jax.lax.scan(scan_fun, (burn_ac, burn_cq1, burn_cq2, key_v), xs)
+
+        return losses.mean(), {"mc_critic_loss": losses.mean()}
 
     # ------------------------------------------------------------------
     # Online helpers: environment interaction and SAC update
@@ -1486,21 +2113,47 @@ def create_iqlearn(
         """
         key_act, key_step = jax.random.split(key, 2)
         obs = env.get_obs(env_state, env_params)
+        obs_batch = jnp.expand_dims(obs, 0)
+        # Run actor with current online carry to get action + updated carry
+        new_actor_carry, actor_out = run_actor(
+            sac.actor, obs_batch, sac.actor_online_carry
+        )
         if is_discrete:
-            action, prob = predict(sac, obs, key_act, return_prob=True)
+            logits = actor_out[0]
+            action = jax.random.categorical(key_act, logits).astype(jnp.float32)
+            prob = jax.nn.softmax(logits)[jnp.round(action).astype(jnp.int32)]
             env_action = jnp.round(action).astype(jnp.int32)
         else:
+            dist_params = actor_out
+            mean = dist_params[..., :action_dim]
+            log_std = dist_params[..., action_dim:]
+            log_std = jnp.tanh(log_std)
+            log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
+            std = jnp.exp(log_std)
             if approximate_mc:
-                action, unsquashed_action, logprob = sample_action_logprob(
-                    sac.actor, obs, key_act
+                unsquashed_action = jax.random.normal(key_act, mean.shape) * std + mean
+                y_t = jnp.tanh(unsquashed_action)
+                action = (y_t * action_scale + action_bias)[0]
+                unsquashed_action = unsquashed_action[0]
+                log_prob = (
+                    -((unsquashed_action - mean[0]) ** 2) / (2 * std[0] ** 2)
+                    - 0.5 * jnp.log(2 * jnp.pi)
+                    - jnp.log(std[0])
+                    - jnp.log(
+                        action_scale * (1 - jnp.tanh(unsquashed_action) ** 2) + 1e-6
+                    )
                 )
-                prob = jnp.exp(logprob)
+                prob = jnp.exp(log_prob.sum())
             else:
-                action = predict(sac, obs, key_act)
+                unsquashed_action = jax.random.normal(key_act, mean.shape) * std + mean
+                y_t = jnp.tanh(unsquashed_action)
+                action = (y_t * action_scale + action_bias)[0]
             env_action = action
         _next_obs, new_env_state, reward, done, _ = env.step(
             key_step, env_state, env_action, env_params
         )
+        # Reset carry when episode terminates (gymnax auto-resets the env state)
+        new_actor_carry = jnp.where(done, jnp.zeros_like(new_actor_carry), new_actor_carry)
         transition = {
             obs_key: obs,
             action_key: jnp.atleast_1d(action),
@@ -1514,7 +2167,12 @@ def create_iqlearn(
         new_online_buffer = online_buffer_functions.add(
             sac.online_buffer, transition, terminated=done
         )
-        return sac._replace(online_buffer=new_online_buffer), new_env_state
+        return (
+            sac._replace(
+                online_buffer=new_online_buffer, actor_online_carry=new_actor_carry
+            ),
+            new_env_state,
+        )
 
     def update_step_sac(sac: IQLearnState, key: jax.Array) -> Tuple[IQLearnState, dict]:
         """Execute one SAC update step using the online replay buffer.
@@ -1536,41 +2194,207 @@ def create_iqlearn(
             ``"entropy"``, ``"v"``, ``"critic_loss"``, ``"target_q"``,
             and ``"alpha"`` (when ``params.autotune_alpha`` is True).
         """
-        key_actor, key_critic, key_mc_critic = jax.random.split(key, 3)
+        # TODO: just lookup, remove
+        if False:
+            # Sequence (R2D2) training path
+            key_sample, key_actor, key_critic, key_mc_critic = jax.random.split(key, 4)
 
-        # Actor gradient: maximise soft value V(s) = Q(s,a) - α log π(a|s)
-        grads_actor, metrics = jax.grad(loss_actor, has_aux=True)(
-            sac.actor,
-            sac.critic_target,
-            sac.online_buffer,
-            online_buffer_sample,
-            sac.alpha,
-            key_actor,
-        )
-        # Critic gradient: minimise SAC Bellman MSE
-        grads_critic, metrics_critic = jax.grad(
-            loss_critic_sac, argnums=1, has_aux=True
-        )(
-            sac.actor_target,
-            sac.critic,
-            sac.critic_target,
-            sac.online_buffer,
-            sac.alpha,
-            key_critic,
-        )
-        metrics.update(metrics_critic)
+            if is_discrete:
 
-        if approximate_mc:
-            grads_mc_critic, metrics_mc_critic = jax.grad(
-                loss_mc_critic_sac, argnums=1, has_aux=True
-            )(
+                def loss_actor_seq(actor):
+                    _, outs = run_actor_scan(actor, learn_obs, _burn_ac)
+                    probs = jax.nn.softmax(outs, axis=-1)
+                    lp = jax.nn.log_softmax(outs, axis=-1)
+                    _, _, qtw = run_critic_scan(
+                        sac.critic_target,
+                        learn_obs,
+                        False,
+                        jax.lax.stop_gradient(_burn_cq1),
+                        jax.lax.stop_gradient(_burn_cq2),
+                    )
+                    qm = jnp.minimum(qtw[..., 0], qtw[..., 1])
+                    ent = -(probs * lp).sum(-1)
+                    v = (probs * qm).sum(-1) + sac.alpha * ent
+                    L = -(v * learn_mask).sum() / jnp.maximum(learn_mask.sum(), 1.0)
+                    return L, {
+                        "q": (probs * qm).sum(-1).mean(),
+                        "entropy": ent.mean(),
+                        "v": v.mean(),
+                    }
+
+                def loss_critic_sac_seq(critic):
+                    _, tg = run_actor_scan(sac.actor_target, learn_obs, _burn_ac)
+                    tp = jax.nn.softmax(tg, axis=-1)
+                    tlp = jax.nn.log_softmax(tg, axis=-1)
+                    _, _, qtgt = run_critic_scan(
+                        sac.critic_target, learn_obs, False, _burn_cq1, _burn_cq2
+                    )
+                    qtm = jnp.minimum(qtgt[..., 0], qtgt[..., 1])
+                    vtgt = (tp * qtm).sum(-1) + sac.alpha * -(tp * tlp).sum(-1)
+                    v_boot = (
+                        _h_inv(vtgt, params.value_rescaling_eps)
+                        if params.value_rescaling
+                        else vtgt
+                    )
+                    G_n = _n_step_return_seq(learn_rew, learn_done, v_boot)
+                    tq = jax.lax.stop_gradient(
+                        _h(G_n, params.value_rescaling_eps)
+                        if params.value_rescaling
+                        else G_n
+                    )
+                    _, _, qon = run_critic_scan(
+                        critic,
+                        learn_obs,
+                        False,
+                        jax.lax.stop_gradient(_burn_cq1),
+                        jax.lax.stop_gradient(_burn_cq2),
+                    )
+                    ai = jnp.round(learn_act.reshape(_bs, _TL)).astype(jnp.int32)
+                    bi = jnp.arange(_bs)[:, None]
+                    ti = jnp.arange(_TL)[None, :]
+                    q1 = qon[bi, ti, ai, 0]
+                    q2 = qon[bi, ti, ai, 1]
+                    dn = jnp.maximum(learn_mask.sum(), 1.0)
+                    L = 0.5 * (
+                        ((q1 - tq) ** 2 * learn_mask).sum() / dn
+                        + ((q2 - tq) ** 2 * learn_mask).sum() / dn
+                    )
+                    return L, {"critic_loss": L, "target_q": tq.mean()}
+
+            else:
+
+                def loss_actor_seq(actor):
+                    _, outs = run_actor_scan(actor, learn_obs, _burn_ac)
+                    m = outs[..., :action_dim]
+                    ls = jnp.tanh(outs[..., action_dim:])
+                    ls = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (ls + 1)
+                    s = jnp.exp(ls)
+                    u = jax.random.normal(key_actor, m.shape) * s + m
+                    y = jnp.tanh(u)
+                    a = y * action_scale + action_bias
+                    lp = (
+                        -((u - m) ** 2) / (2 * s**2)
+                        - 0.5 * jnp.log(2 * jnp.pi)
+                        - jnp.log(s)
+                        - jnp.log(action_scale * (1 - y**2) + 1e-6)
+                    ).sum(-1)
+                    _, _, qtw = run_critic_scan(
+                        sac.critic_target,
+                        learn_obs,
+                        a,
+                        False,
+                        jax.lax.stop_gradient(_burn_cq1),
+                        jax.lax.stop_gradient(_burn_cq2),
+                    )
+                    qm = jnp.minimum(qtw[..., 0], qtw[..., 1])
+                    v = qm - sac.alpha * lp
+                    L = -(v * learn_mask).sum() / jnp.maximum(learn_mask.sum(), 1.0)
+                    return L, {"q": qm.mean(), "entropy": -lp.mean(), "v": v.mean()}
+
+                def loss_critic_sac_seq(critic):
+                    _, tg = run_actor_scan(sac.actor_target, learn_obs, _burn_ac)
+                    mt = tg[..., :action_dim]
+                    lt = jnp.tanh(tg[..., action_dim:])
+                    lt = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (lt + 1)
+                    st = jnp.exp(lt)
+                    ut = jax.random.normal(key_critic, mt.shape) * st + mt
+                    yt = jnp.tanh(ut)
+                    at = yt * action_scale + action_bias
+                    lpt = (
+                        -((ut - mt) ** 2) / (2 * st**2)
+                        - 0.5 * jnp.log(2 * jnp.pi)
+                        - jnp.log(st)
+                        - jnp.log(action_scale * (1 - yt**2) + 1e-6)
+                    ).sum(-1)
+                    _, _, qtgt = run_critic_scan(
+                        sac.critic_target, learn_obs, at, False, _burn_cq1, _burn_cq2
+                    )
+                    qtm = jnp.minimum(qtgt[..., 0], qtgt[..., 1])
+                    vtgt = qtm - sac.alpha * lpt
+                    v_boot = (
+                        _h_inv(vtgt, params.value_rescaling_eps)
+                        if params.value_rescaling
+                        else vtgt
+                    )
+                    G_n = _n_step_return_seq(learn_rew, learn_done, v_boot)
+                    tq = jax.lax.stop_gradient(
+                        _h(G_n, params.value_rescaling_eps)
+                        if params.value_rescaling
+                        else G_n
+                    )
+                    _, _, qon = run_critic_scan(
+                        critic,
+                        learn_obs,
+                        learn_act,
+                        False,
+                        jax.lax.stop_gradient(_burn_cq1),
+                        jax.lax.stop_gradient(_burn_cq2),
+                    )
+                    q1 = qon[..., 0]
+                    q2 = qon[..., 1]
+                    dn = jnp.maximum(learn_mask.sum(), 1.0)
+                    L = 0.5 * (
+                        ((q1 - tq) ** 2 * learn_mask).sum() / dn
+                        + ((q2 - tq) ** 2 * learn_mask).sum() / dn
+                    )
+                    return L, {"critic_loss": L, "target_q": tq.mean()}
+
+            grads_actor, metrics = jax.grad(loss_actor_seq, has_aux=True)(sac.actor)
+            grads_critic, metrics_critic = jax.grad(loss_critic_sac_seq, has_aux=True)(
+                sac.critic
+            )
+
+            if approximate_mc:
+                grads_mc_critic, metrics_mc_critic = jax.grad(
+                    loss_mc_critic_sac, argnums=1, has_aux=True
+                )(
+                    sac.actor,
+                    sac.mc_critic,
+                    sac.critic_target,
+                    sac.online_buffer,
+                    sac.alpha,
+                    key_mc_critic,
+                )
+
+        else:
+            key_actor, key_critic, key_mc_critic = jax.random.split(key, 3)
+
+            # Actor gradient: maximise soft value V(s) = Q(s,a) - α log π(a|s)
+            grads_actor, metrics = jax.grad(loss_actor, has_aux=True)(
                 sac.actor,
-                sac.mc_critic,
+                sac.critic_target,
+                sac.online_buffer,
+                online_buffer_sample,
+                sac.alpha,
+                key_actor,
+            )
+            # Critic gradient: minimise SAC Bellman MSE
+            grads_critic, metrics_critic = jax.grad(
+                loss_critic_sac, argnums=1, has_aux=True
+            )(
+                sac.actor_target,
+                sac.critic,
                 sac.critic_target,
                 sac.online_buffer,
                 sac.alpha,
-                key_mc_critic,
+                key_critic,
             )
+
+            if approximate_mc:
+                grads_mc_critic, metrics_mc_critic = jax.grad(
+                    loss_mc_critic_sac, argnums=1, has_aux=True
+                )(
+                    sac.actor,
+                    sac.mc_critic,
+                    sac.critic_target,
+                    sac.online_buffer,
+                    sac.alpha,
+                    key_mc_critic,
+                )
+
+        metrics.update(metrics_critic)
+
+        if approximate_mc:
             metrics.update(metrics_mc_critic)
 
         updates, new_actor_opt = actor_optimizer.update(
@@ -1633,6 +2457,7 @@ def create_iqlearn(
                 new_alpha,
                 new_log_alpha,  # type: ignore
                 sac.online_buffer,
+                sac.actor_online_carry,
             ),
             metrics,
         )
@@ -1730,6 +2555,7 @@ def create_iqlearn(
                 new_alpha,
                 new_log_alpha,  # type: ignore
                 iqlearn.online_buffer,
+                iqlearn.actor_online_carry,
             ),
             metrics,
         )
@@ -1915,11 +2741,36 @@ def create_iqlearn(
         return sac, env_state
 
     graphs = IQLearnGraphs(
-        actor=NetworkGraphs(actor_fe_graph, actor_head_graph),
-        critic_q1=NetworkGraphs(critic_q1_fe_graph, critic_q1_head_graph),
-        critic_q2=NetworkGraphs(critic_q2_fe_graph, critic_q2_head_graph),
+        actor=NetworkGraphs(actor_fe_graph, actor_memory_graph, actor_head_graph),
+        critic_q1=NetworkGraphs(
+            critic_q1_fe_graph, critic_q1_memory_graph, critic_q1_head_graph
+        ),
+        critic_q2=NetworkGraphs(
+            critic_q2_fe_graph, critic_q2_memory_graph, critic_q2_head_graph
+        ),
     )
-    fns = IQLearnFunctions(predict, train, train_sac, get_importance_ratios, prefill_buffer)
+    fns = IQLearnFunctions(
+        predict, train, train_sac, get_importance_ratios, prefill_buffer
+    )
     if debug:
-        return (iqlearn, fns, graphs, DebugFunctions(calculate_td_lambda, get_q, get_entropy))
+        # Wrap calculate_td_lambda with a fixed alpha and key so the debug API
+        # matches the test contract: (actor, critic, online_buffer, indices).
+        def _debug_calculate_td_lambda(actor, critic, online_buffer, indices):
+            td, _coefs = calculate_td_lambda(
+                actor, critic, iqlearn.alpha, jax.random.key(0), online_buffer, indices
+            )
+            return td
+
+        return (
+            iqlearn,
+            fns,
+            graphs,
+            DebugFunctions(
+                _debug_calculate_td_lambda,
+                get_q,
+                get_entropy,
+                run_actor_scan,
+                run_critic_scan,
+            ),
+        )
     return (iqlearn, fns, graphs)

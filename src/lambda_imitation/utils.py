@@ -64,6 +64,7 @@ from .iqlearn import (
     IQLearnFunctions,
     IQLearnGraphs,
     IQLearnState,
+    LSTMMemory,
     MLPFeatureExtractor,
     create_iqlearn,
 )
@@ -331,6 +332,7 @@ def create_iqlearn_from_env(
     approximate_mc: bool = False,
     debug: bool = False,
     seed: int = 0,
+    memory_factory=None,
 ) -> (
     "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs] | "
     "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs, DebugFunctions]"
@@ -470,6 +472,23 @@ def create_iqlearn_from_env(
     mc_critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
     mc_critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
 
+    # Memory modules — None defers to IdentityMemory (no recurrence, feedforward behaviour).
+    # To use recurrence, pass a callable (feature_dim, rngs) -> nnx.Module; for the R2D2
+    # default use lambda f, r: LSTMMemory(f, fe_hidden_dims[-1], rngs=r).
+    fe_out_dim = fe_hidden_dims[-1]
+    if memory_factory is not None:
+        actor_mem = memory_factory(fe_out_dim, rngs)
+        critic_q1_mem = memory_factory(fe_out_dim, rngs)
+        critic_q2_mem = memory_factory(fe_out_dim, rngs)
+        mc_critic_q1_mem = memory_factory(fe_out_dim, rngs)
+        mc_critic_q2_mem = memory_factory(fe_out_dim, rngs)
+    else:
+        actor_mem = None
+        critic_q1_mem = None
+        critic_q2_mem = None
+        mc_critic_q1_mem = None
+        mc_critic_q2_mem = None
+
     return create_iqlearn(
         params=hp,
         buffer=buffer,
@@ -479,6 +498,11 @@ def create_iqlearn_from_env(
         critic_q2_feature_extractor=critic_q2_fe,
         mc_critic_q1_feature_extractor=mc_critic_q1_fe,
         mc_critic_q2_feature_extractor=mc_critic_q2_fe,
+        actor_memory=actor_mem,
+        critic_q1_memory=critic_q1_mem,
+        critic_q2_memory=critic_q2_mem,
+        mc_critic_q1_memory=mc_critic_q1_mem,
+        mc_critic_q2_memory=mc_critic_q2_mem,
         obs_key=obs_key,
         action_key=action_key,
         action_scale=action_scale,

@@ -41,9 +41,9 @@ parser.add_argument(
 parser.add_argument(
     "--train-steps",
     type=int,
-    default=500,
+    default=1000,
     metavar="N",
-    help="env steps and gradient updates per round (default: 500)",
+    help="env steps and gradient updates per round (default: 1000)",
 )
 parser.add_argument(
     "--seed",
@@ -92,9 +92,8 @@ except ImportError:
         "or:  pip install 'lambda-imitation[gymnax]'"
     )
 
-from lambda_imitation.iqlearn import Hyperparameters
-from lambda_imitation.utils import (create_iqlearn_from_env,
-                                    env_spec_from_gymnax)
+from lambda_imitation.iqlearn import Hyperparameters, LSTMMemory
+from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
 # ── partial observability wrapper ─────────────────────────────────────────────
 
@@ -158,11 +157,26 @@ expert_data = {
 # ── build agent ───────────────────────────────────────────────────────────────
 
 hp = Hyperparameters(
-    batch_size=1,  # expert buffer sampling size; never used
     online_batch_size=256,
     online_buffer_size=10_000,
-    # Christodoulou 2019 discrete target entropy: 0.98 * log(num_actions)
-    target_entropy=0.5,  # float(0.98 * math.log(spec.action_dim)),
+    target_entropy=0.3,  # float(0.98 * math.log(spec.action_dim)),
+    actor_lr=1e-3,
+    critic_lr=1e-3,
+    mc_critic_lr=1e-2,
+    alpha_lr=1e-3,
+    alpha=1.0,
+    autotune_alpha=True,
+    batch_size=256,
+    gamma=0.99,
+    regularizer_coef=1 / 40,
+    tau=0.005,
+    lam=0.5,
+    lambda_truncation=15,
+    sequence_length=10,
+    burn_in_length=10,
+    n_step=1,
+    value_rescaling=False,
+    value_rescaling_eps=1e-3,
 )
 
 print("Building SAC agent for CartPole-v1 (discrete, gymnax)…")
@@ -174,8 +188,9 @@ state, fns, _, debug_fns = create_iqlearn_from_env(
     fe_hidden_dims=(64, 64),
     critic_head_dims=(64,),
     train_steps=args.train_steps,
-    approximate_mc=True,
+    approximate_mc=False,
     debug=True,
+    memory_factory=lambda f, r: LSTMMemory(f, 64, rngs=r),
 )
 
 # ── initial environment reset ─────────────────────────────────────────────────
@@ -193,12 +208,13 @@ def evaluate(agent_state, rng_key, n_episodes: int = 10) -> float:
     for _ in range(n_episodes):
         rng_key, rk = jax.random.split(rng_key)
         ep_obs, ep_state = env.reset(rk, env_params)
+        carry = jnp.zeros_like(agent_state.actor_online_carry)
         ep_return = 0.0
         done = False
         while not done:
             rng_key, sk = jax.random.split(rng_key)
             # predict returns a float32 scalar action index; gymnax expects int32
-            raw = fns.predict(agent_state, ep_obs, sk, deterministic=True)
+            raw, carry = fns.predict(agent_state, ep_obs, carry, sk, deterministic=True)
             action = jnp.round(raw).astype(jnp.int32)
             rng_key, ek = jax.random.split(rng_key)
             ep_obs, ep_state, reward, done, _ = env.step(
@@ -226,15 +242,15 @@ if args.wandb:
             project=args.wandb_project,
             name=args.wandb_run_name,
             config={
-                    "env": "CartPole-v1",
-                    "algo": "SAC",
-                    "action_space": "discrete",
-                    "approximate_mc": True,
-                    "partial_obs": args.partial,
-                    "rounds": args.rounds,
-                    "train_steps": args.train_steps,
-                    "seed": args.seed,
-                },
+                "env": "CartPole-v1",
+                "algo": "SAC",
+                "action_space": "discrete",
+                "approximate_mc": True,
+                "partial_obs": args.partial,
+                "rounds": args.rounds,
+                "train_steps": args.train_steps,
+                "seed": args.seed,
+            },
         )
 
 # ── training loop ─────────────────────────────────────────────────────────────
@@ -265,20 +281,20 @@ for rnd in range(1, args.rounds + 1):
         cmp_key, buf_size, (hp.online_batch_size,), replace=False, p=sampling_ok_probs
     )
     cmp_obs = state.online_buffer.info["observations"][cmp_idx]
-    cmp_actions = state.online_buffer.info["actions"][cmp_idx]
-    entropy = debug_fns.get_entropy(state.actor, cmp_obs, entropy_key)
-    q_sac = (
-        debug_fns.get_q(state.critic_target, cmp_obs, cmp_actions, False)
-        + state.alpha * entropy
-    )
-    q_mc = debug_fns.get_q(state.mc_critic_target, cmp_obs, cmp_actions, True)
+    # cmp_actions = state.online_buffer.info["actions"][cmp_idx]
+    # entropy = debug_fns.get_entropy(state.actor, cmp_obs, entropy_key)
+    # q_sac = (
+    #     debug_fns.get_q(state.critic_target, cmp_obs, cmp_actions, False)
+    #     + state.alpha * entropy
+    # )
+    # q_mc = debug_fns.get_q(state.mc_critic_target, cmp_obs, cmp_actions, True)
 
     print(
         f"Round {rnd:4d}/{args.rounds}  "
         f"mean_return={mean_return:7.1f}  "
         f"alpha={float(metrics['alpha']):.4f}  "
-        f"mc_critic_loss={float(metrics['mc_critic_loss']):.4f}  "
-        f"q_sac={q_sac.mean():7.3f}  q_mc={q_mc.mean():7.3f}  |Δq|={jnp.abs(q_sac - q_mc).mean():.4f}"
+        # f"mc_critic_loss={float(metrics['mc_critic_loss']):.4f}  "
+        # f"q_sac={q_sac.mean():7.3f}  q_mc={q_mc.mean():7.3f}  |Δq|={jnp.abs(q_sac - q_mc).mean():.4f}"
     )
 
     if _wandb is not None:
@@ -287,9 +303,9 @@ for rnd in range(1, args.rounds + 1):
                 "round": rnd,
                 "step": rnd * args.train_steps,
                 "mean_return": mean_return,
-                "q_sac": q_sac.mean(),
-                "q_mc": q_mc.mean(),
-                "q_delta_abs": jnp.abs(q_sac - q_mc).mean(),
+                # "q_sac": q_sac.mean(),
+                # "q_mc": q_mc.mean(),
+                # "q_delta_abs": jnp.abs(q_sac - q_mc).mean(),
                 **{k: float(v) for k, v in metrics.items()},
             }
         )
