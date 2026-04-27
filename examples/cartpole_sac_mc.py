@@ -169,10 +169,10 @@ hp = Hyperparameters(
     online_batch_size=32,
     online_buffer_size=10_000,
     target_entropy=0.3,  # float(0.98 * math.log(spec.action_dim)),
-    actor_lr=3e-4,
-    critic_lr=3e-4,
-    mc_critic_lr=3e-3,
-    alpha_lr=3e-4,
+    actor_lr=1e-4,
+    critic_lr=1e-4,
+    mc_critic_lr=1e-3,
+    alpha_lr=1e-4,
     alpha=1.0,
     autotune_alpha=True,
     batch_size=256,
@@ -323,7 +323,8 @@ for rnd in tqdm(range(1, args.rounds + 1)):
                 "q_mc": q_mc.mean(),
                 "q_delta_abs": jnp.abs(q_sac - q_mc).mean(),
                 **{k: float(v) for k, v in metrics.items()},
-            }
+            },
+            step=rnd * args.train_steps,
         )
 
 print("\nTraining complete.")
