@@ -25,6 +25,8 @@ import argparse
 import math
 import sys
 
+from tqdm.rich import tqdm
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 parser = argparse.ArgumentParser(
@@ -157,13 +159,13 @@ expert_data = {
 # ── build agent ───────────────────────────────────────────────────────────────
 
 hp = Hyperparameters(
-    online_batch_size=256,
+    online_batch_size=32,
     online_buffer_size=10_000,
     target_entropy=0.3,  # float(0.98 * math.log(spec.action_dim)),
-    actor_lr=1e-3,
-    critic_lr=1e-3,
-    mc_critic_lr=1e-2,
-    alpha_lr=1e-3,
+    actor_lr=3e-4,
+    critic_lr=3e-4,
+    mc_critic_lr=3e-3,
+    alpha_lr=3e-4,
     alpha=1.0,
     autotune_alpha=True,
     batch_size=256,
@@ -172,11 +174,15 @@ hp = Hyperparameters(
     tau=0.005,
     lam=0.5,
     lambda_truncation=15,
-    sequence_length=10,
-    burn_in_length=10,
+    sequence_length=5,
+    burn_in_length=20,
     n_step=1,
+    burn_in_from_stored_carry=True,
     value_rescaling=False,
     value_rescaling_eps=1e-3,
+    lambda_discrepancy_coef=0.6,
+    lambda_discrepancy_delta=1.0,
+    refresh_stored_carries=True,
 )
 
 print("Building SAC agent for CartPole-v1 (discrete, gymnax)…")
@@ -250,6 +256,7 @@ if args.wandb:
                 "rounds": args.rounds,
                 "train_steps": args.train_steps,
                 "seed": args.seed,
+                **hp._asdict(),
             },
         )
 
@@ -261,7 +268,7 @@ print(
     f"= {total_steps} total env steps."
 )
 
-for rnd in range(1, args.rounds + 1):
+for rnd in tqdm(range(1, args.rounds + 1)):
     key, train_key = jax.random.split(key)
     state, env_state, metrics = fns.train_sac(
         state, env, env_params, env_state, train_key
@@ -289,11 +296,13 @@ for rnd in range(1, args.rounds + 1):
     )
     q_mc = debug_fns.get_q(state.mc_critic_target, cmp_obs, cmp_actions, True)
 
+    disc_loss = float(metrics.get("lambda_discrepancy_loss", 0.0))
     print(
         f"Round {rnd:4d}/{args.rounds}  "
         f"mean_return={mean_return:7.1f}  "
         f"alpha={float(metrics['alpha']):.4f}  "
         f"mc_critic_loss={float(metrics['mc_critic_loss']):.4f}  "
+        f"disc_loss={disc_loss:.4f}  "
         f"q_sac={q_sac.mean():7.3f}  q_mc={q_mc.mean():7.3f}  |Δq|={jnp.abs(q_sac - q_mc).mean():.4f}"
     )
 

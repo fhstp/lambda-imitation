@@ -2363,3 +2363,278 @@ class TestNStepReturn:
         assert isinstance(new_state, IQLearnState)
         for k, v in metrics.items():
             assert jnp.isfinite(v), f"metric '{k}' not finite with value_rescaling"
+
+
+# ---------------------------------------------------------------------------
+# lambda-discrepancy auxiliary loss
+# ---------------------------------------------------------------------------
+
+_LD_OBS_DIM    = 4
+_LD_NUM_ACTS   = 3
+_LD_BUF_SIZE   = 64
+_LD_BATCH      = 8
+
+
+def _make_ld_state(coef: float, *, seed: int = 0):
+    """Build a discrete agent with approximate_mc=True and a pre-filled online
+    buffer; toggle ``lambda_discrepancy_coef``."""
+    import math as _math
+    env = _MockEnv()
+    env_params = _MockEnvParams()
+    _, env_state0 = env.reset(jax.random.key(seed), env_params)
+
+    hp = Hyperparameters(
+        batch_size=BATCH_SIZE,
+        online_batch_size=_LD_BATCH,
+        online_buffer_size=_LD_BUF_SIZE,
+        target_entropy=float(0.98 * _math.log(_LD_NUM_ACTS)),
+        lam=0.5,
+        lambda_truncation=3,
+        lambda_discrepancy_coef=coef,
+        lambda_discrepancy_delta=1.0,
+    )
+    rngs = nnx.Rngs(seed)
+    buf, _ = make_discrete_buffer(
+        obs_dim=_LD_OBS_DIM,
+        num_actions=_LD_NUM_ACTS,
+        size=BUFFER_SIZE,
+        batch_size=BATCH_SIZE,
+    )
+    state, fns, _ = create_iqlearn(
+        hp,
+        buf,
+        _LD_NUM_ACTS,
+        MLPFeatureExtractor(_LD_OBS_DIM, (8,), rngs=rngs),
+        MLPFeatureExtractor(_LD_OBS_DIM, (8,), rngs=rngs),
+        MLPFeatureExtractor(_LD_OBS_DIM, (8,), rngs=rngs),
+        mc_critic_q1_feature_extractor=MLPFeatureExtractor(
+            _LD_OBS_DIM, (8,), rngs=rngs
+        ),
+        mc_critic_q2_feature_extractor=MLPFeatureExtractor(
+            _LD_OBS_DIM, (8,), rngs=rngs
+        ),
+        train_steps=1,
+        critic_head_dims=(16,),
+        is_discrete=True,
+        approximate_mc=True,
+    )
+    state, env_state0 = fns.prefill_buffer(
+        state, env, env_params, env_state0, _LD_BATCH * 2, jax.random.key(seed + 1)
+    )
+    return state, fns, env, env_params, env_state0
+
+
+class TestLambdaDiscrepancy:
+    """Lambda-discrepancy auxiliary loss: Huber gap between Q_sac+α·H and Q_mc.
+
+    With ``lambda_discrepancy_coef > 0`` the term flows into actor, SAC critic,
+    and MC critic with stop-gradient on every other network.
+    """
+
+    def test_disabled_when_coef_zero(self):
+        """coef=0 produces no `lambda_discrepancy_loss` metric."""
+        state, fns, env, env_params, env_state0 = _make_ld_state(0.0)
+        _, _, metrics = fns.train_sac(
+            state, env, env_params, env_state0, jax.random.key(7)
+        )
+        assert "lambda_discrepancy_loss" not in metrics
+
+    def test_metric_finite_when_enabled(self):
+        """coef>0 surfaces a finite, non-negative `lambda_discrepancy_loss`."""
+        state, fns, env, env_params, env_state0 = _make_ld_state(0.1)
+        _, _, metrics = fns.train_sac(
+            state, env, env_params, env_state0, jax.random.key(7)
+        )
+        assert "lambda_discrepancy_loss" in metrics
+        v = float(metrics["lambda_discrepancy_loss"])
+        import math as _math
+        assert _math.isfinite(v)
+        assert v >= 0.0
+
+    def test_validation_requires_approximate_mc(self):
+        """coef>0 with approximate_mc=False must raise."""
+        import math as _math
+        hp = Hyperparameters(
+            batch_size=BATCH_SIZE,
+            online_batch_size=_LD_BATCH,
+            online_buffer_size=_LD_BUF_SIZE,
+            target_entropy=float(0.98 * _math.log(_LD_NUM_ACTS)),
+            lambda_discrepancy_coef=0.1,
+        )
+        rngs = nnx.Rngs(0)
+        buf, _ = make_discrete_buffer(
+            obs_dim=_LD_OBS_DIM, num_actions=_LD_NUM_ACTS,
+            size=BUFFER_SIZE, batch_size=BATCH_SIZE,
+        )
+        with pytest.raises(ValueError, match="lambda_discrepancy_coef"):
+            create_iqlearn(
+                hp, buf, _LD_NUM_ACTS,
+                MLPFeatureExtractor(_LD_OBS_DIM, (8,), rngs=rngs),
+                MLPFeatureExtractor(_LD_OBS_DIM, (8,), rngs=rngs),
+                MLPFeatureExtractor(_LD_OBS_DIM, (8,), rngs=rngs),
+                train_steps=1, critic_head_dims=(16,),
+                is_discrete=True, approximate_mc=False,
+            )
+
+    def test_changes_params_vs_disabled(self):
+        """Same seed, same data: enabling the term changes parameters in at
+        least one of {actor, SAC critic, MC critic} — auxiliary gradient
+        non-trivially flows."""
+        s_off, fns_off, env, env_params, env_state0 = _make_ld_state(0.0, seed=2)
+        s_on,  fns_on,  _,   _,          _          = _make_ld_state(2.0, seed=2)
+        new_off, _, _ = fns_off.train_sac(
+            s_off, env, env_params, env_state0, jax.random.key(11)
+        )
+        new_on,  _, _ = fns_on.train_sac(
+            s_on,  env, env_params, env_state0, jax.random.key(11)
+        )
+
+        def max_diff(a_state, b_state):
+            la = jax.tree.leaves(a_state)
+            lb = jax.tree.leaves(b_state)
+            return max(
+                (float(jnp.abs(a - b).max()) for a, b in zip(la, lb)
+                 if a.dtype.kind == "f"),
+                default=0.0,
+            )
+
+        d_actor   = max_diff(new_off.actor,     new_on.actor)
+        d_critic  = max_diff(new_off.critic,    new_on.critic)
+        d_mc      = max_diff(new_off.mc_critic, new_on.mc_critic)
+        # At least one network must move noticeably from the auxiliary gradient.
+        assert max(d_actor, d_critic, d_mc) > 1e-6, (
+            f"discrepancy term left every network unchanged "
+            f"(actor={d_actor}, critic={d_critic}, mc={d_mc})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# refresh_stored_carries: write per-step carries back into the online buffer
+# ---------------------------------------------------------------------------
+
+_CR_OBS_DIM    = 4
+_CR_NUM_ACTS   = 3
+_CR_BUF_SIZE   = 64
+_CR_BATCH      = 8
+_CR_SEQ_LEN    = 4
+_CR_BURN_IN    = 2
+_CR_LSTM_HID   = 8
+
+
+def _make_carry_refresh_state(refresh: bool, *, seed: int = 0):
+    """Discrete agent with LSTM memory, sequence_length>1, burn_in>0,
+    burn_in_from_stored_carry=True, optionally refresh_stored_carries."""
+    import math as _math
+    env = _MockEnv()
+    env_params = _MockEnvParams()
+    _, env_state0 = env.reset(jax.random.key(seed), env_params)
+
+    hp = Hyperparameters(
+        batch_size=BATCH_SIZE,
+        online_batch_size=_CR_BATCH,
+        online_buffer_size=_CR_BUF_SIZE,
+        target_entropy=float(0.98 * _math.log(_CR_NUM_ACTS)),
+        sequence_length=_CR_SEQ_LEN,
+        burn_in_length=_CR_BURN_IN,
+        burn_in_from_stored_carry=True,
+        refresh_stored_carries=refresh,
+    )
+    rngs = nnx.Rngs(seed)
+    buf, _ = make_discrete_buffer(
+        obs_dim=_CR_OBS_DIM,
+        num_actions=_CR_NUM_ACTS,
+        size=BUFFER_SIZE,
+        batch_size=BATCH_SIZE,
+    )
+    feat_dim = 8
+    state, fns, _ = create_iqlearn(
+        hp,
+        buf,
+        _CR_NUM_ACTS,
+        MLPFeatureExtractor(_CR_OBS_DIM, (feat_dim,), rngs=rngs),
+        MLPFeatureExtractor(_CR_OBS_DIM, (feat_dim,), rngs=rngs),
+        MLPFeatureExtractor(_CR_OBS_DIM, (feat_dim,), rngs=rngs),
+        actor_memory=LSTMMemory(feat_dim, _CR_LSTM_HID, rngs=rngs),
+        critic_q1_memory=LSTMMemory(feat_dim, _CR_LSTM_HID, rngs=rngs),
+        critic_q2_memory=LSTMMemory(feat_dim, _CR_LSTM_HID, rngs=rngs),
+        train_steps=1,
+        critic_head_dims=(8,),
+        is_discrete=True,
+    )
+    state, env_state0 = fns.prefill_buffer(
+        state, env, env_params, env_state0, _CR_BUF_SIZE,
+        jax.random.key(seed + 1),
+    )
+    return state, fns, env, env_params, env_state0
+
+
+class TestRefreshStoredCarries:
+    """Carry refresh: per-step input carries scattered into the online buffer
+    at sampled slots seq_idx[:, B:B+SL].  Counters carry drift."""
+
+    def test_disabled_leaves_carries_unchanged(self):
+        """refresh=False — buffer carry slots untouched after train_sac."""
+        from lambda_imitation.iqlearn import (
+            actor_carry_key, critic_q1_carry_key, critic_q2_carry_key,
+        )
+        state, fns, env, env_params, env_state0 = _make_carry_refresh_state(False)
+        before = {
+            k: state.online_buffer.info[k].copy()
+            for k in (actor_carry_key, critic_q1_carry_key, critic_q2_carry_key)
+        }
+        new_state, _, _ = fns.train_sac(
+            state, env, env_params, env_state0, jax.random.key(7)
+        )
+        for k, b in before.items():
+            assert jnp.array_equal(b, new_state.online_buffer.info[k]), (
+                f"carry slot '{k}' was modified despite refresh=False"
+            )
+
+    def test_enabled_writes_at_least_one_slot(self):
+        """refresh=True — carry buffers change in actor and both critic
+        carry keys after one train_sac step."""
+        from lambda_imitation.iqlearn import (
+            actor_carry_key, critic_q1_carry_key, critic_q2_carry_key,
+        )
+        state, fns, env, env_params, env_state0 = _make_carry_refresh_state(True)
+        before = {
+            k: state.online_buffer.info[k].copy()
+            for k in (actor_carry_key, critic_q1_carry_key, critic_q2_carry_key)
+        }
+        new_state, _, _ = fns.train_sac(
+            state, env, env_params, env_state0, jax.random.key(7)
+        )
+        for k, b in before.items():
+            after = new_state.online_buffer.info[k]
+            diff = float(jnp.abs(after - b).max())
+            assert diff > 0.0, (
+                f"carry slot '{k}' unchanged after refresh=True step"
+            )
+
+    def test_validation_requires_burn_in_from_stored_carry(self):
+        """refresh=True with burn_in_from_stored_carry=False must raise."""
+        import math as _math
+        hp = Hyperparameters(
+            batch_size=BATCH_SIZE,
+            online_batch_size=_CR_BATCH,
+            online_buffer_size=_CR_BUF_SIZE,
+            target_entropy=float(0.98 * _math.log(_CR_NUM_ACTS)),
+            sequence_length=_CR_SEQ_LEN,
+            burn_in_length=_CR_BURN_IN,
+            burn_in_from_stored_carry=False,
+            refresh_stored_carries=True,
+        )
+        rngs = nnx.Rngs(0)
+        buf, _ = make_discrete_buffer(
+            obs_dim=_CR_OBS_DIM, num_actions=_CR_NUM_ACTS,
+            size=BUFFER_SIZE, batch_size=BATCH_SIZE,
+        )
+        with pytest.raises(ValueError, match="refresh_stored_carries"):
+            create_iqlearn(
+                hp, buf, _CR_NUM_ACTS,
+                MLPFeatureExtractor(_CR_OBS_DIM, (8,), rngs=rngs),
+                MLPFeatureExtractor(_CR_OBS_DIM, (8,), rngs=rngs),
+                MLPFeatureExtractor(_CR_OBS_DIM, (8,), rngs=rngs),
+                train_steps=1, critic_head_dims=(8,),
+                is_discrete=True,
+            )

@@ -573,6 +573,19 @@ class Hyperparameters(NamedTuple):
     # Invertible value rescaling (Pohlen 2018 / R2D2 §2.3)
     value_rescaling: bool = False
     value_rescaling_eps: float = 1e-3
+    # Lambda-discrepancy auxiliary loss: Huber penalty on
+    # (Q_sac + α·H_π) − Q_mc, applied to actor, SAC critic, and MC critic with
+    # stop_gradient on every network except the one being optimised.
+    # 0 disables the term entirely; non-zero requires approximate_mc=True.
+    lambda_discrepancy_coef: float = 0.0
+    lambda_discrepancy_delta: float = 1.0
+    # Carry refresh: after each gradient step, write the per-step input
+    # carries that the (pre-step) online networks just produced back into
+    # the online buffer at the sampled slots seq_idx[:, B:B+SL].
+    # Counters carry drift — without it, slots that were sampled long ago
+    # carry hidden state from a stale earlier policy.  Requires
+    # burn_in_from_stored_carry=True (otherwise stored carries are unread).
+    refresh_stored_carries: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +749,17 @@ def create_iqlearn(
             "burn_in_from_stored_carry requires sequence_length > 1 or "
             "burn_in_length > 0 so carry keys are registered in the online "
             "buffer sequence sample."
+        )
+    if params.lambda_discrepancy_coef != 0.0 and not approximate_mc:
+        raise ValueError(
+            "lambda_discrepancy_coef != 0 requires approximate_mc=True so the "
+            "MC critic exists."
+        )
+    if params.refresh_stored_carries and not params.burn_in_from_stored_carry:
+        raise ValueError(
+            "refresh_stored_carries requires burn_in_from_stored_carry=True; "
+            "otherwise the stored carries are never read and the refresh is "
+            "a dead write."
         )
     this_keys = [obs_key, action_key]
     next_keys = [obs_key]
@@ -2045,16 +2069,26 @@ def create_iqlearn(
         buffer_sample: Callable[[Buffer, jax.Array], Tuple[BufferSample, Tuple[int]]],
         alpha: jax.Array,
         key: jax.Array,
+        mc_critic_target: TwinCriticState | None = None,
     ) -> Tuple[jax.Array, dict]:
         """Actor loss: maximise the soft state value V(s) = Q(s,a) - α log π(a|s).
 
         Samples a fresh batch from the buffer and computes the negative mean
         soft value (to be minimised via gradient descent).
 
+        When ``mc_critic_target`` is provided and
+        ``params.lambda_discrepancy_coef > 0``, also adds a Huber penalty on
+        ``Q_sac(s,a) + α·H_π(s) − Q_mc(s,a)`` with stop_gradient on the critic
+        and MC critic — gradient flows only through the policy entropy term.
+
         Returns:
             ``(scalar_loss, metrics)`` where metrics contains ``"q"``,
-            ``"entropy"``, and ``"v"``.
+            ``"entropy"``, ``"v"``, and (when discrepancy enabled)
+            ``"lambda_discrepancy_loss"``.
         """
+        use_disc = (
+            mc_critic_target is not None and params.lambda_discrepancy_coef > 0.0
+        )
         key_sample, key_v = jax.random.split(key, 2)
         obs, _act, _rew, _done, mask, burn_ac, burn_cq1, burn_cq2, _seq_idx = (
             sample_with_burn_in(buffer, actor, critic, key_sample)
@@ -2066,15 +2100,24 @@ def create_iqlearn(
         )
         xs = (
             jnp.swapaxes(obs, 0, 1),
+            jnp.swapaxes(act, 0, 1),
             jnp.swapaxes(mask, 0, 1),
         )
 
+        if use_disc:
+            critic_sg = jax.tree.map(jax.lax.stop_gradient, critic)
+            mc_target_sg = jax.tree.map(jax.lax.stop_gradient, mc_critic_target)
+
         def scan_fun(carry, x):
-            actor_carry, q_carry1, q_carry2 = carry
+            (actor_carry, q_carry1, q_carry2,
+             mc_q1c, mc_q2c) = carry
+            input_actor_carry = actor_carry  # captured before stop_gradient
             actor_carry = jax.lax.stop_gradient(actor_carry)
             q_carry1 = jax.lax.stop_gradient(q_carry1)
             q_carry2 = jax.lax.stop_gradient(q_carry2)
-            obs, mask = x
+            mc_q1c = jax.lax.stop_gradient(mc_q1c)
+            mc_q2c = jax.lax.stop_gradient(mc_q2c)
+            obs, act_t, mask = x
             v, new_carries, metrics = get_v(
                 actor,
                 critic,
@@ -2088,12 +2131,66 @@ def create_iqlearn(
                 include_log=True,
             )
             metrics = {**metrics, "v": v.mean()}
-            return new_carries, (-(v * jnp.reshape(mask, -1)).mean(), metrics)
+            step_loss = -(v * jnp.reshape(mask, -1)).mean()
+            new_a_c, new_q1c, new_q2c = new_carries
+            if use_disc:
+                q_sac, _, _ = get_q(critic_sg, obs, q_carry1, q_carry2, act_t)
+                q_mc, new_mc_q1c, new_mc_q2c = get_q(
+                    mc_target_sg, obs, mc_q1c, mc_q2c, act_t, use_mc=True
+                )
+                H = get_entropy(actor, obs, actor_carry, key_v)
+                delta = (
+                    jax.lax.stop_gradient(q_sac)
+                    + alpha * H
+                    - jax.lax.stop_gradient(q_mc)
+                )
+                disc = optax.losses.huber_loss(
+                    delta, delta=params.lambda_discrepancy_delta
+                )
+                disc_loss = (disc * jnp.reshape(mask, -1)).mean()
+                step_loss = step_loss + params.lambda_discrepancy_coef * disc_loss
+                metrics = {**metrics, "lambda_discrepancy_loss": disc_loss}
+            else:
+                new_mc_q1c, new_mc_q2c = mc_q1c, mc_q2c
+            return (new_a_c, new_q1c, new_q2c, new_mc_q1c, new_mc_q2c), (
+                step_loss,
+                metrics,
+                jax.lax.stop_gradient(input_actor_carry),
+            )
 
-        _, (losses, metrics) = jax.lax.scan(scan_fun, (burn_ac, burn_cq1, burn_cq2), xs)
+        _bs = obs.shape[0]
+        if use_disc:
+            init_mc1 = _make_mc_critic_q1_carry(_bs)
+            init_mc2 = _make_mc_critic_q2_carry(_bs)
+        else:
+            # Use online-critic carry shapes as a no-op placeholder so the
+            # scan carry has a consistent pytree structure across both paths.
+            init_mc1 = burn_cq1
+            init_mc2 = burn_cq2
+        _, (losses, metrics, actor_input_carries_T) = jax.lax.scan(
+            scan_fun,
+            (burn_ac, burn_cq1, burn_cq2, init_mc1, init_mc2),
+            xs,
+        )
 
         metrics.update({"loss_actor": losses})
-        return losses.mean(), jax.tree.map(lambda x: x.mean(), metrics)
+        # Carry-refresh payload: input actor carry per scan step → slot
+        # seq_idx[:, B + t].  Empty when refresh disabled to avoid extra work.
+        if params.refresh_stored_carries:
+            B = params.burn_in_length
+            SL = params.sequence_length + 1
+            actor_input_carries = jax.tree.map(
+                lambda c: jnp.swapaxes(c, 0, 1), actor_input_carries_T
+            )  # leaves: (batch, SL, *carry)
+            refresh = {
+                actor_carry_key: (seq_idx[:, B:B + SL], actor_input_carries),
+            }
+        else:
+            refresh = {}
+        return losses.mean(), (
+            jax.tree.map(lambda x: x.mean(), metrics),
+            refresh,
+        )
 
     def loss_critic(
         actor_target: NetworkState,
@@ -2178,6 +2275,7 @@ def create_iqlearn(
         buffer: Buffer,
         alpha: jax.Array,
         key: jax.Array,
+        mc_critic_target: TwinCriticState | None = None,
     ) -> Tuple[jax.Array, dict]:
         """SAC Bellman MSE loss for the twin-critic (continuous and discrete).
 
@@ -2249,12 +2347,18 @@ def create_iqlearn(
         def q_scan(carry, x):
             q1c, q2c = carry
             obs_t, act_t = x
+            input_q1c, input_q2c = q1c, q2c
             q1_t, q2_t, new_q1c, new_q2c = get_q_both(
                 critic, obs_t, q1c, q2c, act_t
             )
-            return (new_q1c, new_q2c), (q1_t, q2_t)
+            return (new_q1c, new_q2c), (
+                q1_t,
+                q2_t,
+                jax.lax.stop_gradient(input_q1c),
+                jax.lax.stop_gradient(input_q2c),
+            )
 
-        _, (q1_T, q2_T) = jax.lax.scan(
+        _, (q1_T, q2_T, cq1_input_T, cq2_input_T) = jax.lax.scan(
             q_scan, (burn_cq1, burn_cq2), (obs_T, act_T)
         )
         q1 = jnp.swapaxes(q1_T, 0, 1)  # (bs, SL)
@@ -2271,7 +2375,72 @@ def create_iqlearn(
             ((q1[:, :-1] - target_q) ** 2 * m).sum() / denom
             + ((q2[:, :-1] - target_q) ** 2 * m).sum() / denom
         )
-        return loss, {"critic_loss": loss, "target_q": target_q.mean()}
+        metrics = {"critic_loss": loss, "target_q": target_q.mean()}
+
+        # Lambda-discrepancy auxiliary loss: pulls Q_sac + α·H toward Q_mc.
+        # Only the online SAC critic moves; everything else is stop_gradient.
+        if mc_critic_target is not None and params.lambda_discrepancy_coef > 0.0:
+            mc_target_sg = jax.tree.map(jax.lax.stop_gradient, mc_critic_target)
+            actor_target_sg = jax.tree.map(jax.lax.stop_gradient, actor_target)
+
+            def q_mc_scan(carry, x):
+                mc1c, mc2c = carry
+                obs_t, act_t = x
+                q1_t, q2_t, n1, n2 = get_q_both(
+                    mc_target_sg, obs_t, mc1c, mc2c, act_t, use_mc=True
+                )
+                return (n1, n2), (q1_t, q2_t)
+
+            _bs = obs.shape[0]
+            _, (q_mc1_T, q_mc2_T) = jax.lax.scan(
+                q_mc_scan,
+                (_make_mc_critic_q1_carry(_bs), _make_mc_critic_q2_carry(_bs)),
+                (obs_T, act_T),
+            )
+            q_mc = jnp.minimum(
+                jnp.swapaxes(q_mc1_T, 0, 1), jnp.swapaxes(q_mc2_T, 0, 1)
+            )  # (bs, SL)
+
+            def h_scan(carry, obs_t):
+                a_c = carry
+                H_t = get_entropy(actor_target_sg, obs_t, a_c, key_v)
+                new_a_c, _ = run_actor(actor_target_sg, obs_t, a_c)
+                return new_a_c, H_t
+
+            _, H_T = jax.lax.scan(h_scan, burn_ac, obs_T)
+            H = jnp.swapaxes(H_T, 0, 1)  # (bs, SL)
+
+            q_sac = jnp.minimum(q1, q2)  # (bs, SL) — gradient flows through critic
+            delta = (
+                q_sac
+                + alpha * jax.lax.stop_gradient(H)
+                - jax.lax.stop_gradient(q_mc)
+            )
+            disc = optax.losses.huber_loss(
+                delta, delta=params.lambda_discrepancy_delta
+            )
+            disc_loss = (disc * mask).sum() / jnp.maximum(mask.sum(), 1.0)
+            loss = loss + params.lambda_discrepancy_coef * disc_loss
+            metrics["lambda_discrepancy_loss"] = disc_loss
+            metrics["critic_loss"] = loss
+
+        # Carry-refresh payload: input online-critic carries per scan step.
+        if params.refresh_stored_carries:
+            B = params.burn_in_length
+            SL = params.sequence_length + 1
+            cq1_inputs = jax.tree.map(
+                lambda c: jnp.swapaxes(c, 0, 1), cq1_input_T
+            )
+            cq2_inputs = jax.tree.map(
+                lambda c: jnp.swapaxes(c, 0, 1), cq2_input_T
+            )
+            refresh = {
+                critic_q1_carry_key: (seq_idx[:, B:B + SL], cq1_inputs),
+                critic_q2_carry_key: (seq_idx[:, B:B + SL], cq2_inputs),
+            }
+        else:
+            refresh = {}
+        return loss, (metrics, refresh)
 
     def loss_mc_critic_sac(
         actor: NetworkState,
@@ -2280,6 +2449,7 @@ def create_iqlearn(
         online_buf: Buffer,
         alpha: jax.Array,
         key: jax.Array,
+        critic_target: TwinCriticState | None = None,
     ) -> Tuple[jax.Array, dict]:
         """MC-critic Bellman MSE loss with R2D2 burn-in and TD(λ) targets.
 
@@ -2313,8 +2483,16 @@ def create_iqlearn(
             d = done_t.reshape((-1,) + (1,) * (c.ndim - 1))
             return jnp.where(d, jnp.zeros_like(c), c)
 
+        use_disc = (
+            critic_target is not None and params.lambda_discrepancy_coef > 0.0
+        )
+        if use_disc:
+            critic_target_sg = jax.tree.map(jax.lax.stop_gradient, critic_target)
+            actor_sg = jax.tree.map(jax.lax.stop_gradient, actor)
+
         def scan_fun(carries, xs):
-            actor_carry, q1c, q2c, key_c = carries
+            actor_carry, q1c, q2c, sac_q1c, sac_q2c, key_c = carries
+            input_q1c, input_q2c = q1c, q2c  # captured before stop_gradient
             obs_t, act_t, mask_t, done_t, start_t = xs
             key_c, k_td, k_step = jax.random.split(key_c, 3)
 
@@ -2371,14 +2549,82 @@ def create_iqlearn(
                 jnp.mean(mask_t * coefs * (q1 - target_q) ** 2)
                 + jnp.mean(mask_t * coefs * (q2 - target_q) ** 2)
             )
-            return (new_actor_carry, new_q1c, new_q2c, key_c), loss_step
 
-        _, losses = jax.lax.scan(
+            disc_step = jnp.float32(0.0)
+            if use_disc:
+                # Q_sac at (s,a) under SAC critic target — stop gradient.
+                # H_π(s) under stop-gradient actor.
+                q_sac1, q_sac2, new_sac_q1c, new_sac_q2c = get_q_both(
+                    critic_target_sg,
+                    obs_t,
+                    sac_q1c,
+                    sac_q2c,
+                    act_t,
+                    use_mc=False,
+                )
+                q_sac_min = jnp.minimum(q_sac1, q_sac2)
+                H_t = get_entropy(actor_sg, obs_t, actor_carry_sg, k_step)
+                q_mc_min = jnp.minimum(q1, q2)  # gradient flows
+                delta = (
+                    jax.lax.stop_gradient(q_sac_min + alpha * H_t) - q_mc_min
+                )
+                disc = optax.losses.huber_loss(
+                    delta, delta=params.lambda_discrepancy_delta
+                )
+                disc_step = (disc * mask_t).mean()
+                loss_step = (
+                    loss_step + params.lambda_discrepancy_coef * disc_step
+                )
+                new_sac_q1c = reset_on_done(new_sac_q1c, done_t)
+                new_sac_q2c = reset_on_done(new_sac_q2c, done_t)
+            else:
+                new_sac_q1c, new_sac_q2c = sac_q1c, sac_q2c
+
+            return (
+                new_actor_carry,
+                new_q1c,
+                new_q2c,
+                new_sac_q1c,
+                new_sac_q2c,
+                key_c,
+            ), (
+                loss_step,
+                disc_step,
+                jax.lax.stop_gradient(input_q1c),
+                jax.lax.stop_gradient(input_q2c),
+            )
+
+        _bs = obs.shape[0]
+        if use_disc:
+            init_sac_q1c = _make_critic_q1_carry(_bs)
+            init_sac_q2c = _make_critic_q2_carry(_bs)
+        else:
+            init_sac_q1c = burn_cq1
+            init_sac_q2c = burn_cq2
+        _, (losses, disc_losses, mcq1_inputs_T, mcq2_inputs_T) = jax.lax.scan(
             scan_fun,
-            (burn_ac, burn_cq1, burn_cq2, key_scan),
+            (burn_ac, burn_cq1, burn_cq2, init_sac_q1c, init_sac_q2c, key_scan),
             (obs_T, act_T, mask_T, done_T, seq_start_T),
         )
-        return losses.mean(), {"mc_critic_loss": losses.mean()}
+        metrics = {"mc_critic_loss": losses.mean()}
+        if use_disc:
+            metrics["lambda_discrepancy_loss"] = disc_losses.mean()
+
+        if params.refresh_stored_carries:
+            SL = params.sequence_length + 1
+            mcq1_inputs = jax.tree.map(
+                lambda c: jnp.swapaxes(c, 0, 1), mcq1_inputs_T
+            )
+            mcq2_inputs = jax.tree.map(
+                lambda c: jnp.swapaxes(c, 0, 1), mcq2_inputs_T
+            )
+            refresh = {
+                mc_critic_q1_carry_key: (seq_idx[:, B:B + SL], mcq1_inputs),
+                mc_critic_q2_carry_key: (seq_idx[:, B:B + SL], mcq2_inputs),
+            }
+        else:
+            refresh = {}
+        return losses.mean(), (metrics, refresh)
 
     # ------------------------------------------------------------------
     # Online helpers: environment interaction and SAC update
@@ -2733,17 +2979,22 @@ def create_iqlearn(
         else:
             key_actor, key_critic, key_mc_critic = jax.random.split(key, 3)
 
+            _mc_for_disc = sac.mc_critic_target if approximate_mc else None
+
             # Actor gradient: maximise soft value V(s) = Q(s,a) - α log π(a|s)
-            grads_actor, metrics = jax.grad(loss_actor, has_aux=True)(
+            grads_actor, (metrics, refresh_actor) = jax.grad(
+                loss_actor, has_aux=True
+            )(
                 sac.actor,
                 sac.critic_target,
                 sac.online_buffer,
                 online_buffer_sample,
                 sac.alpha,
                 key_actor,
+                _mc_for_disc,
             )
             # Critic gradient: minimise SAC Bellman MSE
-            grads_critic, metrics_critic = jax.grad(
+            grads_critic, (metrics_critic, refresh_critic) = jax.grad(
                 loss_critic_sac, argnums=1, has_aux=True
             )(
                 sac.actor_target,
@@ -2752,10 +3003,11 @@ def create_iqlearn(
                 sac.online_buffer,
                 sac.alpha,
                 key_critic,
+                _mc_for_disc,
             )
 
             if approximate_mc:
-                grads_mc_critic, metrics_mc_critic = jax.grad(
+                grads_mc_critic, (metrics_mc_critic, refresh_mc) = jax.grad(
                     loss_mc_critic_sac, argnums=1, has_aux=True
                 )(
                     sac.actor,
@@ -2764,12 +3016,31 @@ def create_iqlearn(
                     sac.online_buffer,
                     sac.alpha,
                     key_mc_critic,
+                    sac.critic_target,
                 )
+            else:
+                refresh_mc = {}
 
         metrics.update(metrics_critic)
 
         if approximate_mc:
             metrics.update(metrics_mc_critic)
+
+        # Carry refresh: scatter the per-step input carries that the loss
+        # scans just produced into the online buffer at the sampled slots,
+        # countering carry drift.  Each loss writes only its own carry key,
+        # so dicts are disjoint and merge order is irrelevant.
+        new_online_buffer_info = sac.online_buffer.info
+        if params.refresh_stored_carries:
+            new_online_buffer_info = dict(new_online_buffer_info)
+            for refresh in (refresh_actor, refresh_critic, refresh_mc):
+                for key, (idx, vals) in refresh.items():
+                    new_online_buffer_info[key] = (
+                        new_online_buffer_info[key].at[idx].set(vals)
+                    )
+        new_online_buffer = sac.online_buffer._replace(
+            info=new_online_buffer_info
+        )
 
         updates, new_actor_opt = actor_optimizer.update(
             grads_actor, sac.actor_optimizer_state
@@ -2830,7 +3101,7 @@ def create_iqlearn(
                 new_alpha_opt,  # type: ignore
                 new_alpha,
                 new_log_alpha,  # type: ignore
-                sac.online_buffer,
+                new_online_buffer,
                 sac.actor_online_carry,
                 sac.critic_q1_online_carry,
                 sac.critic_q2_online_carry,
@@ -2858,8 +3129,11 @@ def create_iqlearn(
         print("compiling...")
         key_actor, key_critic = jax.random.split(key, 2)
 
-        # actor gradients
-        grads_actor, metrics = jax.grad(loss_actor, has_aux=True)(
+        # actor gradients (loss_actor returns aux=(metrics, refresh); IQ-Learn
+        # path doesn't refresh stored carries, so refresh dict is discarded).
+        grads_actor, (metrics, _refresh_actor) = jax.grad(
+            loss_actor, has_aux=True
+        )(
             iqlearn.actor,
             iqlearn.critic_target,
             buffer,
