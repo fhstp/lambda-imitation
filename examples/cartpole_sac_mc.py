@@ -55,6 +55,13 @@ parser.add_argument(
     help="JAX random seed (default: 0)",
 )
 parser.add_argument(
+    "--lambda-coef",
+    type=float,
+    default=0.6,
+    metavar="LC",
+    help="lambda discrepancy coefficient (default: 0.6)",
+)
+parser.add_argument(
     "--partial",
     action="store_true",
     help=(
@@ -180,7 +187,7 @@ hp = Hyperparameters(
     burn_in_from_stored_carry=True,
     value_rescaling=False,
     value_rescaling_eps=1e-3,
-    lambda_discrepancy_coef=0.6,
+    lambda_discrepancy_coef=args.lambda_coef,
     lambda_discrepancy_delta=1.0,
     refresh_stored_carries=True,
 )
