@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from lambda_imitation.buffer import create_buffer
+from lambda_imitation.buffer import Buffer, SequenceSample, create_buffer, create_sequence_sample
 
 
 # ---------------------------------------------------------------------------
@@ -365,3 +365,248 @@ class TestSampling:
         _, idx_b = fns.sample(buf, jax.random.key(1))
         # With 4 valid slots and sampling_size=3 the chance of identical draws is tiny
         assert not (idx_a == idx_b).all()
+
+
+# ---------------------------------------------------------------------------
+# Stage C: create_sequence_sample + SequenceSample
+# ---------------------------------------------------------------------------
+
+_SEQ_SIZE  = 10   # buffer capacity
+_SEQ_T     = 3    # sequence length
+_SEQ_BATCH = 4    # sequences per call
+_OBS_DIM   = 2    # observation shape
+
+
+def _make_seq_buffer(size=_SEQ_SIZE, terminal_slots=None):
+    """Fill a buffer storing 'obs' and 'terminal' keys.
+
+    All slots are filled in order.  terminal_slots is a set of indices at
+    which terminated=True is passed (default: only the last slot).
+    """
+    if terminal_slots is None:
+        terminal_slots = {size - 1}
+    buf, fns = create_buffer(
+        shapes={"obs": (_OBS_DIM,), "terminal": ()},
+        size=size,
+        sampling_size=1,
+        this_step_infos=["obs", "terminal"],
+        next_step_infos=["obs"],
+    )
+    for i in range(size):
+        terminated = i in terminal_slots
+        buf = fns.add(
+            buf,
+            {
+                "obs": jnp.array([float(i), float(i)]),
+                "terminal": jnp.array(float(terminated)),
+            },
+            terminated,
+        )
+    return buf
+
+
+def _seq_sampler(size=_SEQ_SIZE, T=_SEQ_T, batch=_SEQ_BATCH):
+    return create_sequence_sample(
+        buffer_size=size,
+        batch_size=batch,
+        sequence_length=T,
+        keys=["obs", "terminal"],
+        terminal_key="terminal",
+    )
+
+
+class TestSequenceSampleShapes:
+    """create_sequence_sample returns correct shapes and types."""
+
+    def test_info_shape(self):
+        buf = _make_seq_buffer()
+        sample = _seq_sampler()(buf, jax.random.key(0))
+        assert sample.info["obs"].shape == (_SEQ_BATCH, _SEQ_T, _OBS_DIM)
+        assert sample.info["terminal"].shape == (_SEQ_BATCH, _SEQ_T)
+
+    def test_mask_shape(self):
+        buf = _make_seq_buffer()
+        sample = _seq_sampler()(buf, jax.random.key(0))
+        assert sample.mask.shape == (_SEQ_BATCH, _SEQ_T)
+
+    def test_start_index_shape(self):
+        buf = _make_seq_buffer()
+        sample = _seq_sampler()(buf, jax.random.key(0))
+        assert sample.start_index.shape == (_SEQ_BATCH,)
+
+    def test_mask_dtype(self):
+        buf = _make_seq_buffer()
+        sample = _seq_sampler()(buf, jax.random.key(0))
+        assert sample.mask.dtype == jnp.float32
+
+    def test_result_is_sequence_sample(self):
+        buf = _make_seq_buffer()
+        sample = _seq_sampler()(buf, jax.random.key(0))
+        assert isinstance(sample, SequenceSample)
+
+
+class TestSequenceSampleValidity:
+    """All sampled start positions must be valid (sampling_ok) for the full window."""
+
+    def test_all_starts_sampling_ok(self):
+        buf = _make_seq_buffer()
+        sample_fn = _seq_sampler()
+        for seed in range(10):
+            sample = sample_fn(buf, jax.random.key(seed))
+            for s in sample.start_index:
+                assert buf.sampling_ok[int(s)], f"seed={seed}, start={int(s)}"
+
+    def test_all_window_slots_sampling_ok(self):
+        """Every slot in each sampled T-length window must have sampling_ok=True."""
+        buf = _make_seq_buffer()
+        sample_fn = _seq_sampler()
+        for seed in range(5):
+            sample = sample_fn(buf, jax.random.key(seed))
+            for s in sample.start_index:
+                for t in range(_SEQ_T):
+                    slot = (int(s) + t) % _SEQ_SIZE
+                    assert buf.sampling_ok[slot], (
+                        f"seed={seed}, start={int(s)}, offset={t}, slot={slot}"
+                    )
+
+    def test_unfilled_tail_never_sampled(self):
+        """Starts that would extend into unwritten slots must never be chosen."""
+        # Fill only 5 of 10 slots (all non-terminal), then sample T=3.
+        # Slot 4 has no valid next, so only starts {0, 1} are valid.
+        buf, fns = create_buffer(
+            shapes={"obs": (_OBS_DIM,), "terminal": ()},
+            size=10,
+            sampling_size=1,
+            this_step_infos=["obs", "terminal"],
+            next_step_infos=["obs"],
+        )
+        for i in range(5):
+            buf = fns.add(
+                buf,
+                {"obs": jnp.array([float(i), float(i)]), "terminal": jnp.array(0.0)},
+                False,
+            )
+        # sampling_ok: [T, T, T, T, F, F, F, F, F, F]
+        sample_fn = create_sequence_sample(
+            buffer_size=10,
+            batch_size=16,
+            sequence_length=3,
+            keys=["obs", "terminal"],
+            terminal_key="terminal",
+        )
+        for seed in range(10):
+            sample = sample_fn(buf, jax.random.key(seed))
+            for s in sample.start_index:
+                assert int(s) in (0, 1), f"unexpected start={int(s)}"
+
+
+class TestSequenceSampleMask:
+    """Terminal mask correctness."""
+
+    def test_no_terminal_mask_all_ones(self):
+        """Sequence with no terminal inside: mask must be all 1s."""
+        # terminal_slots={9}: terminal only at slot 9; T=3 sequences starting at 0..6
+        # never include slot 9 if start <= 6 (0+3-1=2, ..., 6+3-1=8).
+        buf = _make_seq_buffer(terminal_slots={9})
+        sample_fn = create_sequence_sample(
+            buffer_size=_SEQ_SIZE,
+            batch_size=20,
+            sequence_length=3,
+            keys=["obs", "terminal"],
+            terminal_key="terminal",
+        )
+        # Force starts that don't include slot 9: all valid starts are 0..7
+        # (0+2=2, 7+2=9 — slot 9 IS included when start=7).
+        # Use start=0 explicitly by checking we get mask=1 at least sometimes.
+        sample = sample_fn(buf, jax.random.key(0))
+        # Sequences that don't touch the terminal (not starting at 7) must be all-1 masked.
+        for b in range(sample.mask.shape[0]):
+            s = int(sample.start_index[b])
+            window = [(s + t) % _SEQ_SIZE for t in range(3)]
+            if 9 not in window:
+                assert jnp.all(sample.mask[b] == 1.0), (
+                    f"start={s}, window={window}, mask={sample.mask[b]}"
+                )
+
+    def test_terminal_at_start_mask(self):
+        """Terminal at t=0: mask[0]=1, mask[1:]=0."""
+        # Make a buffer where slot 0 is terminal, all others non-terminal (except last).
+        # Sample T=3 starting at slot 0.
+        size = 6
+        buf, fns = create_buffer(
+            shapes={"obs": (_OBS_DIM,), "terminal": ()},
+            size=size,
+            sampling_size=1,
+            this_step_infos=["obs", "terminal"],
+            next_step_infos=["obs"],
+        )
+        for i in range(size):
+            terminated = (i == 0) or (i == size - 1)
+            buf = fns.add(
+                buf,
+                {"obs": jnp.array([float(i), float(i)]),
+                 "terminal": jnp.array(float(i == 0))},
+                terminated,
+            )
+        sample_fn = create_sequence_sample(
+            buffer_size=size,
+            batch_size=20,
+            sequence_length=3,
+            keys=["obs", "terminal"],
+            terminal_key="terminal",
+        )
+        sample = sample_fn(buf, jax.random.key(42))
+        for b in range(sample.mask.shape[0]):
+            if int(sample.start_index[b]) == 0:
+                expected = jnp.array([1.0, 0.0, 0.0])
+                assert jnp.allclose(sample.mask[b], expected), (
+                    f"mask={sample.mask[b]}"
+                )
+
+    def test_terminal_mid_sequence_mask(self):
+        """Terminal at t=1: mask=[1,1,0]."""
+        # Slot 2 is terminal; sequences starting at slot 1 = [slot1, slot2(term), slot3]
+        size = 8
+        T = 3
+        buf, fns = create_buffer(
+            shapes={"obs": (_OBS_DIM,), "terminal": ()},
+            size=size,
+            sampling_size=1,
+            this_step_infos=["obs", "terminal"],
+            next_step_infos=["obs"],
+        )
+        for i in range(size):
+            terminated = (i == 2) or (i == size - 1)
+            buf = fns.add(
+                buf,
+                {"obs": jnp.array([float(i), float(i)]),
+                 "terminal": jnp.array(float(i == 2))},
+                terminated,
+            )
+        sample_fn = create_sequence_sample(
+            buffer_size=size,
+            batch_size=20,
+            sequence_length=T,
+            keys=["obs", "terminal"],
+            terminal_key="terminal",
+        )
+        sample = sample_fn(buf, jax.random.key(7))
+        for b in range(sample.mask.shape[0]):
+            if int(sample.start_index[b]) == 1:
+                # window = [slot1, slot2(term), slot3] → mask = [1, 1, 0]
+                expected = jnp.array([1.0, 1.0, 0.0])
+                assert jnp.allclose(sample.mask[b], expected), (
+                    f"mask={sample.mask[b]}"
+                )
+
+    def test_data_matches_buffer_at_gathered_positions(self):
+        """info['obs'][b, t] must equal buffer.info['obs'][(start+t)%size]."""
+        buf = _make_seq_buffer()
+        sample = _seq_sampler()(buf, jax.random.key(3))
+        for b in range(_SEQ_BATCH):
+            for t in range(_SEQ_T):
+                slot = (int(sample.start_index[b]) + t) % _SEQ_SIZE
+                expected = buf.info["obs"][slot]
+                assert jnp.allclose(sample.info["obs"][b, t], expected), (
+                    f"b={b}, t={t}, slot={slot}"
+                )

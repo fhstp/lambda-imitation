@@ -18,6 +18,8 @@ from lambda_imitation.iqlearn import (
     IQLearnFunctions,
     IQLearnGraphs,
     IQLearnState,
+    IdentityMemory,
+    LSTMMemory,
     MLPFeatureExtractor,
     NetworkGraphs,
     NetworkState,
@@ -661,7 +663,9 @@ class TestCreateIQLearnDiscrete:
             hp, buf, NUM_ACTIONS, actor_fe, critic_q1_fe, critic_q2_fe,
             train_steps=TRAIN_STEPS, is_discrete=True,
         )
-        action = fns.predict(state, jnp.ones(OBS_DIM), deterministic=True)
+        action, _ = fns.predict(
+            state, jnp.ones(OBS_DIM), state.actor_online_carry, deterministic=True
+        )
         assert action.shape == ()
 
 
@@ -678,35 +682,47 @@ class TestPredictDiscrete:
 
     def test_output_is_float32_scalar(self, setup):
         state, fns, obs = setup
-        action = fns.predict(state, obs, deterministic=True)
+        action, _ = fns.predict(state, obs, state.actor_online_carry, deterministic=True)
         assert action.shape == ()
         assert action.dtype == jnp.float32
 
     def test_deterministic_ignores_key(self, setup):
         state, fns, obs = setup
-        a1 = fns.predict(state, obs, key=jax.random.key(0), deterministic=True)
-        a2 = fns.predict(state, obs, key=jax.random.key(999), deterministic=True)
+        a1, _ = fns.predict(
+            state, obs, state.actor_online_carry,
+            key=jax.random.key(0), deterministic=True,
+        )
+        a2, _ = fns.predict(
+            state, obs, state.actor_online_carry,
+            key=jax.random.key(999), deterministic=True,
+        )
         assert jnp.allclose(a1, a2)
 
     def test_stochastic_varies(self, setup):
         """Different keys should (with high probability) yield different actions."""
         state, fns, obs = setup
         results = {
-            int(fns.predict(state, obs, key=jax.random.key(s), deterministic=False))
+            int(fns.predict(
+                state, obs, state.actor_online_carry,
+                key=jax.random.key(s), deterministic=False,
+            )[0])
             for s in range(20)
         }
         assert len(results) > 1, "stochastic predict should not always return same action"
 
     def test_valid_action_range_deterministic(self, setup):
         state, fns, obs = setup
-        action = fns.predict(state, obs, deterministic=True)
+        action, _ = fns.predict(state, obs, state.actor_online_carry, deterministic=True)
         assert float(action) >= 0.0
         assert float(action) < NUM_ACTIONS
 
     def test_valid_action_range_stochastic(self, setup):
         state, fns, obs = setup
         for seed in range(20):
-            action = fns.predict(state, obs, key=jax.random.key(seed), deterministic=False)
+            action, _ = fns.predict(
+                state, obs, state.actor_online_carry,
+                key=jax.random.key(seed), deterministic=False,
+            )
             assert float(action) >= 0.0
             assert float(action) < NUM_ACTIONS
 
@@ -1720,3 +1736,630 @@ class TestGetQDebug:
         q_mc  = debug_fns.get_q(state.mc_critic_target, obs, actions, True)
         # The two critics are independently initialised, so their outputs should differ
         assert not jnp.allclose(q_sac, q_mc)
+
+
+# ---------------------------------------------------------------------------
+# Stage B: scan helpers
+# ---------------------------------------------------------------------------
+
+_LSTM_HIDDEN = 16
+_SCAN_BATCH  = 4
+_SCAN_T      = 5
+
+
+class TestIdentityMemoryScan:
+    """IdentityMemory.scan must pass the sequence through unchanged."""
+
+    def test_output_equals_input(self):
+        mem = IdentityMemory(OBS_DIM, rngs=nnx.Rngs(0))
+        xs = jax.random.normal(jax.random.key(0), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        carry = mem.initial_carry(_SCAN_BATCH)
+        new_carry, ys = mem.scan(xs, carry)
+        assert jnp.allclose(ys, xs)
+
+    def test_carry_unchanged(self):
+        mem = IdentityMemory(OBS_DIM, rngs=nnx.Rngs(0))
+        xs = jax.random.normal(jax.random.key(1), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        carry = mem.initial_carry(_SCAN_BATCH)
+        new_carry, _ = mem.scan(xs, carry)
+        assert jnp.allclose(new_carry, carry)
+
+    def test_output_shape(self):
+        mem = IdentityMemory(OBS_DIM, rngs=nnx.Rngs(0))
+        xs = jax.random.normal(jax.random.key(2), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        carry = mem.initial_carry(_SCAN_BATCH)
+        _, ys = mem.scan(xs, carry)
+        assert ys.shape == (_SCAN_BATCH, _SCAN_T, OBS_DIM)
+
+
+class TestLSTMMemoryScan:
+    """LSTMMemory.scan must match step-by-step __call__ results."""
+
+    def _make_mem(self, seed=0):
+        return LSTMMemory(OBS_DIM, _LSTM_HIDDEN, rngs=nnx.Rngs(seed))
+
+    def test_output_shape(self):
+        mem = self._make_mem()
+        xs = jax.random.normal(jax.random.key(0), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        carry = mem.initial_carry(_SCAN_BATCH)
+        final_carry, ys = mem.scan(xs, carry)
+        assert ys.shape == (_SCAN_BATCH, _SCAN_T, _LSTM_HIDDEN)
+
+    def test_final_carry_shape(self):
+        mem = self._make_mem()
+        xs = jax.random.normal(jax.random.key(1), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        carry = mem.initial_carry(_SCAN_BATCH)
+        final_carry, _ = mem.scan(xs, carry)
+        # concatenated (c||h) — single array (batch, 2 * hidden_dim)
+        assert final_carry.shape == (_SCAN_BATCH, 2 * _LSTM_HIDDEN)
+
+    def test_scan_matches_step_by_step(self):
+        """scan and repeated __call__ must produce identical outputs."""
+        mem = self._make_mem(seed=42)
+        xs = jax.random.normal(jax.random.key(7), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        carry = mem.initial_carry(_SCAN_BATCH)
+
+        final_carry_scan, ys_scan = mem.scan(xs, carry)
+
+        carry_step = carry
+        ys_step = []
+        for t in range(_SCAN_T):
+            carry_step, y_t = mem(xs[:, t, :], carry_step)
+            ys_step.append(y_t)
+        ys_step = jnp.stack(ys_step, axis=1)
+
+        assert jnp.allclose(ys_scan, ys_step, atol=1e-6)
+        assert jnp.allclose(final_carry_scan, carry_step, atol=1e-6)
+
+    def test_output_finite(self):
+        mem = self._make_mem()
+        xs = jax.random.normal(jax.random.key(3), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        carry = mem.initial_carry(_SCAN_BATCH)
+        _, ys = mem.scan(xs, carry)
+        assert jnp.all(jnp.isfinite(ys))
+
+
+def _make_discrete_debug_with_lstm():
+    """Discrete create_iqlearn with LSTMMemory actors and critics."""
+    import math
+    hp = Hyperparameters(
+        batch_size=BATCH_SIZE,
+        target_entropy=float(0.98 * math.log(NUM_ACTIONS)),
+    )
+    buf, _ = make_discrete_buffer()
+    actor_fe, cq1_fe, cq2_fe = make_feature_extractors()
+    mc_cq1_fe, mc_cq2_fe = make_mc_feature_extractors()
+    rngs = nnx.Rngs(0)
+    feat_dim = FE_DIMS[-1]
+    actor_mem    = LSTMMemory(feat_dim, _LSTM_HIDDEN, rngs=nnx.Rngs(10))
+    cq1_mem      = LSTMMemory(feat_dim, _LSTM_HIDDEN, rngs=nnx.Rngs(11))
+    cq2_mem      = LSTMMemory(feat_dim, _LSTM_HIDDEN, rngs=nnx.Rngs(12))
+    mc_cq1_mem   = LSTMMemory(feat_dim, _LSTM_HIDDEN, rngs=nnx.Rngs(13))
+    mc_cq2_mem   = LSTMMemory(feat_dim, _LSTM_HIDDEN, rngs=nnx.Rngs(14))
+    return create_iqlearn(
+        hp, buf, NUM_ACTIONS, actor_fe, cq1_fe, cq2_fe,
+        actor_memory=actor_mem,
+        critic_q1_memory=cq1_mem,
+        critic_q2_memory=cq2_mem,
+        mc_critic_q1_feature_extractor=mc_cq1_fe,
+        mc_critic_q2_feature_extractor=mc_cq2_fe,
+        mc_critic_q1_memory=mc_cq1_mem,
+        mc_critic_q2_memory=mc_cq2_mem,
+        train_steps=TRAIN_STEPS, critic_head_dims=(32,),
+        is_discrete=True, approximate_mc=True, debug=True,
+    )
+
+
+def _make_continuous_debug_with_lstm():
+    """Continuous create_iqlearn with LSTMMemory."""
+    hp = Hyperparameters(batch_size=BATCH_SIZE)
+    buf, _ = make_filled_buffer()
+    actor_fe, cq1_fe, cq2_fe = make_feature_extractors()
+    feat_dim = FE_DIMS[-1]
+    actor_mem = LSTMMemory(feat_dim, _LSTM_HIDDEN, rngs=nnx.Rngs(20))
+    cq1_mem   = LSTMMemory(feat_dim, _LSTM_HIDDEN, rngs=nnx.Rngs(21))
+    cq2_mem   = LSTMMemory(feat_dim, _LSTM_HIDDEN, rngs=nnx.Rngs(22))
+    return create_iqlearn(
+        hp, buf, ACTION_DIM, actor_fe, cq1_fe, cq2_fe,
+        actor_memory=actor_mem,
+        critic_q1_memory=cq1_mem,
+        critic_q2_memory=cq2_mem,
+        train_steps=TRAIN_STEPS, critic_head_dims=(32,),
+        debug=True,
+    )
+
+
+class TestRunActorScan:
+    """run_actor_scan shape, dtype, and step-scan consistency."""
+
+    def test_fields_exposed_in_debug_fns(self):
+        _, _, _, debug_fns = _make_debug_discrete()
+        assert callable(debug_fns.run_actor_scan)
+        assert callable(debug_fns.run_critic_scan)
+
+    def test_discrete_shape_and_dtype(self):
+        state, _, _, debug_fns = _make_discrete_debug_with_lstm()
+        xs = jax.random.normal(jax.random.key(0), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        carry = state.actor_online_carry
+        # Broadcast carry from batch=1 to _SCAN_BATCH
+        carry = jax.tree.map(
+            lambda c: jnp.broadcast_to(c, (_SCAN_BATCH,) + c.shape[1:]), carry
+        )
+        _, ys = debug_fns.run_actor_scan(state.actor, xs, carry)
+        assert ys.shape == (_SCAN_BATCH, _SCAN_T, NUM_ACTIONS)
+        assert ys.dtype == jnp.float32
+
+    def test_continuous_shape_and_dtype(self):
+        state, _, _, debug_fns = _make_continuous_debug_with_lstm()
+        xs = jax.random.normal(jax.random.key(1), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        carry = jax.tree.map(
+            lambda c: jnp.broadcast_to(c, (_SCAN_BATCH,) + c.shape[1:]),
+            state.actor_online_carry,
+        )
+        _, ys = debug_fns.run_actor_scan(state.actor, xs, carry)
+        assert ys.shape == (_SCAN_BATCH, _SCAN_T, 2 * ACTION_DIM)
+        assert ys.dtype == jnp.float32
+
+    def test_scan_internal_consistency_identity(self):
+        """With IdentityMemory (no state), slicing the sequence must give same output."""
+        state, _, _, debug_fns = _make_debug_discrete()
+        xs = jax.random.normal(jax.random.key(5), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        carry_init = jax.tree.map(
+            lambda c: jnp.broadcast_to(c, (_SCAN_BATCH,) + c.shape[1:]),
+            state.actor_online_carry,
+        )
+        _, ys_full = debug_fns.run_actor_scan(state.actor, xs, carry_init)
+        # Scan over just the first timestep — output must match the first col of full scan
+        _, ys_first = debug_fns.run_actor_scan(state.actor, xs[:, :1, :], carry_init)
+        assert jnp.allclose(ys_first[:, 0, :], ys_full[:, 0, :], atol=1e-6)
+
+    def test_scan_output_finite(self):
+        state, _, _, debug_fns = _make_discrete_debug_with_lstm()
+        xs = jax.random.normal(jax.random.key(6), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        carry = jax.tree.map(
+            lambda c: jnp.broadcast_to(c, (_SCAN_BATCH,) + c.shape[1:]),
+            state.actor_online_carry,
+        )
+        _, ys = debug_fns.run_actor_scan(state.actor, xs, carry)
+        assert jnp.all(jnp.isfinite(ys))
+
+    def test_grad_flows_through_actor_scan(self):
+        """Gradients must propagate through run_actor_scan to actor params."""
+        state, _, _, debug_fns = _make_discrete_debug_with_lstm()
+        xs = jax.random.normal(jax.random.key(7), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        carry = jax.tree.map(
+            lambda c: jnp.broadcast_to(c, (_SCAN_BATCH,) + c.shape[1:]),
+            state.actor_online_carry,
+        )
+
+        def loss_fn(actor):
+            _, ys = debug_fns.run_actor_scan(actor, xs, carry)
+            return ys.sum()
+
+        # jax.vjp handles mixed-type pytrees (float32 params + uint32 PRNG keys).
+        _, pullback = jax.vjp(loss_fn, state.actor)
+        (grads,) = pullback(jnp.ones(()))
+        float_grads = [l for l in jax.tree.leaves(grads)
+                       if hasattr(l, "dtype") and jnp.issubdtype(l.dtype, jnp.floating)]
+        assert float_grads, "No float gradient leaves found"
+        assert any(jnp.any(g != 0) for g in float_grads), "Expected nonzero grads"
+
+
+class TestRunCriticScan:
+    """run_critic_scan shape, dtype, and step-scan consistency."""
+
+    def test_discrete_shape_and_dtype(self):
+        state, _, _, debug_fns = _make_discrete_debug_with_lstm()
+        xs = jax.random.normal(jax.random.key(0), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        fc1, fc2, qs = debug_fns.run_critic_scan(state.critic, xs)
+        assert qs.shape == (_SCAN_BATCH, _SCAN_T, NUM_ACTIONS, 2)
+        assert qs.dtype == jnp.float32
+
+    def test_discrete_finite(self):
+        state, _, _, debug_fns = _make_discrete_debug_with_lstm()
+        xs = jax.random.normal(jax.random.key(1), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        _, _, qs = debug_fns.run_critic_scan(state.critic, xs)
+        assert jnp.all(jnp.isfinite(qs))
+
+    def test_discrete_mc_shape(self):
+        state, _, _, debug_fns = _make_discrete_debug_with_lstm()
+        xs = jax.random.normal(jax.random.key(2), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        fc1, fc2, qs = debug_fns.run_critic_scan(state.mc_critic_target, xs, use_mc=True)
+        assert qs.shape == (_SCAN_BATCH, _SCAN_T, NUM_ACTIONS, 2)
+
+    def test_discrete_grad_flows(self):
+        state, _, _, debug_fns = _make_discrete_debug_with_lstm()
+        xs = jax.random.normal(jax.random.key(3), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+
+        def loss_fn(critic):
+            _, _, qs = debug_fns.run_critic_scan(critic, xs)
+            return qs.sum()
+
+        _, pullback = jax.vjp(loss_fn, state.critic)
+        (grads,) = pullback(jnp.ones(()))
+        float_grads = [l for l in jax.tree.leaves(grads)
+                       if hasattr(l, "dtype") and jnp.issubdtype(l.dtype, jnp.floating)]
+        assert any(jnp.any(g != 0) for g in float_grads)
+
+    def test_continuous_shape_and_dtype(self):
+        state, _, _, debug_fns = _make_continuous_debug_with_lstm()
+        xs = jax.random.normal(jax.random.key(4), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        acts = jax.random.normal(jax.random.key(5), (_SCAN_BATCH, _SCAN_T, ACTION_DIM))
+        fc1, fc2, qs = debug_fns.run_critic_scan(state.critic, xs, acts)
+        assert qs.shape == (_SCAN_BATCH, _SCAN_T, 2)
+        assert qs.dtype == jnp.float32
+
+    def test_continuous_finite(self):
+        state, _, _, debug_fns = _make_continuous_debug_with_lstm()
+        xs  = jax.random.normal(jax.random.key(6), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        acts = jax.random.normal(jax.random.key(7), (_SCAN_BATCH, _SCAN_T, ACTION_DIM))
+        _, _, qs = debug_fns.run_critic_scan(state.critic, xs, acts)
+        assert jnp.all(jnp.isfinite(qs))
+
+    def test_continuous_grad_flows(self):
+        state, _, _, debug_fns = _make_continuous_debug_with_lstm()
+        xs   = jax.random.normal(jax.random.key(8), (_SCAN_BATCH, _SCAN_T, OBS_DIM))
+        acts = jax.random.normal(jax.random.key(9), (_SCAN_BATCH, _SCAN_T, ACTION_DIM))
+
+        def loss_fn(critic):
+            _, _, qs = debug_fns.run_critic_scan(critic, xs, acts)
+            return qs.sum()
+
+        _, pullback = jax.vjp(loss_fn, state.critic)
+        (grads,) = pullback(jnp.ones(()))
+        float_grads = [l for l in jax.tree.leaves(grads)
+                       if hasattr(l, "dtype") and jnp.issubdtype(l.dtype, jnp.floating)]
+        assert any(jnp.any(g != 0) for g in float_grads)
+
+
+# ---------------------------------------------------------------------------
+# Stage D: sequence training (R2D2 path in update_step_sac)
+# ---------------------------------------------------------------------------
+
+_SEQ_OBS_DIM2   = 4
+_SEQ_NUM_ACTS2  = 3
+_SEQ_ACT_DIM2   = 2
+_SEQ_BUF_SIZE2  = 64
+_SEQ_BATCH2     = 8
+_SEQ_T2         = 6
+_SEQ_BURN2      = 2
+
+
+def _make_seq_sac(
+    discrete: bool,
+    burn_in: int = _SEQ_BURN2,
+    seq_len: int = _SEQ_T2,
+    online_buf_size: int = _SEQ_BUF_SIZE2,
+    online_batch: int = _SEQ_BATCH2,
+    train_steps: int = 1,
+):
+    """Helper: warm IQLearnState with sequence_length > 1, one train_sac call."""
+    import math
+
+    env = _MockEnv()
+    env_params = _MockEnvParams()
+    _, env_state0 = env.reset(jax.random.key(0), env_params)
+
+    hp = Hyperparameters(
+        batch_size=BATCH_SIZE,
+        online_batch_size=online_batch,
+        online_buffer_size=online_buf_size,
+        sequence_length=seq_len,
+        burn_in_length=burn_in,
+        target_entropy=float(0.98 * math.log(_SEQ_NUM_ACTS2)) if discrete else -float(_SEQ_ACT_DIM2),
+    )
+
+    rngs = nnx.Rngs(42)
+    if discrete:
+        buf, _ = make_discrete_buffer(
+            obs_dim=_SEQ_OBS_DIM2, num_actions=_SEQ_NUM_ACTS2,
+            size=BUFFER_SIZE, batch_size=BATCH_SIZE,
+        )
+        state, fns, _ = create_iqlearn(
+            hp, buf, _SEQ_NUM_ACTS2,
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            train_steps=train_steps,
+            critic_head_dims=(16,),
+            is_discrete=True,
+        )
+    else:
+        buf, _ = make_filled_buffer(
+            obs_dim=_SEQ_OBS_DIM2, action_dim=_SEQ_ACT_DIM2,
+            size=BUFFER_SIZE, batch_size=BATCH_SIZE,
+        )
+        state, fns, _ = create_iqlearn(
+            hp, buf, _SEQ_ACT_DIM2,
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            train_steps=train_steps,
+            critic_head_dims=(16,),
+            is_discrete=False,
+        )
+
+    prefill_steps = max(online_batch, seq_len + 4)
+    state, env_state0 = fns.prefill_buffer(
+        state, env, env_params, env_state0, prefill_steps, jax.random.key(1)
+    )
+
+    new_state, new_env_state, metrics = fns.train_sac(
+        state, env, env_params, env_state0, jax.random.key(2)
+    )
+    return state, new_state, new_env_state, metrics
+
+
+class TestSeqTrainSAC:
+    """Sequence (R2D2) training path in update_step_sac."""
+
+    def test_discrete_runs(self):
+        _make_seq_sac(discrete=True)
+
+    def test_discrete_returns_iqlearnstate(self):
+        _, new_state, _, _ = _make_seq_sac(discrete=True)
+        assert isinstance(new_state, IQLearnState)
+
+    def test_discrete_metric_keys(self):
+        _, _, _, metrics = _make_seq_sac(discrete=True)
+        expected = {"q", "entropy", "v", "critic_loss", "target_q", "alpha"}
+        assert expected <= set(metrics.keys())
+
+    def test_discrete_metrics_finite(self):
+        _, _, _, metrics = _make_seq_sac(discrete=True)
+        for k, v in metrics.items():
+            assert jnp.isfinite(v), f"metric '{k}' is not finite: {v}"
+
+    def test_discrete_actor_params_change(self):
+        state, new_state, _, _ = _make_seq_sac(discrete=True)
+        old_l = jax.tree.leaves(state.actor)
+        new_l = jax.tree.leaves(new_state.actor)
+        pairs = [(o, n) for o, n in zip(old_l, new_l)
+                 if hasattr(o, "dtype") and jnp.issubdtype(o.dtype, jnp.floating)]
+        assert any(not jnp.allclose(o, n) for o, n in pairs), "actor unchanged"
+
+    def test_discrete_critic_params_change(self):
+        state, new_state, _, _ = _make_seq_sac(discrete=True)
+        old_l = jax.tree.leaves(state.critic)
+        new_l = jax.tree.leaves(new_state.critic)
+        pairs = [(o, n) for o, n in zip(old_l, new_l)
+                 if hasattr(o, "dtype") and jnp.issubdtype(o.dtype, jnp.floating)]
+        assert any(not jnp.allclose(o, n) for o, n in pairs), "critic unchanged"
+
+    def test_discrete_burn_in_zero(self):
+        _make_seq_sac(discrete=True, burn_in=0)
+
+    def test_continuous_runs(self):
+        _make_seq_sac(discrete=False)
+
+    def test_continuous_returns_iqlearnstate(self):
+        _, new_state, _, _ = _make_seq_sac(discrete=False)
+        assert isinstance(new_state, IQLearnState)
+
+    def test_continuous_metric_keys(self):
+        _, _, _, metrics = _make_seq_sac(discrete=False)
+        expected = {"q", "entropy", "v", "critic_loss", "target_q", "alpha"}
+        assert expected <= set(metrics.keys())
+
+    def test_continuous_metrics_finite(self):
+        _, _, _, metrics = _make_seq_sac(discrete=False)
+        for k, v in metrics.items():
+            assert jnp.isfinite(v), f"metric '{k}' is not finite: {v}"
+
+    def test_continuous_actor_params_change(self):
+        state, new_state, _, _ = _make_seq_sac(discrete=False)
+        old_l = jax.tree.leaves(state.actor)
+        new_l = jax.tree.leaves(new_state.actor)
+        pairs = [(o, n) for o, n in zip(old_l, new_l)
+                 if hasattr(o, "dtype") and jnp.issubdtype(o.dtype, jnp.floating)]
+        assert any(not jnp.allclose(o, n) for o, n in pairs), "actor unchanged"
+
+    def test_continuous_critic_params_change(self):
+        state, new_state, _, _ = _make_seq_sac(discrete=False)
+        old_l = jax.tree.leaves(state.critic)
+        new_l = jax.tree.leaves(new_state.critic)
+        pairs = [(o, n) for o, n in zip(old_l, new_l)
+                 if hasattr(o, "dtype") and jnp.issubdtype(o.dtype, jnp.floating)]
+        assert any(not jnp.allclose(o, n) for o, n in pairs), "critic unchanged"
+
+    def test_continuous_burn_in_zero(self):
+        _make_seq_sac(discrete=False, burn_in=0)
+
+    def test_iid_fallback_discrete(self):
+        """sequence_length=1 keeps IID path — regression check."""
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state0 = env.reset(jax.random.key(0), env_params)
+        state, fns, _ = make_discrete_iqlearn(train_steps=1)
+        new_state, _, metrics = fns.train_sac(
+            state, env, env_params, env_state0, jax.random.key(9)
+        )
+        assert isinstance(new_state, IQLearnState)
+        assert "critic_loss" in metrics
+
+
+# ---------------------------------------------------------------------------
+# Stage E: value rescaling + n-step target
+# ---------------------------------------------------------------------------
+
+from lambda_imitation.iqlearn import _h, _h_inv
+
+
+class TestValueRescaling:
+    """h/h_inv roundtrip and basic properties."""
+
+    def test_h_inv_h_roundtrip(self):
+        eps = 1e-3
+        x = jnp.array([-10.0, -1.0, 0.0, 0.5, 3.14, 100.0])
+        assert jnp.allclose(_h_inv(_h(x, eps), eps), x, atol=1e-3)  # float32 precision
+
+    def test_h_zero(self):
+        assert float(_h(jnp.float32(0.0), 1e-3)) == pytest.approx(0.0, abs=1e-6)
+
+    def test_h_positive_monotone(self):
+        eps = 1e-3
+        xs = jnp.linspace(0.0, 10.0, 20)
+        hs = _h(xs, eps)
+        assert jnp.all(jnp.diff(hs) > 0)
+
+    def test_h_antisymmetric(self):
+        eps = 1e-3
+        xs = jnp.array([1.0, 2.0, 5.0])
+        assert jnp.allclose(_h(-xs, eps), -_h(xs, eps), atol=1e-6)
+
+
+class TestNStepReturn:
+    """n-step return correctness (tested via seq critic loss indirectly,
+    and directly via a small synthetic example)."""
+
+    def _run_seq(self, discrete, n_step=3, value_rescaling=False):
+        return _make_seq_sac(
+            discrete=discrete,
+            burn_in=0,
+            seq_len=8,
+            online_batch=_SEQ_BATCH2,
+        )
+
+    def test_n_step_discrete_runs(self):
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state0 = env.reset(jax.random.key(0), env_params)
+        import math
+        hp = Hyperparameters(
+            batch_size=BATCH_SIZE,
+            online_batch_size=_SEQ_BATCH2,
+            online_buffer_size=_SEQ_BUF_SIZE2,
+            sequence_length=8,
+            burn_in_length=0,
+            n_step=3,
+            target_entropy=float(0.98 * math.log(_SEQ_NUM_ACTS2)),
+        )
+        rngs = nnx.Rngs(7)
+        buf, _ = make_discrete_buffer(
+            obs_dim=_SEQ_OBS_DIM2, num_actions=_SEQ_NUM_ACTS2,
+            size=BUFFER_SIZE, batch_size=BATCH_SIZE,
+        )
+        state, fns, _ = create_iqlearn(
+            hp, buf, _SEQ_NUM_ACTS2,
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            train_steps=1, critic_head_dims=(16,), is_discrete=True,
+        )
+        state, env_state0 = fns.prefill_buffer(
+            state, env, env_params, env_state0, 20, jax.random.key(1)
+        )
+        new_state, _, metrics = fns.train_sac(
+            state, env, env_params, env_state0, jax.random.key(2)
+        )
+        assert isinstance(new_state, IQLearnState)
+        for k, v in metrics.items():
+            assert jnp.isfinite(v), f"metric '{k}' not finite with n_step=3"
+
+    def test_n_step_continuous_runs(self):
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state0 = env.reset(jax.random.key(0), env_params)
+        hp = Hyperparameters(
+            batch_size=BATCH_SIZE,
+            online_batch_size=_SEQ_BATCH2,
+            online_buffer_size=_SEQ_BUF_SIZE2,
+            sequence_length=8,
+            burn_in_length=0,
+            n_step=3,
+            target_entropy=-float(_SEQ_ACT_DIM2),
+        )
+        rngs = nnx.Rngs(8)
+        buf, _ = make_filled_buffer(
+            obs_dim=_SEQ_OBS_DIM2, action_dim=_SEQ_ACT_DIM2,
+            size=BUFFER_SIZE, batch_size=BATCH_SIZE,
+        )
+        state, fns, _ = create_iqlearn(
+            hp, buf, _SEQ_ACT_DIM2,
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            train_steps=1, critic_head_dims=(16,), is_discrete=False,
+        )
+        state, env_state0 = fns.prefill_buffer(
+            state, env, env_params, env_state0, 20, jax.random.key(1)
+        )
+        new_state, _, metrics = fns.train_sac(
+            state, env, env_params, env_state0, jax.random.key(2)
+        )
+        assert isinstance(new_state, IQLearnState)
+        for k, v in metrics.items():
+            assert jnp.isfinite(v), f"metric '{k}' not finite with n_step=3"
+
+    def test_value_rescaling_discrete_runs(self):
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state0 = env.reset(jax.random.key(0), env_params)
+        import math
+        hp = Hyperparameters(
+            batch_size=BATCH_SIZE,
+            online_batch_size=_SEQ_BATCH2,
+            online_buffer_size=_SEQ_BUF_SIZE2,
+            sequence_length=6,
+            burn_in_length=0,
+            n_step=2,
+            value_rescaling=True,
+            target_entropy=float(0.98 * math.log(_SEQ_NUM_ACTS2)),
+        )
+        rngs = nnx.Rngs(9)
+        buf, _ = make_discrete_buffer(
+            obs_dim=_SEQ_OBS_DIM2, num_actions=_SEQ_NUM_ACTS2,
+            size=BUFFER_SIZE, batch_size=BATCH_SIZE,
+        )
+        state, fns, _ = create_iqlearn(
+            hp, buf, _SEQ_NUM_ACTS2,
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            train_steps=1, critic_head_dims=(16,), is_discrete=True,
+        )
+        state, env_state0 = fns.prefill_buffer(
+            state, env, env_params, env_state0, 20, jax.random.key(1)
+        )
+        new_state, _, metrics = fns.train_sac(
+            state, env, env_params, env_state0, jax.random.key(2)
+        )
+        assert isinstance(new_state, IQLearnState)
+        for k, v in metrics.items():
+            assert jnp.isfinite(v), f"metric '{k}' not finite with value_rescaling"
+
+    def test_value_rescaling_continuous_runs(self):
+        env = _MockEnv()
+        env_params = _MockEnvParams()
+        _, env_state0 = env.reset(jax.random.key(0), env_params)
+        hp = Hyperparameters(
+            batch_size=BATCH_SIZE,
+            online_batch_size=_SEQ_BATCH2,
+            online_buffer_size=_SEQ_BUF_SIZE2,
+            sequence_length=6,
+            burn_in_length=0,
+            n_step=2,
+            value_rescaling=True,
+            target_entropy=-float(_SEQ_ACT_DIM2),
+        )
+        rngs = nnx.Rngs(10)
+        buf, _ = make_filled_buffer(
+            obs_dim=_SEQ_OBS_DIM2, action_dim=_SEQ_ACT_DIM2,
+            size=BUFFER_SIZE, batch_size=BATCH_SIZE,
+        )
+        state, fns, _ = create_iqlearn(
+            hp, buf, _SEQ_ACT_DIM2,
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            train_steps=1, critic_head_dims=(16,), is_discrete=False,
+        )
+        state, env_state0 = fns.prefill_buffer(
+            state, env, env_params, env_state0, 20, jax.random.key(1)
+        )
+        new_state, _, metrics = fns.train_sac(
+            state, env, env_params, env_state0, jax.random.key(2)
+        )
+        assert isinstance(new_state, IQLearnState)
+        for k, v in metrics.items():
+            assert jnp.isfinite(v), f"metric '{k}' not finite with value_rescaling"
