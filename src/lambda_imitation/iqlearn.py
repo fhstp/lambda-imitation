@@ -896,7 +896,7 @@ def create_iqlearn(
     )
 
     # burn-in helper
-    def sample_with_burn_in(online_buffer, actor, critic, key_sample):
+    def sample_with_burn_in(online_buffer, actor, critic, key_sample, use_mc=False):
         _B = params.burn_in_length
         _SL = params.sequence_length + 1
         _bs = params.online_batch_size
@@ -908,14 +908,25 @@ def create_iqlearn(
         done = seq.info[terminated_key][:, _B:].reshape(_bs, _SL)
         mask = seq.mask[:, _B:]
 
+        if use_mc:
+            _q1_key = mc_critic_q1_carry_key
+            _q2_key = mc_critic_q2_carry_key
+            _make_q1 = _make_mc_critic_q1_carry
+            _make_q2 = _make_mc_critic_q2_carry
+        else:
+            _q1_key = critic_q1_carry_key
+            _q2_key = critic_q2_carry_key
+            _make_q1 = _make_critic_q1_carry
+            _make_q2 = _make_critic_q2_carry
+
         if params.burn_in_from_stored_carry:
             _init_ac = seq.info[actor_carry_key][:, 0]
-            _init_cq1 = seq.info[critic_q1_carry_key][:, 0]
-            _init_cq2 = seq.info[critic_q2_carry_key][:, 0]
+            _init_cq1 = seq.info[_q1_key][:, 0]
+            _init_cq2 = seq.info[_q2_key][:, 0]
         else:
             _init_ac = _make_actor_carry(_bs)
-            _init_cq1 = _make_critic_q1_carry(_bs)
-            _init_cq2 = _make_critic_q2_carry(_bs)
+            _init_cq1 = _make_q1(_bs)
+            _init_cq2 = _make_q2(_bs)
 
         if _B > 0:
             _burn_obs = seq.info[obs_key][:, :_B]
@@ -926,7 +937,7 @@ def create_iqlearn(
             if is_discrete:
                 _burn_cq1, _burn_cq2, _ = jax.lax.stop_gradient(
                     run_critic_scan(
-                        critic, _burn_obs, False, _init_cq1, _init_cq2, _burn_done
+                        critic, _burn_obs, use_mc, _init_cq1, _init_cq2, _burn_done
                     )
                 )
             else:
@@ -935,7 +946,7 @@ def create_iqlearn(
                         critic,
                         _burn_obs,
                         seq.info[action_key][:, :_B],
-                        False,
+                        use_mc,
                         _init_cq1,
                         _init_cq2,
                         _burn_done,
@@ -1030,32 +1041,47 @@ def create_iqlearn(
                 rngs=rngs,
             )
 
-    # Split all modules into (graph_def, state) — FE, memory, and head per network
+    # Split all modules into (graph_def, state) — FE, memory, and head per network.
+    # Memory modules are split into Params and the *rest* (rng counters, keys)
+    # so that the trainable state is float-only.  The non-Param remainder is
+    # captured in the closure and re-applied on every nnx.merge call; jax.grad
+    # therefore never sees uint32 / PRNG-key leaves and can differentiate the
+    # actor / critic states directly.
     actor_fe_graph, actor_fe_st = nnx.split(actor_feature_extractor)
-    actor_memory_graph, actor_memory_st = nnx.split(actor_memory)
+    actor_memory_graph, actor_memory_st, actor_memory_rngs = nnx.split(
+        actor_memory, nnx.Param, ...
+    )
     actor_head_graph, actor_head_st = nnx.split(actor_head_model)
     critic_q1_fe_graph, critic_q1_fe_st = nnx.split(critic_q1_feature_extractor)
-    critic_q1_memory_graph, critic_q1_memory_st = nnx.split(critic_q1_memory)
+    critic_q1_memory_graph, critic_q1_memory_st, critic_q1_memory_rngs = nnx.split(
+        critic_q1_memory, nnx.Param, ...
+    )
     critic_q1_head_graph, critic_q1_head_st = nnx.split(critic_q1_head_model)
     critic_q2_fe_graph, critic_q2_fe_st = nnx.split(critic_q2_feature_extractor)
-    critic_q2_memory_graph, critic_q2_memory_st = nnx.split(critic_q2_memory)
+    critic_q2_memory_graph, critic_q2_memory_st, critic_q2_memory_rngs = nnx.split(
+        critic_q2_memory, nnx.Param, ...
+    )
     critic_q2_head_graph, critic_q2_head_st = nnx.split(critic_q2_head_model)
     if approximate_mc:
         mc_critic_q1_fe_graph, mc_critic_q1_fe_st = nnx.split(
             mc_critic_q1_feature_extractor
         )
-        mc_critic_q1_memory_graph, mc_critic_q1_memory_st = nnx.split(
-            mc_critic_q1_memory
-        )
+        (
+            mc_critic_q1_memory_graph,
+            mc_critic_q1_memory_st,
+            mc_critic_q1_memory_rngs,
+        ) = nnx.split(mc_critic_q1_memory, nnx.Param, ...)
         mc_critic_q1_head_graph, mc_critic_q1_head_st = nnx.split(
             mc_critic_q1_head_model
         )
         mc_critic_q2_fe_graph, mc_critic_q2_fe_st = nnx.split(
             mc_critic_q2_feature_extractor
         )
-        mc_critic_q2_memory_graph, mc_critic_q2_memory_st = nnx.split(
-            mc_critic_q2_memory
-        )
+        (
+            mc_critic_q2_memory_graph,
+            mc_critic_q2_memory_st,
+            mc_critic_q2_memory_rngs,
+        ) = nnx.split(mc_critic_q2_memory, nnx.Param, ...)
         mc_critic_q2_head_graph, mc_critic_q2_head_st = nnx.split(
             mc_critic_q2_head_model
         )
@@ -1141,7 +1167,7 @@ def create_iqlearn(
     def run_actor(actor: NetworkState, x: jax.Array, carry) -> tuple[any, jax.Array]:
         """Reconstruct and run the actor (FE → memory → head) on observation batch x."""
         fe = nnx.merge(actor_fe_graph, actor.fe)
-        memory = nnx.merge(actor_memory_graph, actor.memory)
+        memory = nnx.merge(actor_memory_graph, actor.memory, actor_memory_rngs)
         head = nnx.merge(actor_head_graph, actor.head)
         new_carry, mem_out = memory(fe(x), carry)
         return new_carry, head(mem_out)
@@ -1170,7 +1196,7 @@ def create_iqlearn(
             ``(batch, T, output_dim)``.
         """
         fe = nnx.merge(actor_fe_graph, actor.fe)
-        memory = nnx.merge(actor_memory_graph, actor.memory)
+        memory = nnx.merge(actor_memory_graph, actor.memory, actor_memory_rngs)
         head = nnx.merge(actor_head_graph, actor.head)
         batch, T = xs.shape[0], xs.shape[1]
         flat_feats = fe(xs.reshape(batch * T, *xs.shape[2:]))
@@ -1204,6 +1230,7 @@ def create_iqlearn(
             mem1 = nnx.merge(
                 mc_critic_q1_memory_graph if use_mc else critic_q1_memory_graph,
                 critic.q1.memory,
+                mc_critic_q1_memory_rngs if use_mc else critic_q1_memory_rngs,
             )
             head1 = nnx.merge(
                 mc_critic_q1_head_graph if use_mc else critic_q1_head_graph,
@@ -1215,6 +1242,7 @@ def create_iqlearn(
             mem2 = nnx.merge(
                 mc_critic_q2_memory_graph if use_mc else critic_q2_memory_graph,
                 critic.q2.memory,
+                mc_critic_q2_memory_rngs if use_mc else critic_q2_memory_rngs,
             )
             head2 = nnx.merge(
                 mc_critic_q2_head_graph if use_mc else critic_q2_head_graph,
@@ -1262,6 +1290,7 @@ def create_iqlearn(
             mem1 = nnx.merge(
                 mc_critic_q1_memory_graph if use_mc else critic_q1_memory_graph,
                 critic.q1.memory,
+                mc_critic_q1_memory_rngs if use_mc else critic_q1_memory_rngs,
             )
             head1 = nnx.merge(
                 mc_critic_q1_head_graph if use_mc else critic_q1_head_graph,
@@ -1273,6 +1302,7 @@ def create_iqlearn(
             mem2 = nnx.merge(
                 mc_critic_q2_memory_graph if use_mc else critic_q2_memory_graph,
                 critic.q2.memory,
+                mc_critic_q2_memory_rngs if use_mc else critic_q2_memory_rngs,
             )
             head2 = nnx.merge(
                 mc_critic_q2_head_graph if use_mc else critic_q2_head_graph,
@@ -1516,6 +1546,7 @@ def create_iqlearn(
             mem1 = nnx.merge(
                 mc_critic_q1_memory_graph if use_mc else critic_q1_memory_graph,
                 critic.q1.memory,
+                mc_critic_q1_memory_rngs if use_mc else critic_q1_memory_rngs,
             )
             head1 = nnx.merge(
                 mc_critic_q1_head_graph if use_mc else critic_q1_head_graph,
@@ -1527,6 +1558,7 @@ def create_iqlearn(
             mem2 = nnx.merge(
                 mc_critic_q2_memory_graph if use_mc else critic_q2_memory_graph,
                 critic.q2.memory,
+                mc_critic_q2_memory_rngs if use_mc else critic_q2_memory_rngs,
             )
             head2 = nnx.merge(
                 mc_critic_q2_head_graph if use_mc else critic_q2_head_graph,
@@ -1582,6 +1614,7 @@ def create_iqlearn(
             mem1 = nnx.merge(
                 mc_critic_q1_memory_graph if use_mc else critic_q1_memory_graph,
                 critic.q1.memory,
+                mc_critic_q1_memory_rngs if use_mc else critic_q1_memory_rngs,
             )
             head1 = nnx.merge(
                 mc_critic_q1_head_graph if use_mc else critic_q1_head_graph,
@@ -1593,6 +1626,7 @@ def create_iqlearn(
             mem2 = nnx.merge(
                 mc_critic_q2_memory_graph if use_mc else critic_q2_memory_graph,
                 critic.q2.memory,
+                mc_critic_q2_memory_rngs if use_mc else critic_q2_memory_rngs,
             )
             head2 = nnx.merge(
                 mc_critic_q2_head_graph if use_mc else critic_q2_head_graph,
@@ -2170,46 +2204,74 @@ def create_iqlearn(
         obs, act, rew, done, mask, burn_ac, burn_cq1, burn_cq2, seq_idx = (
             sample_with_burn_in(buffer, actor_target, critic, key_sample)
         )
-        xs = (
-            jnp.swapaxes(obs, 0, 1),
-            jnp.swapaxes(act, 0, 1),
-            jnp.swapaxes(rew, 0, 1),
-            jnp.swapaxes(done, 0, 1),
-            jnp.swapaxes(mask, 0, 1),
-        )
+        # The buffer sampler returns SL = sequence_length + 1 timesteps so
+        # that V(s_{t+1}) is available as the bootstrap target for transition
+        # t.  The previous implementation evaluated V on s_t itself, which
+        # produced target_q = r_t + γ V(s_t) and broke value propagation —
+        # Q simply regressed onto its own current state.
 
-        def scan_fun(carry, x):
-            actor_carry, q_carry1, q_carry2 = carry
-            actor_carry = jax.lax.stop_gradient(actor_carry)
-            q_carry1 = jax.lax.stop_gradient(q_carry1)
-            q_carry2 = jax.lax.stop_gradient(q_carry2)
-            obs, act, rew, done, mask = x
-            next_v, (new_actor_carry, _new_q_carry1, _new_q_carry2) = get_v(
+        # Pass 1: target V over the whole sequence.  Carries thread through
+        # actor_target and critic_target so V(s_{t+1}) sees the recurrent
+        # state produced by s_0..s_t.
+        obs_T = jnp.swapaxes(obs, 0, 1)
+
+        def v_scan(carry, obs_t):
+            actor_c, q1c, q2c, k = carry
+            k, k_step = jax.random.split(k)
+            v_t, (new_a_c, new_q1c, new_q2c) = get_v(
                 actor_target,
                 critic_target,
                 alpha,
-                obs,
-                actor_carry,
-                q_carry1,
-                q_carry2,
-                key_v,
+                obs_t,
+                actor_c,
+                q1c,
+                q2c,
+                k_step,
                 include_entropy=True,
             )
-            target_q = jax.lax.stop_gradient(
-                rew + params.gamma * (1.0 - done) * next_v
-            )
+            return (new_a_c, new_q1c, new_q2c, k), v_t
 
-            q1, q2, new_q_carry1, new_q_carry2 = get_q_both(
-                critic, obs, q_carry1, q_carry2, act
-            )
-            loss = 0.5 * (
-                jnp.mean(mask * (q1 - target_q) ** 2)
-                + jnp.mean(mask * (q2 - target_q) ** 2)
-            )
-            return (new_actor_carry, new_q_carry1, new_q_carry2), loss
+        _, v_T = jax.lax.scan(
+            v_scan,
+            (
+                jax.lax.stop_gradient(burn_ac),
+                jax.lax.stop_gradient(burn_cq1),
+                jax.lax.stop_gradient(burn_cq2),
+                key_v,
+            ),
+            obs_T,
+        )
+        v = jnp.swapaxes(v_T, 0, 1)  # (bs, SL)
 
-        _, losses = jax.lax.scan(scan_fun, (burn_ac, burn_cq1, burn_cq2), xs)
-        return losses.mean(), {"critic_loss": losses.mean(), "target_q": 0}
+        # Pass 2: online Q at each timestep with online critic carries.
+        act_T = jnp.swapaxes(act, 0, 1)
+
+        def q_scan(carry, x):
+            q1c, q2c = carry
+            obs_t, act_t = x
+            q1_t, q2_t, new_q1c, new_q2c = get_q_both(
+                critic, obs_t, q1c, q2c, act_t
+            )
+            return (new_q1c, new_q2c), (q1_t, q2_t)
+
+        _, (q1_T, q2_T) = jax.lax.scan(
+            q_scan, (burn_cq1, burn_cq2), (obs_T, act_T)
+        )
+        q1 = jnp.swapaxes(q1_T, 0, 1)  # (bs, SL)
+        q2 = jnp.swapaxes(q2_T, 0, 1)
+
+        # Bellman target uses the NEXT-step V; loss is over the first SL-1
+        # transitions (the last slot only contributes its V to the target).
+        target_q = jax.lax.stop_gradient(
+            rew[:, :-1] + params.gamma * (1.0 - done[:, :-1]) * v[:, 1:]
+        )
+        m = mask[:, :-1]
+        denom = jnp.maximum(m.sum(), 1.0)
+        loss = 0.5 * (
+            ((q1[:, :-1] - target_q) ** 2 * m).sum() / denom
+            + ((q2[:, :-1] - target_q) ** 2 * m).sum() / denom
+        )
+        return loss, {"critic_loss": loss, "target_q": target_q.mean()}
 
     def loss_mc_critic_sac(
         actor: NetworkState,
@@ -2233,7 +2295,7 @@ def create_iqlearn(
         key_sample, key_scan = jax.random.split(key, 2)
 
         obs, act, rew, done, mask, burn_ac, burn_cq1, burn_cq2, seq_idx = (
-            sample_with_burn_in(online_buf, actor, mc_critic, key_sample)
+            sample_with_burn_in(online_buf, actor, mc_critic, key_sample, use_mc=True)
         )
 
         B = params.burn_in_length
@@ -2359,9 +2421,9 @@ def create_iqlearn(
             sac.actor, obs_batch, sac.actor_online_carry
         )
 
-        def _step_mem(fe_graph, fe_state, mem_graph, mem_state, x, c):
+        def _step_mem(fe_graph, fe_state, mem_graph, mem_state, mem_rngs, x, c):
             fe_mod = nnx.merge(fe_graph, fe_state)
-            mem_mod = nnx.merge(mem_graph, mem_state)
+            mem_mod = nnx.merge(mem_graph, mem_state, mem_rngs)
             new_c, _ = mem_mod(fe_mod(x), c)
             return new_c
 
@@ -2370,6 +2432,7 @@ def create_iqlearn(
             sac.critic.q1.fe,
             critic_q1_memory_graph,
             sac.critic.q1.memory,
+            critic_q1_memory_rngs,
             obs_batch,
             sac.critic_q1_online_carry,
         )
@@ -2378,6 +2441,7 @@ def create_iqlearn(
             sac.critic.q2.fe,
             critic_q2_memory_graph,
             sac.critic.q2.memory,
+            critic_q2_memory_rngs,
             obs_batch,
             sac.critic_q2_online_carry,
         )
@@ -2387,6 +2451,7 @@ def create_iqlearn(
                 sac.mc_critic.q1.fe,
                 mc_critic_q1_memory_graph,
                 sac.mc_critic.q1.memory,
+                mc_critic_q1_memory_rngs,
                 obs_batch,
                 sac.mc_critic_q1_online_carry,
             )
@@ -2395,6 +2460,7 @@ def create_iqlearn(
                 sac.mc_critic.q2.fe,
                 mc_critic_q2_memory_graph,
                 sac.mc_critic.q2.memory,
+                mc_critic_q2_memory_rngs,
                 obs_batch,
                 sac.mc_critic_q2_online_carry,
             )

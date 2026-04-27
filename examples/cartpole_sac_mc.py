@@ -188,7 +188,7 @@ state, fns, _, debug_fns = create_iqlearn_from_env(
     fe_hidden_dims=(64, 64),
     critic_head_dims=(64,),
     train_steps=args.train_steps,
-    approximate_mc=False,
+    approximate_mc=True,
     debug=True,
     memory_factory=lambda f, r: LSTMMemory(f, 64, rngs=r),
 )
@@ -281,20 +281,20 @@ for rnd in range(1, args.rounds + 1):
         cmp_key, buf_size, (hp.online_batch_size,), replace=False, p=sampling_ok_probs
     )
     cmp_obs = state.online_buffer.info["observations"][cmp_idx]
-    # cmp_actions = state.online_buffer.info["actions"][cmp_idx]
-    # entropy = debug_fns.get_entropy(state.actor, cmp_obs, entropy_key)
-    # q_sac = (
-    #     debug_fns.get_q(state.critic_target, cmp_obs, cmp_actions, False)
-    #     + state.alpha * entropy
-    # )
-    # q_mc = debug_fns.get_q(state.mc_critic_target, cmp_obs, cmp_actions, True)
+    cmp_actions = state.online_buffer.info["actions"][cmp_idx]
+    entropy = debug_fns.get_entropy(state.actor, cmp_obs, entropy_key)
+    q_sac = (
+        debug_fns.get_q(state.critic_target, cmp_obs, cmp_actions, False)
+        + state.alpha * entropy
+    )
+    q_mc = debug_fns.get_q(state.mc_critic_target, cmp_obs, cmp_actions, True)
 
     print(
         f"Round {rnd:4d}/{args.rounds}  "
         f"mean_return={mean_return:7.1f}  "
         f"alpha={float(metrics['alpha']):.4f}  "
-        # f"mc_critic_loss={float(metrics['mc_critic_loss']):.4f}  "
-        # f"q_sac={q_sac.mean():7.3f}  q_mc={q_mc.mean():7.3f}  |Δq|={jnp.abs(q_sac - q_mc).mean():.4f}"
+        f"mc_critic_loss={float(metrics['mc_critic_loss']):.4f}  "
+        f"q_sac={q_sac.mean():7.3f}  q_mc={q_mc.mean():7.3f}  |Δq|={jnp.abs(q_sac - q_mc).mean():.4f}"
     )
 
     if _wandb is not None:
@@ -303,9 +303,9 @@ for rnd in range(1, args.rounds + 1):
                 "round": rnd,
                 "step": rnd * args.train_steps,
                 "mean_return": mean_return,
-                # "q_sac": q_sac.mean(),
-                # "q_mc": q_mc.mean(),
-                # "q_delta_abs": jnp.abs(q_sac - q_mc).mean(),
+                "q_sac": q_sac.mean(),
+                "q_mc": q_mc.mean(),
+                "q_delta_abs": jnp.abs(q_sac - q_mc).mean(),
                 **{k: float(v) for k, v in metrics.items()},
             }
         )
@@ -336,6 +336,7 @@ print("Ctrl-C to quit.\n")
 vis_env = gym.make("CartPole-v1", render_mode="human")
 obs, _ = vis_env.reset()
 key = jax.random.key(args.seed + 1)
+vis_carry = jnp.zeros_like(state.actor_online_carry)
 
 while True:
     key, subkey = jax.random.split(key)
@@ -345,8 +346,9 @@ while True:
     if args.partial:
         vis_obs = vis_obs[jnp.array([0, 2])]
     # predict returns a float32 scalar; gymnasium CartPole expects a plain int
-    raw = fns.predict(state, vis_obs, subkey, deterministic=True)
+    raw, vis_carry = fns.predict(state, vis_obs, vis_carry, subkey, deterministic=True)
     obs, _, terminated, truncated, _ = vis_env.step(int(jnp.round(raw)))
     if terminated or truncated:
         obs, _ = vis_env.reset()
+        vis_carry = jnp.zeros_like(state.actor_online_carry)
         input("Episode done — press Enter to continue…")
