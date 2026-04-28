@@ -321,6 +321,7 @@ def env_spec_from_jumanji(env) -> EnvSpec:
 def create_iqlearn_from_env(
     env_spec: EnvSpec,
     expert_data: dict[str, jax.Array],
+    key: jax.Array,
     buffer_size: int = 10_000,
     hp: Hyperparameters = None,
     fe_hidden_dims: tuple[int, ...] = (256, 256),
@@ -331,7 +332,6 @@ def create_iqlearn_from_env(
     action_key: str = "actions",
     approximate_mc: bool = False,
     debug: bool = False,
-    seed: int = 0,
     memory_factory=None,
 ) -> (
     "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs] | "
@@ -465,23 +465,24 @@ def create_iqlearn_from_env(
 
     # Feature extractors — identical architecture, independent weights
     input_dim = math.prod(env_spec.obs_shape)
-    rngs = nnx.Rngs(seed)
-    actor_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
-    critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
-    critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
-    mc_critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
-    mc_critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
+    key1, key2 = jax.random.split(key)
+    seeds = jax.random.bits(key1,(10,))
+    actor_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(seeds[0]))
+    critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(seeds[1]))
+    critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(seeds[2]))
+    mc_critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(seeds[3]))
+    mc_critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(seeds[4]))
 
     # Memory modules — None defers to IdentityMemory (no recurrence, feedforward behaviour).
     # To use recurrence, pass a callable (feature_dim, rngs) -> nnx.Module; for the R2D2
     # default use lambda f, r: LSTMMemory(f, fe_hidden_dims[-1], rngs=r).
     fe_out_dim = fe_hidden_dims[-1]
     if memory_factory is not None:
-        actor_mem = memory_factory(fe_out_dim, rngs)
-        critic_q1_mem = memory_factory(fe_out_dim, rngs)
-        critic_q2_mem = memory_factory(fe_out_dim, rngs)
-        mc_critic_q1_mem = memory_factory(fe_out_dim, rngs)
-        mc_critic_q2_mem = memory_factory(fe_out_dim, rngs)
+        actor_mem = memory_factory(fe_out_dim, nnx.Rngs(seeds[5]))
+        critic_q1_mem = memory_factory(fe_out_dim, nnx.Rngs(seeds[6]))
+        critic_q2_mem = memory_factory(fe_out_dim, nnx.Rngs(seeds[7]))
+        mc_critic_q1_mem = memory_factory(fe_out_dim, nnx.Rngs(seeds[8]))
+        mc_critic_q2_mem = memory_factory(fe_out_dim, nnx.Rngs(seeds[9]))
     else:
         actor_mem = None
         critic_q1_mem = None
@@ -489,6 +490,7 @@ def create_iqlearn_from_env(
         mc_critic_q1_mem = None
         mc_critic_q2_mem = None
 
+    import jax as _jax
     return create_iqlearn(
         params=hp,
         buffer=buffer,
@@ -496,6 +498,7 @@ def create_iqlearn_from_env(
         actor_feature_extractor=actor_fe,
         critic_q1_feature_extractor=critic_q1_fe,
         critic_q2_feature_extractor=critic_q2_fe,
+        create_key = key2,
         mc_critic_q1_feature_extractor=mc_critic_q1_fe,
         mc_critic_q2_feature_extractor=mc_critic_q2_fe,
         actor_memory=actor_mem,

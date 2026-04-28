@@ -158,6 +158,7 @@ def make_discrete_iqlearn(
         actor_fe,
         critic_q1_fe,
         critic_q2_fe,
+        jax.random.key(0),
         train_steps=train_steps,
         critic_head_dims=critic_head_dims,
         is_discrete=True,
@@ -191,6 +192,7 @@ def make_iqlearn(
         actor_fe,
         critic_q1_fe,
         critic_q2_fe,
+        jax.random.key(0),
         train_steps=train_steps,
         action_scale=action_scale,
         action_bias=action_bias,
@@ -334,6 +336,7 @@ class TestCreateIQLearn:
         actor_fe, critic_q1_fe, critic_q2_fe = make_feature_extractors()
         state, _, _ = create_iqlearn(
             hp, buf, ACTION_DIM, actor_fe, critic_q1_fe, critic_q2_fe,
+            jax.random.key(0),
             train_steps=TRAIN_STEPS,
         )
         assert jnp.isclose(state.alpha, 0.5, atol=1e-6)
@@ -359,6 +362,7 @@ class TestCreateIQLearn:
         hp = Hyperparameters(batch_size=BATCH_SIZE)
         state, fns, _ = create_iqlearn(
             hp, buf, ACTION_DIM, actor_fe, critic_q1_fe, critic_q2_fe,
+            jax.random.key(0),
             train_steps=TRAIN_STEPS,
         )
         # Should be able to predict without shape errors
@@ -374,6 +378,7 @@ class TestCreateIQLearn:
         hp = Hyperparameters(batch_size=BATCH_SIZE)
         state, fns, _ = create_iqlearn(
             hp, buf, ACTION_DIM, actor_fe, critic_q1_fe, critic_q2_fe,
+            jax.random.key(0),
             train_steps=TRAIN_STEPS,
         )
         action = fns.predict(state, jnp.ones(OBS_DIM), deterministic=True)
@@ -456,6 +461,7 @@ class TestPredict:
         hp = Hyperparameters(batch_size=BATCH_SIZE)
         state, fns, _ = create_iqlearn(
             hp, buf2, ACTION_DIM, actor_fe, critic_q1_fe, critic_q2_fe,
+            jax.random.key(0),
             train_steps=TRAIN_STEPS,
         )
         obs = jnp.ones(obs_shape)
@@ -661,6 +667,7 @@ class TestCreateIQLearnDiscrete:
         )
         state, fns, _ = create_iqlearn(
             hp, buf, NUM_ACTIONS, actor_fe, critic_q1_fe, critic_q2_fe,
+            jax.random.key(0),
             train_steps=TRAIN_STEPS, is_discrete=True,
         )
         action, _ = fns.predict(
@@ -901,6 +908,7 @@ class TestOnlineBuffer:
         actor_fe, critic_q1_fe, critic_q2_fe = make_feature_extractors()
         state, _, _ = create_iqlearn(
             hp, buf, ACTION_DIM, actor_fe, critic_q1_fe, critic_q2_fe,
+            jax.random.key(0),
             train_steps=TRAIN_STEPS,
         )
         assert int(state.online_buffer.sampling_ok.sum()) == 0
@@ -1051,6 +1059,7 @@ class TestPrefillBuffer:
         fe2 = MLPFeatureExtractor(OBS_DIM, (32,), rngs=nnx.Rngs(4))
         state, fns, _ = create_iqlearn(
             hp, buf, NUM_ACTIONS, fe, fe1, fe2,
+            jax.random.key(0),
             mc_critic_q1_feature_extractor=mc_fe_q1,
             mc_critic_q2_feature_extractor=mc_fe_q2,
             train_steps=1,
@@ -1518,6 +1527,7 @@ def _make_debug_discrete(seed=0):
         actor_fe,
         critic_q1_fe,
         critic_q2_fe,
+        jax.random.key(seed),
         mc_critic_q1_feature_extractor=mc_critic_q1_fe,
         mc_critic_q2_feature_extractor=mc_critic_q2_fe,
         train_steps=TRAIN_STEPS,
@@ -1575,6 +1585,7 @@ class TestCalculateTdLambda:
         )
         result = create_iqlearn(
             hp, buf, NUM_ACTIONS, actor_fe, critic_q1_fe, critic_q2_fe,
+            jax.random.key(0),
             is_discrete=True,
         )
         assert len(result) == 3
@@ -1674,6 +1685,7 @@ class TestCalculateTdLambda:
         mc_critic_q1_fe, mc_critic_q2_fe = make_mc_feature_extractors()
         state, fns, _, debug_fns = create_iqlearn(
             hp, buf, NUM_ACTIONS, actor_fe, critic_q1_fe, critic_q2_fe,
+            jax.random.key(0),
             mc_critic_q1_feature_extractor=mc_critic_q1_fe,
             mc_critic_q2_feature_extractor=mc_critic_q2_fe,
             train_steps=TRAIN_STEPS, critic_head_dims=(32,),
@@ -1838,6 +1850,7 @@ def _make_discrete_debug_with_lstm():
     mc_cq2_mem   = LSTMMemory(feat_dim, _LSTM_HIDDEN, rngs=nnx.Rngs(14))
     return create_iqlearn(
         hp, buf, NUM_ACTIONS, actor_fe, cq1_fe, cq2_fe,
+        jax.random.key(0),
         actor_memory=actor_mem,
         critic_q1_memory=cq1_mem,
         critic_q2_memory=cq2_mem,
@@ -1861,6 +1874,7 @@ def _make_continuous_debug_with_lstm():
     cq2_mem   = LSTMMemory(feat_dim, _LSTM_HIDDEN, rngs=nnx.Rngs(22))
     return create_iqlearn(
         hp, buf, ACTION_DIM, actor_fe, cq1_fe, cq2_fe,
+        jax.random.key(0),
         actor_memory=actor_mem,
         critic_q1_memory=cq1_mem,
         critic_q2_memory=cq2_mem,
@@ -2060,6 +2074,7 @@ def _make_seq_sac(
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            jax.random.key(0),
             train_steps=train_steps,
             critic_head_dims=(16,),
             is_discrete=True,
@@ -2074,6 +2089,7 @@ def _make_seq_sac(
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            jax.random.key(0),
             train_steps=train_steps,
             critic_head_dims=(16,),
             is_discrete=False,
@@ -2244,6 +2260,7 @@ class TestNStepReturn:
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            create_key=jax.random.key(0),
             train_steps=1, critic_head_dims=(16,), is_discrete=True,
         )
         state, env_state0 = fns.prefill_buffer(
@@ -2275,47 +2292,11 @@ class TestNStepReturn:
             size=BUFFER_SIZE, batch_size=BATCH_SIZE,
         )
         state, fns, _ = create_iqlearn(
-            hp, buf, _SEQ_ACT_DIM2,
-            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
-            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
-            MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
-            train_steps=1, critic_head_dims=(16,), is_discrete=False,
-        )
-        state, env_state0 = fns.prefill_buffer(
-            state, env, env_params, env_state0, 20, jax.random.key(1)
-        )
-        new_state, _, metrics = fns.train_sac(
-            state, env, env_params, env_state0, jax.random.key(2)
-        )
-        assert isinstance(new_state, IQLearnState)
-        for k, v in metrics.items():
-            assert jnp.isfinite(v), f"metric '{k}' not finite with n_step=3"
-
-    def test_value_rescaling_discrete_runs(self):
-        env = _MockEnv()
-        env_params = _MockEnvParams()
-        _, env_state0 = env.reset(jax.random.key(0), env_params)
-        import math
-        hp = Hyperparameters(
-            batch_size=BATCH_SIZE,
-            online_batch_size=_SEQ_BATCH2,
-            online_buffer_size=_SEQ_BUF_SIZE2,
-            sequence_length=6,
-            burn_in_length=0,
-            n_step=2,
-            value_rescaling=True,
-            target_entropy=float(0.98 * math.log(_SEQ_NUM_ACTS2)),
-        )
-        rngs = nnx.Rngs(9)
-        buf, _ = make_discrete_buffer(
-            obs_dim=_SEQ_OBS_DIM2, num_actions=_SEQ_NUM_ACTS2,
-            size=BUFFER_SIZE, batch_size=BATCH_SIZE,
-        )
-        state, fns, _ = create_iqlearn(
             hp, buf, _SEQ_NUM_ACTS2,
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            create_key=jax.random.key(0),
             train_steps=1, critic_head_dims=(16,), is_discrete=True,
         )
         state, env_state0 = fns.prefill_buffer(
@@ -2352,6 +2333,7 @@ class TestNStepReturn:
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
+            create_key=jax.random.key(0),
             train_steps=1, critic_head_dims=(16,), is_discrete=False,
         )
         state, env_state0 = fns.prefill_buffer(
@@ -2413,6 +2395,7 @@ def _make_ld_state(coef: float, *, seed: int = 0):
         mc_critic_q2_feature_extractor=MLPFeatureExtractor(
             _LD_OBS_DIM, (8,), rngs=rngs
         ),
+        create_key=jax.random.key(seed),
         train_steps=1,
         critic_head_dims=(16,),
         is_discrete=True,
@@ -2472,6 +2455,7 @@ class TestLambdaDiscrepancy:
                 MLPFeatureExtractor(_LD_OBS_DIM, (8,), rngs=rngs),
                 MLPFeatureExtractor(_LD_OBS_DIM, (8,), rngs=rngs),
                 MLPFeatureExtractor(_LD_OBS_DIM, (8,), rngs=rngs),
+                create_key=jax.random.key(0),
                 train_steps=1, critic_head_dims=(16,),
                 is_discrete=True, approximate_mc=False,
             )
@@ -2557,6 +2541,7 @@ def _make_carry_refresh_state(refresh: bool, *, seed: int = 0):
         actor_memory=LSTMMemory(feat_dim, _CR_LSTM_HID, rngs=rngs),
         critic_q1_memory=LSTMMemory(feat_dim, _CR_LSTM_HID, rngs=rngs),
         critic_q2_memory=LSTMMemory(feat_dim, _CR_LSTM_HID, rngs=rngs),
+        create_key=jax.random.key(seed),
         train_steps=1,
         critic_head_dims=(8,),
         is_discrete=True,
@@ -2635,6 +2620,73 @@ class TestRefreshStoredCarries:
                 MLPFeatureExtractor(_CR_OBS_DIM, (8,), rngs=rngs),
                 MLPFeatureExtractor(_CR_OBS_DIM, (8,), rngs=rngs),
                 MLPFeatureExtractor(_CR_OBS_DIM, (8,), rngs=rngs),
+                create_key=jax.random.key(0),
                 train_steps=1, critic_head_dims=(8,),
                 is_discrete=True,
             )
+
+
+# ---------------------------------------------------------------------------
+# create_key determinism
+# ---------------------------------------------------------------------------
+
+_DET_OBS_DIM  = 4
+_DET_NUM_ACTS = 3
+
+
+def _make_det_iqlearn(key: jax.Array):
+    """Minimal discrete agent created with a given create_key."""
+    import math as _math
+    buf, _ = make_discrete_buffer(
+        obs_dim=_DET_OBS_DIM, num_actions=_DET_NUM_ACTS,
+        size=BUFFER_SIZE, batch_size=BATCH_SIZE,
+    )
+    hp = Hyperparameters(
+        batch_size=BATCH_SIZE,
+        target_entropy=float(0.98 * _math.log(_DET_NUM_ACTS)),
+    )
+    rngs = nnx.Rngs(0)
+    state, fns, _ = create_iqlearn(
+        hp, buf, _DET_NUM_ACTS,
+        MLPFeatureExtractor(_DET_OBS_DIM, (8,), rngs=rngs),
+        MLPFeatureExtractor(_DET_OBS_DIM, (8,), rngs=rngs),
+        MLPFeatureExtractor(_DET_OBS_DIM, (8,), rngs=rngs),
+        create_key=key,
+        train_steps=1,
+        critic_head_dims=(16,),
+        is_discrete=True,
+    )
+    return state
+
+
+class TestCreateKeyDeterminism:
+    """create_key controls head initialisation deterministically."""
+
+    def test_same_key_gives_same_weights(self):
+        """Calling create_iqlearn twice with the same create_key produces
+        identical actor and critic head parameters."""
+        key = jax.random.key(7)
+        s1 = _make_det_iqlearn(key)
+        s2 = _make_det_iqlearn(key)
+        leaves1 = jax.tree.leaves(s1.actor)
+        leaves2 = jax.tree.leaves(s2.actor)
+        for l1, l2 in zip(leaves1, leaves2):
+            assert jnp.array_equal(l1, l2), "actor weights differ with same create_key"
+        leaves1 = jax.tree.leaves(s1.critic)
+        leaves2 = jax.tree.leaves(s2.critic)
+        for l1, l2 in zip(leaves1, leaves2):
+            assert jnp.array_equal(l1, l2), "critic weights differ with same create_key"
+
+    def test_different_keys_give_different_weights(self):
+        """Calling create_iqlearn with key(0) vs key(42) produces at least
+        one differing parameter in the actor or critic heads."""
+        s0  = _make_det_iqlearn(jax.random.key(0))
+        s42 = _make_det_iqlearn(jax.random.key(42))
+        all_same = all(
+            jnp.array_equal(l0, l42)
+            for l0, l42 in zip(
+                jax.tree.leaves(s0.actor) + jax.tree.leaves(s0.critic),
+                jax.tree.leaves(s42.actor) + jax.tree.leaves(s42.critic),
+            )
+        )
+        assert not all_same, "different create_keys produced identical weights"

@@ -199,10 +199,18 @@ hp = Hyperparameters(
     refresh_stored_carries=True,
 )
 
+# ── initial environment reset ─────────────────────────────────────────────────
+
+key = jax.random.key(args.seed)
+key, reset_key = jax.random.split(key)
+obs, env_state = env.reset(reset_key, env_params)
+
+key, key_env = jax.random.split(key)
 print("Building SAC agent for CartPole-v1 (discrete, gymnax)…")
 state, fns, _, debug_fns = create_iqlearn_from_env(
     spec,
     expert_data,
+    key_env,
     buffer_size=1,  # expert buffer capacity; minimum valid size
     hp=hp,
     fe_hidden_dims=(64, 64),
@@ -213,12 +221,6 @@ state, fns, _, debug_fns = create_iqlearn_from_env(
     debug=True,
     memory_factory=lambda f, r: LSTMMemory(f, 256, rngs=r),
 )
-
-# ── initial environment reset ─────────────────────────────────────────────────
-
-key = jax.random.key(args.seed)
-key, reset_key = jax.random.split(key)
-obs, env_state = env.reset(reset_key, env_params)
 
 # ── evaluation helper ─────────────────────────────────────────────────────────
 

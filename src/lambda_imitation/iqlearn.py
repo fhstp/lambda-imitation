@@ -103,9 +103,9 @@ class MLPFeatureExtractor(nnx.Module):
         rngs: nnx.Rngs,
     ):
         dims = [input_dim] + list(hidden_dims)
-        self.layers = [
+        self.layers = nnx.data([
             nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)
-        ]
+        ])
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Encode a batch of observations.
@@ -159,9 +159,9 @@ class Head(nnx.Module):
         rngs: nnx.Rngs,
     ):
         dims = [feature_dim] + list(hidden_dims) + [output_dim]
-        self.layers = [
+        self.layers = nnx.data([
             nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)
-        ]
+        ])
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Map a feature batch to the output space.
@@ -633,6 +633,7 @@ def create_iqlearn(
     actor_feature_extractor: nnx.Module,
     critic_q1_feature_extractor: nnx.Module,
     critic_q2_feature_extractor: nnx.Module,
+    create_key: jax.Array,
     mc_critic_q1_feature_extractor: nnx.Module | None = None,
     mc_critic_q2_feature_extractor: nnx.Module | None = None,
     actor_memory: nnx.Module | None = None,
@@ -691,6 +692,14 @@ def create_iqlearn(
             Used exclusively by the second Q-branch.  Should be initialised with
             a different seed from ``critic_q1_feature_extractor`` to ensure the
             two branches start with different weights.
+        create_key: JAX PRNG key used to initialise all components that are
+            created *inside* :func:`create_iqlearn` — the actor head, both
+            critic heads, both MC-critic heads (when ``approximate_mc=True``),
+            and any synthesised :class:`IdentityMemory` modules.  Sub-keys are
+            derived from this key via :func:`jax.random.split`, so a single key
+            fully determines the initial parameter distribution without any
+            hidden global state.  Feature extractors passed in by the caller
+            are *not* affected.
         obs_key: Key in ``buffer.info`` that holds observations.
         action_key: Key in ``buffer.info`` that holds actions.
         reward_key: Key used to store per-step scalar rewards in the online
@@ -770,10 +779,16 @@ def create_iqlearn(
         next_keys=next_keys,
     )
 
-    # Synthesise IdentityMemory for any slot where no memory was provided.
-    # All memory modules share the same RNG; they have no learned parameters
-    # for IdentityMemory, and LSTMMemory weight divergence is not required.
-    _mem_rngs = nnx.Rngs(0)
+    # Derive per-component sub-keys from create_key so that all internally
+    # created modules (heads and synthesised memories) are fully determined
+    # by the single key supplied by the caller.
+    # Indices 0-4: heads (actor, cq1, cq2, mc_cq1, mc_cq2)
+    # Indices 5-9: synthesised memories (actor, cq1, cq2, mc_cq1, mc_cq2)
+    _sub_keys = jax.random.split(create_key, 10)
+
+    def _rngs(i: int) -> nnx.Rngs:
+        """Return an nnx.Rngs seeded from the i-th sub-key."""
+        return nnx.Rngs(int(jax.random.bits(_sub_keys[i])))
 
     # Infer FE output dims via dummy forward pass (before split)
     dummy_obs = jnp.zeros((1,) + buffer.info[obs_key].shape[1:])
@@ -786,19 +801,19 @@ def create_iqlearn(
 
     # Synthesise IdentityMemory when caller passes None
     if actor_memory is None:
-        actor_memory = IdentityMemory(actor_feature_dim, rngs=_mem_rngs)
+        actor_memory = IdentityMemory(actor_feature_dim, rngs=_rngs(5))
     if critic_q1_memory is None:
-        critic_q1_memory = IdentityMemory(critic_q1_feature_dim, rngs=_mem_rngs)
+        critic_q1_memory = IdentityMemory(critic_q1_feature_dim, rngs=_rngs(6))
     if critic_q2_memory is None:
-        critic_q2_memory = IdentityMemory(critic_q2_feature_dim, rngs=_mem_rngs)
+        critic_q2_memory = IdentityMemory(critic_q2_feature_dim, rngs=_rngs(7))
     if approximate_mc:
         if mc_critic_q1_memory is None:
             mc_critic_q1_memory = IdentityMemory(
-                mc_critic_q1_feature_dim, rngs=_mem_rngs
+                mc_critic_q1_feature_dim, rngs=_rngs(8)
             )
         if mc_critic_q2_memory is None:
             mc_critic_q2_memory = IdentityMemory(
-                mc_critic_q2_feature_dim, rngs=_mem_rngs
+                mc_critic_q2_feature_dim, rngs=_rngs(9)
             )
 
     # Infer memory output dims via second dummy forward pass
@@ -997,45 +1012,45 @@ def create_iqlearn(
 
     # Create heads — discrete and continuous differ only in output_dim and
     # whether actions are concatenated to features before the head.
-    rngs = nnx.Rngs(0)
+    # Sub-keys 0-4 are reserved for heads: 0=actor, 1=cq1, 2=cq2, 3=mc_cq1, 4=mc_cq2.
     if is_discrete:
         actor_head_model = Head(
             actor_memory_out_dim,
             actor_head_dims,
             action_dim,
-            rngs=rngs,
+            rngs=_rngs(0),
         )
         critic_q1_head_model = Head(
             critic_q1_memory_out_dim,
             critic_head_dims,
             action_dim,
-            rngs=rngs,
+            rngs=_rngs(1),
         )
         critic_q2_head_model = Head(
             critic_q2_memory_out_dim,
             critic_head_dims,
             action_dim,
-            rngs=rngs,
+            rngs=_rngs(2),
         )
         if approximate_mc:
             mc_critic_q1_head_model = Head(
                 mc_critic_q1_memory_out_dim,
                 mc_critic_head_dims,
                 action_dim,
-                rngs=rngs,
+                rngs=_rngs(3),
             )
             mc_critic_q2_head_model = Head(
                 mc_critic_q2_memory_out_dim,
                 mc_critic_head_dims,
                 action_dim,
-                rngs=rngs,
+                rngs=_rngs(4),
             )
     else:
         actor_head_model = Head(
             actor_memory_out_dim,
             actor_head_dims,
             2 * action_dim,
-            rngs=rngs,
+            rngs=_rngs(0),
         )
         # For continuous critics, features and actions are concatenated before
         # the head, so input_dim = memory_out_dim + action_dim, output_dim = 1.
@@ -1043,26 +1058,26 @@ def create_iqlearn(
             critic_q1_memory_out_dim + action_dim,
             critic_head_dims,
             1,
-            rngs=rngs,
+            rngs=_rngs(1),
         )
         critic_q2_head_model = Head(
             critic_q2_memory_out_dim + action_dim,
             critic_head_dims,
             1,
-            rngs=rngs,
+            rngs=_rngs(2),
         )
         if approximate_mc:
             mc_critic_q1_head_model = Head(
                 mc_critic_q1_memory_out_dim + action_dim,
                 mc_critic_head_dims,
                 1,
-                rngs=rngs,
+                rngs=_rngs(3),
             )
             mc_critic_q2_head_model = Head(
                 mc_critic_q2_memory_out_dim + action_dim,
                 mc_critic_head_dims,
                 1,
-                rngs=rngs,
+                rngs=_rngs(4),
             )
 
     # Split all modules into (graph_def, state) — FE, memory, and head per network.
