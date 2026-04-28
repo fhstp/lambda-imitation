@@ -62,6 +62,13 @@ parser.add_argument(
     help="lambda discrepancy coefficient (default: 0.6)",
 )
 parser.add_argument(
+    "--tau",
+    type=float,
+    default=0.005,
+    metavar="LC",
+    help="smoothing coefficient (default: 0.005)",
+)
+parser.add_argument(
     "--partial",
     action="store_true",
     help=(
@@ -178,7 +185,7 @@ hp = Hyperparameters(
     batch_size=256,
     gamma=0.99,
     regularizer_coef=1 / 40,
-    tau=0.005,
+    tau=args.tau,
     lam=0.5,
     lambda_truncation=15,
     sequence_length=5,
