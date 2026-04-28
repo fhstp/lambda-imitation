@@ -199,11 +199,12 @@ state, fns, _, debug_fns = create_iqlearn_from_env(
     buffer_size=1,  # expert buffer capacity; minimum valid size
     hp=hp,
     fe_hidden_dims=(64, 64),
-    critic_head_dims=(64,),
+    actor_head_dims=(64, 64),
+    critic_head_dims=(64, 64),
     train_steps=args.train_steps,
     approximate_mc=True,
     debug=True,
-    memory_factory=lambda f, r: LSTMMemory(f, 64, rngs=r),
+    memory_factory=lambda f, r: LSTMMemory(f, 256, rngs=r),
 )
 
 # ── initial environment reset ─────────────────────────────────────────────────
@@ -316,7 +317,6 @@ for rnd in tqdm(range(1, args.rounds + 1)):
     if _wandb is not None:
         _wandb.log(
             {
-                "round": rnd,
                 "step": rnd * args.train_steps,
                 "mean_return": mean_return,
                 "q_sac": q_sac.mean(),
