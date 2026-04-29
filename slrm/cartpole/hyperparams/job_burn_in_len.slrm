@@ -3,7 +3,7 @@
 #SBATCH -J RL
 #SBATCH -N 5
 #SBATCH --ntasks-per-node=1
-#SBATCH --time 22:00:00
+#SBATCH --time 05:00:00
 #SBATCH --mail-user alexander.buchelt@ustp.at
 #SBATCH --mail-type ALL
 #SBATCH --partition zen3_0512_a100x2
@@ -11,5 +11,5 @@
 
 module load miniforge3/latest
 
-srun -l bash ./git/lambda-imitation/slrm/cartpole/hyperparams/job_lambda0.sh
+srun -l bash ./git/lambda-imitation/slrm/cartpole/hyperparams/job_burn_in_len.sh
  

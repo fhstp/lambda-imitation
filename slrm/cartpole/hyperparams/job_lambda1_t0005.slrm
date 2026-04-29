@@ -11,5 +11,5 @@
 
 module load miniforge3/latest
 
-srun -l bash ./git/lambda-imitation/slrm/cartpole/hyperparams/job_lambda0.sh
+srun -l bash ./git/lambda-imitation/slrm/cartpole/hyperparams/job_lambda1_t0005.sh
  

@@ -88,7 +88,7 @@ parser.add_argument(
         default=True,
         help="set stored carry for burn-in (default: True)",
 )
-paerser.add_argument(
+parser.add_argument(
         "--refresh-stored-carries",
         action="store",
         default=True,
