@@ -57,9 +57,9 @@ parser.add_argument(
 parser.add_argument(
     "--lambda-coef",
     type=float,
-    default=0.6,
+    default=1.0,
     metavar="LC",
-    help="lambda discrepancy coefficient (default: 0.6)",
+    help="lambda discrepancy coefficient (default: 1.0)",
 )
 parser.add_argument(
     "--tau",
@@ -75,6 +75,24 @@ parser.add_argument(
         "make the environment partially observable: hide cart velocity (index 1) "
         "and pole angular velocity (index 3), leaving only cart position and pole angle"
     ),
+)
+parser.add_argument(
+        "--burn-in-len",
+        type=int,
+        default=20,
+        help="burn-in length (default: 20)",
+)
+parser.add_argument(
+        "--burn-in-from-stored-carry",
+        action="store",
+        default=True,
+        help="set stored carry for burn-in (default: True)",
+)
+paerser.add_argument(
+        "--refresh-stored-carries",
+        action="store",
+        default=True,
+        help="refresh stored carries each round (default: True)",
 )
 parser.add_argument(
     "--wandb",
@@ -189,14 +207,14 @@ hp = Hyperparameters(
     lam=0.5,
     lambda_truncation=15,
     sequence_length=5,
-    burn_in_length=20,
+    burn_in_length=args.burn_in_len,
     n_step=1,
-    burn_in_from_stored_carry=True,
+    burn_in_from_stored_carry=args.burn_in_from_stored_carry,
     value_rescaling=False,
     value_rescaling_eps=1e-3,
     lambda_discrepancy_coef=args.lambda_coef,
     lambda_discrepancy_delta=1.0,
-    refresh_stored_carries=True,
+    refresh_stored_carries=args.refresh_stored_carries,
 )
 
 # ── initial environment reset ─────────────────────────────────────────────────

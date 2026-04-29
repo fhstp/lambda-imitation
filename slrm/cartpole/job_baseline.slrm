@@ -1,0 +1,13 @@
+#!/bin/bash
+
+#SBATCH -J RL
+#SBATCH -N 10
+#SBATCH --ntasks-per-node=1
+#SBATCH --time 10:00:00
+#SBATCH --mail-user alexander.buchelt@ustp.at
+#SBATCH --mail-type ALL
+
+module load miniforge3/latest
+
+srun -l bash ./git/lambda-imitation/slrm/cartpole/job_baseline.sh
+ 
