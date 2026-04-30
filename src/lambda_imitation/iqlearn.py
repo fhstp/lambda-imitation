@@ -3082,6 +3082,7 @@ def create_iqlearn(
             new_alpha = jnp.exp(new_log_alpha)  # type: ignore
             metrics.update({"alpha": new_alpha})
         else:
+            metrics.update({"alpha": sac.alpha})
             new_alpha_opt = sac.alpha_optimizer_state
             new_log_alpha = sac.log_alpha
             new_alpha = sac.alpha
