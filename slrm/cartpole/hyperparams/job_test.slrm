@@ -3,10 +3,11 @@
 #SBATCH -J RL_test
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
-#SBATCH --time 00:30:00
+#SBATCH --time 00:10:00
 #SBATCH --mail-user alexander.buchelt@ustp.at
 #SBATCH --mail-type ALL
-#SBATCH --partition zen3_0512_a100x2_devel
+#SBATCH --partition zen3_0512_a100x2
+#SBATCH --qos=zen3_0512_a100x2_devel
 #SBATCH --gres=gpu:2
 
 module load miniforge3/latest

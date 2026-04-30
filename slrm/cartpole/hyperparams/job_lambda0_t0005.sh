@@ -5,7 +5,7 @@ run_on_gpu() {
     local urand
     urand=$(od -vAn -N4 -tu4 < /dev/urandom | tr -d ' ')
     local seed=$((urand + $$ + gpu_id))
-    CUDA_VISIBLE_DEVICES=$gpu_id ./.conda/envs/lambda/bin/python ./git/lambda-imitation/examples/cartpole_sac_mc.py --wandb --rounds 500 --partial --wandb-project "lambda-imitaiton-cartpole-sanity" --lambda-coef 0.0 --tau 0.0005 --seed $seed
+    CUDA_VISIBLE_DEVICES=$gpu_id ./.conda/envs/jax/bin/python ./git/lambda-imitation/examples/cartpole_sac_mc.py --wandb --rounds 500 --partial --wandb-project "lambda-imitaiton-cartpole-sanity" --lambda-coef 0.0 --tau 0.0005 --seed $seed
 }
 
 run_on_gpu 0 &
