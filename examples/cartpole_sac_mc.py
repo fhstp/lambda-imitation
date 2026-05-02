@@ -69,6 +69,13 @@ parser.add_argument(
     help="smoothing coefficient (default: 0.005)",
 )
 parser.add_argument(
+    "--grad-clip-norm",
+    type=float,
+    default=0.5,
+    metavar="G",
+    help="global-norm gradient clip for actor/critic/mc_critic (0.0 disables; default: 0.0)",
+)
+parser.add_argument(
     "--partial",
     action="store_true",
     help=(
@@ -77,22 +84,22 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
-        "--burn-in-len",
-        type=int,
-        default=20,
-        help="burn-in length (default: 20)",
+    "--burn-in-len",
+    type=int,
+    default=20,
+    help="burn-in length (default: 20)",
 )
 parser.add_argument(
-        "--burn-in-from-stored-carry",
-        action="store",
-        default=True,
-        help="set stored carry for burn-in (default: True)",
+    "--burn-in-from-stored-carry",
+    action="store",
+    default=True,
+    help="set stored carry for burn-in (default: True)",
 )
 parser.add_argument(
-        "--refresh-stored-carries",
-        action="store",
-        default=True,
-        help="refresh stored carries each round (default: True)",
+    "--refresh-stored-carries",
+    action="store",
+    default=True,
+    help="refresh stored carries each round (default: True)",
 )
 parser.add_argument(
     "--wandb",
@@ -205,16 +212,17 @@ hp = Hyperparameters(
     regularizer_coef=1 / 40,
     tau=args.tau,
     lam=0.5,
-    lambda_truncation=15,
-    sequence_length=5,
-    burn_in_length=args.burn_in_len,
+    lambda_truncation=17,
+    sequence_length=20,
+    burn_in_length=20,
     n_step=1,
-    burn_in_from_stored_carry=args.burn_in_from_stored_carry,
+    burn_in_from_stored_carry=False,
     value_rescaling=False,
     value_rescaling_eps=1e-3,
     lambda_discrepancy_coef=args.lambda_coef,
     lambda_discrepancy_delta=1.0,
     refresh_stored_carries=args.refresh_stored_carries,
+    grad_clip_norm=args.grad_clip_norm,
 )
 
 # ── initial environment reset ─────────────────────────────────────────────────
@@ -231,13 +239,13 @@ state, fns, _, debug_fns = create_iqlearn_from_env(
     key_env,
     buffer_size=1,  # expert buffer capacity; minimum valid size
     hp=hp,
-    fe_hidden_dims=(64, 64),
-    actor_head_dims=(64, 64),
-    critic_head_dims=(64, 64),
+    fe_hidden_dims=(128,),
+    actor_head_dims=(128,),
+    critic_head_dims=(128,),
     train_steps=args.train_steps,
     approximate_mc=True,
     debug=True,
-    memory_factory=lambda f, r: LSTMMemory(f, 256, rngs=r),
+    memory_factory=lambda f, r: LSTMMemory(f, 128, rngs=r),
 )
 
 # ── evaluation helper ─────────────────────────────────────────────────────────
