@@ -2437,7 +2437,16 @@ def create_iqlearn(
             ((q1[:, :-1] - target_q) ** 2 * m).sum() / denom
             + ((q2[:, :-1] - target_q) ** 2 * m).sum() / denom
         )
-        metrics = {"critic_loss": loss, "target_q": target_q.mean()}
+        metrics = {
+            "critic_loss": loss,
+            "target_q": target_q.mean(),
+            "target_q_std": target_q.std(),
+            "target_q_max": target_q.max(),
+            "target_q_min": target_q.min(),
+            "sac_q1_mean": q1[:, :-1].mean(),
+            "sac_q2_mean": q2[:, :-1].mean(),
+            "sac_q_twin_gap_mean": jnp.abs(q1[:, :-1] - q2[:, :-1]).mean(),
+        }
 
         # Lambda-discrepancy auxiliary loss: pulls Q_sac + α·H toward Q_mc.
         # Only the online SAC critic moves; everything else is stop_gradient.
@@ -2485,6 +2494,13 @@ def create_iqlearn(
             loss = loss + params.lambda_discrepancy_coef * disc_loss
             metrics["lambda_discrepancy_loss"] = disc_loss
             metrics["critic_loss"] = loss
+            m_full = mask
+            m_denom = jnp.maximum(m_full.sum(), 1.0)
+            metrics["disc_delta_abs_mean"] = (jnp.abs(delta) * m_full).sum() / m_denom
+            metrics["disc_delta_abs_max"] = jnp.abs(delta).max()
+            metrics["disc_q_sac_mean"] = (q_sac * m_full).sum() / m_denom
+            metrics["disc_q_mc_mean"] = (q_mc * m_full).sum() / m_denom
+            metrics["disc_entropy_mean"] = (H * m_full).sum() / m_denom
 
         # Carry-refresh payload: input online-critic carries per scan step.
         if params.refresh_stored_carries:
@@ -2646,6 +2662,7 @@ def create_iqlearn(
             else:
                 new_sac_q1c, new_sac_q2c = sac_q1c, sac_q2c
 
+            q_min_online = jnp.minimum(q1, q2)
             return (
                 new_actor_carry,
                 new_q1c,
@@ -2658,6 +2675,9 @@ def create_iqlearn(
                 disc_step,
                 jax.lax.stop_gradient(input_q1c),
                 jax.lax.stop_gradient(input_q2c),
+                jax.lax.stop_gradient(p_k),
+                jax.lax.stop_gradient(target_q),
+                jax.lax.stop_gradient(q_min_online),
             )
 
         _bs = obs.shape[0]
@@ -2667,7 +2687,15 @@ def create_iqlearn(
         else:
             init_sac_q1c = burn_cq1
             init_sac_q2c = burn_cq2
-        _, (losses, disc_losses, mcq1_inputs_T, mcq2_inputs_T) = jax.lax.scan(
+        _, (
+            losses,
+            disc_losses,
+            mcq1_inputs_T,
+            mcq2_inputs_T,
+            p_k_T,
+            target_q_T,
+            q_min_T,
+        ) = jax.lax.scan(
             scan_fun,
             (burn_ac, burn_cq1, burn_cq2, init_sac_q1c, init_sac_q2c, key_scan),
             (obs_T, act_T, mask_T, done_T, seq_start_T),
@@ -2675,6 +2703,17 @@ def create_iqlearn(
         metrics = {"mc_critic_loss": losses.mean()}
         if use_disc:
             metrics["lambda_discrepancy_loss"] = disc_losses.mean()
+        metrics["mc_pk_mean"] = p_k_T.mean()
+        metrics["mc_pk_min"] = p_k_T.min()
+        metrics["mc_pk_max"] = p_k_T.max()
+        metrics["mc_pk_frac_collapsed"] = (p_k_T < 0.01).mean().astype(jnp.float32)
+        metrics["mc_pk_frac_at_clip"] = (p_k_T >= 0.999).mean().astype(jnp.float32)
+        metrics["mc_target_q_mean"] = target_q_T.mean()
+        metrics["mc_target_q_std"] = target_q_T.std()
+        metrics["mc_target_q_max"] = target_q_T.max()
+        metrics["mc_target_q_min"] = target_q_T.min()
+        metrics["mc_q_online_mean"] = q_min_T.mean()
+        metrics["mc_td_residual_abs_mean"] = jnp.abs(target_q_T - q_min_T).mean()
 
         if params.refresh_stored_carries:
             SL = params.sequence_length + 1
@@ -3338,7 +3377,34 @@ def create_iqlearn(
         (sac, env_state, _), metrics = jax.lax.scan(
             scan_fun, (sac, env_state, key), length=train_steps
         )
+        # Default reduction is mean over the round; for spike-detection
+        # diagnostics also expose max-over-round under "{key}_max".
+        max_keys = (
+            "grad_norm_actor",
+            "grad_norm_critic",
+            "grad_norm_mc_critic",
+            "update_norm_actor",
+            "update_norm_critic",
+            "update_norm_mc_critic",
+            "sac_q_twin_gap_mean",
+            "mc_td_residual_abs_mean",
+        )
+        round_max_keys = (
+            "grad_max_abs_actor",
+            "grad_max_abs_critic",
+            "grad_max_abs_mc_critic",
+            "target_q_max",
+            "mc_target_q_max",
+            "mc_pk_max",
+            "disc_delta_abs_max",
+        )
+        max_extras = {
+            f"{k}_round_max": metrics[k].max()
+            for k in (max_keys + round_max_keys)
+            if k in metrics
+        }
         metrics = jax.tree.map(lambda x: x.mean(), metrics)
+        metrics.update(max_extras)
         return sac, env_state, metrics
 
     def train_sac(

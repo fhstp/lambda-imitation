@@ -340,13 +340,22 @@ for rnd in tqdm(range(1, args.rounds + 1)):
     q_mc = debug_fns.get_q(state.mc_critic_target, cmp_obs, cmp_actions, True)
 
     disc_loss = float(metrics.get("lambda_discrepancy_loss", 0.0))
+    q_delta_abs = jnp.abs(q_sac - q_mc)
+    buf_pos = int(state.online_buffer.pos)
+    buf_cycle = buf_pos // buf_size
+    buf_n_ok = int(state.online_buffer.sampling_ok.sum())
     print(
         f"Round {rnd:4d}/{args.rounds}  "
         f"mean_return={mean_return:7.1f}  "
         f"alpha={float(metrics.get('alpha', state.alpha)):.4f}  "
         f"mc_critic_loss={float(metrics['mc_critic_loss']):.4f}  "
         f"disc_loss={disc_loss:.4f}  "
-        f"q_sac={q_sac.mean():7.3f}  q_mc={q_mc.mean():7.3f}  |Δq|={jnp.abs(q_sac - q_mc).mean():.4f}"
+        f"q_sac={q_sac.mean():7.3f}  q_mc={q_mc.mean():7.3f}  |Δq|={q_delta_abs.mean():.4f}  "
+        f"g_a={float(metrics.get('grad_norm_actor', 0)):.3f}  "
+        f"g_c={float(metrics.get('grad_norm_critic', 0)):.3f}  "
+        f"g_mc={float(metrics.get('grad_norm_mc_critic', 0)):.3f}  "
+        f"pk={float(metrics.get('mc_pk_mean', 1)):.3f}  "
+        f"buf={buf_n_ok}/{buf_size} c{buf_cycle}"
     )
 
     if _wandb is not None:
@@ -354,9 +363,15 @@ for rnd in tqdm(range(1, args.rounds + 1)):
             {
                 "step": rnd * args.train_steps,
                 "mean_return": mean_return,
-                "q_sac": q_sac.mean(),
-                "q_mc": q_mc.mean(),
-                "q_delta_abs": jnp.abs(q_sac - q_mc).mean(),
+                "q_sac_mean": q_sac.mean(),
+                "q_mc_mean": q_mc.mean(),
+                "q_sac_std": q_sac.std(),
+                "q_mc_std": q_mc.std(),
+                "q_delta_abs_mean": q_delta_abs.mean(),
+                "q_delta_abs_max": q_delta_abs.max(),
+                "buffer_pos": buf_pos,
+                "buffer_cycle": buf_cycle,
+                "buffer_n_sampling_ok": buf_n_ok,
                 **{k: float(v) for k, v in metrics.items()},
             },
             step=rnd * args.train_steps,
