@@ -1,44 +1,85 @@
-"""SAC online training demo: CartPole-v1 (discrete action space, gymnax).
+"""SAC online training demo: classic tabular POMDPs (lambda-envs).
 
-Pure online reinforcement learning with SAC — no expert data or imitation
-learning is used.  The placeholder expert buffer required by
+Pure online reinforcement learning with SAC + Monte Carlo critic — no expert
+data or imitation learning is used.  The placeholder expert buffer required by
 ``create_iqlearn_from_env`` is never sampled (``fns.train()`` is never called).
 
-After training the script opens a gymnasium render window so you can watch the
-trained agent.  Press Enter in the terminal after each episode; Ctrl-C to quit.
+Supports the classic POMDP benchmark suite from lambda-envs:
+  tiger-alt-start, hallway, cheese.95, cheese.95_nonterminating, tmaze2,
+  tmaze5, shuttle, heavenhell, 4x3, 4x3_nonterminating, network, paint
+
+All environments use one-hot encoded observations over a finite observation set
+and have discrete action spaces.  A ``--fully-observable`` flag replaces the
+POMDP observations with the full state, useful as a control baseline.
 
 Requirements
 ------------
     pip install "lambda-imitation[gymnax]"
-    pip install "gymnasium[classic-control]"   # for visualisation
+    pip install lambda-envs
 
 Usage
 -----
-    python cartpole_sac.py                        # default 100 rounds × 50 steps
-    python cartpole_sac.py --rounds 200           # more training
-    python cartpole_sac.py --train-steps 100      # longer rounds
-    python cartpole_sac.py --seed 42              # different random seed
-    python cartpole_sac.py --help                 # full option list
+    python pomdp_sac_mc.py                             # tiger-alt-start (default)
+    python pomdp_sac_mc.py --env hallway               # hallway POMDP
+    python pomdp_sac_mc.py --env cheese.95             # cheese maze
+    python pomdp_sac_mc.py --env tmaze2                # tabular T-Maze (2 states)
+    python pomdp_sac_mc.py --env heavenhell            # heaven/hell task
+    python pomdp_sac_mc.py --env 4x3                   # 4x3 grid POMDP
+    python pomdp_sac_mc.py --env network               # network POMDP
+    python pomdp_sac_mc.py --env paint                 # paint POMDP
+    python pomdp_sac_mc.py --fully-observable          # FO baseline
+    python pomdp_sac_mc.py --rounds 200                # more training
+    python pomdp_sac_mc.py --wandb                     # enable W&B logging
+    python pomdp_sac_mc.py --help                      # full option list
 """
 
 import argparse
-import math
 import sys
 
 from tqdm.rich import tqdm
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+_POMDP_CHOICES = [
+    "tiger-alt-start",
+    "hallway",
+    "cheese.95",
+    "cheese.95_nonterminating",
+    "tmaze2",
+    "tmaze5",
+    "shuttle",
+    "heavenhell",
+    "4x3",
+    "4x3_nonterminating",
+    "network",
+    "paint",
+]
+
 parser = argparse.ArgumentParser(
-    prog="cartpole_sac.py",
-    description="SAC online training on CartPole-v1 (discrete, gymnax).",
+    prog="pomdp_sac_mc.py",
+    description="SAC + MC critic on classic tabular POMDPs (lambda-envs).",
+)
+parser.add_argument(
+    "--env",
+    default="tiger-alt-start",
+    choices=_POMDP_CHOICES,
+    metavar="ENV",
+    help=(
+        "POMDP environment name (default: tiger-alt-start). "
+        f"Choices: {', '.join(_POMDP_CHOICES)}"
+    ),
+)
+parser.add_argument(
+    "--fully-observable",
+    action="store_true",
+    help="replace POMDP observations with full state (control baseline)",
 )
 parser.add_argument(
     "--rounds",
     type=int,
-    default=10,
+    default=100,
     metavar="N",
-    help="number of training rounds (default: 10)",
+    help="number of training rounds (default: 100)",
 )
 parser.add_argument(
     "--train-steps",
@@ -65,34 +106,26 @@ parser.add_argument(
     "--tau",
     type=float,
     default=0.005,
-    metavar="LC",
-    help="smoothing coefficient (default: 0.005)",
+    metavar="TAU",
+    help="smoothing coefficient for target network (default: 0.005)",
 )
 parser.add_argument(
-    "--partial",
-    action="store_true",
-    help=(
-        "make the environment partially observable: hide cart velocity (index 1) "
-        "and pole angular velocity (index 3), leaving only cart position and pole angle"
-    ),
+    "--burn-in-len",
+    type=int,
+    default=20,
+    help="burn-in length for recurrent policy (default: 20)",
 )
 parser.add_argument(
-        "--burn-in-len",
-        type=int,
-        default=20,
-        help="burn-in length (default: 20)",
+    "--burn-in-from-stored-carry",
+    action="store",
+    default=True,
+    help="set stored carry for burn-in (default: True)",
 )
 parser.add_argument(
-        "--burn-in-from-stored-carry",
-        action="store",
-        default=True,
-        help="set stored carry for burn-in (default: True)",
-)
-parser.add_argument(
-        "--refresh-stored-carries",
-        action="store",
-        default=True,
-        help="refresh stored carries each round (default: True)",
+    "--refresh-stored-carries",
+    action="store",
+    default=True,
+    help="refresh stored carries each round (default: True)",
 )
 parser.add_argument(
     "--wandb",
@@ -119,69 +152,26 @@ import jax
 import jax.numpy as jnp
 
 try:
-    import gymnax
+    from lambda_envs.envs.classic import load_jax_pomdp
 except ImportError:
     sys.exit(
-        "gymnax is required.  Install with:  pip install gymnax\n"
-        "or:  pip install 'lambda-imitation[gymnax]'"
+        "lambda-envs is required.  Install with:  pip install lambda-envs"
     )
 
 from lambda_imitation.iqlearn import Hyperparameters, LSTMMemory
 from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
-# ── partial observability wrapper ─────────────────────────────────────────────
-
-
-class _PartialObsEnv:
-    """Wraps a gymnax CartPole-v1 env to expose only cart position and pole angle.
-
-    Drops cart velocity (index 1) and pole angular velocity (index 3) from
-    every observation, reducing obs_shape from (4,) to (2,).
-    """
-
-    _KEEP = jnp.array([0, 2])
-
-    def __init__(self, wrapped):
-        self._wrapped = wrapped
-
-    def _mask(self, obs):
-        return obs[self._KEEP]
-
-    def get_obs(self, state, params):
-        return self._mask(self._wrapped.get_obs(state, params))
-
-    def reset(self, key, params):
-        obs, state = self._wrapped.reset(key, params)
-        return self._mask(obs), state
-
-    def step(self, key, state, action, params):
-        obs, new_state, reward, done, info = self._wrapped.step(
-            key, state, action, params
-        )
-        return self._mask(obs), new_state, reward, done, info
-
-    def __getattr__(self, name):
-        return getattr(self._wrapped, name)
-
-
 # ── environment setup ─────────────────────────────────────────────────────────
 
-env, env_params = gymnax.make("CartPole-v1")
+env = load_jax_pomdp(args.env, fully_observable=args.fully_observable)
+env_params = env.default_params
 spec = env_spec_from_gymnax(env, env_params)
-# CartPole-v1: obs_shape=(4,), action_dim=2, is_discrete=True
+# obs_shape and action_dim vary per POMDP; all are one-hot / discrete
 
-if args.partial:
-    # Wrap the env so every observation only contains cart position and pole
-    # angle (indices 0 and 2).  Patch the spec to reflect the reduced shape.
-    env = _PartialObsEnv(env)
-    spec = spec._replace(obs_shape=(2,))
+fo_tag = "_fo" if args.fully_observable else ""
+env_label = f"{args.env}{fo_tag}"
 
 # ── placeholder expert buffer (never sampled — SAC only) ──────────────────────
-#
-# create_iqlearn_from_env requires a structurally valid expert buffer even when
-# only fns.train_sac() is used.  A single all-zeros transition with the minimum
-# buffer_size=1 and batch_size=1 satisfies the structural constraint without
-# allocating significant memory.
 
 expert_data = {
     "observations": jnp.zeros((1, *spec.obs_shape), dtype=jnp.float32),
@@ -193,15 +183,15 @@ expert_data = {
 hp = Hyperparameters(
     online_batch_size=32,
     online_buffer_size=10_000,
-    target_entropy=0.3,  # float(0.98 * math.log(spec.action_dim)),
+    target_entropy=0.3,
     actor_lr=1e-4,
     critic_lr=1e-4,
     mc_critic_lr=1e-4,
     alpha_lr=1e-4,
-    alpha=0.2,
-    autotune_alpha=False,
+    alpha=1.0,
+    autotune_alpha=True,
     batch_size=256,
-    gamma=0.99,
+    gamma=0.95,  # many classic POMDPs use gamma=0.95
     regularizer_coef=1 / 40,
     tau=args.tau,
     lam=0.5,
@@ -224,12 +214,15 @@ key, reset_key = jax.random.split(key)
 obs, env_state = env.reset(reset_key, env_params)
 
 key, key_env = jax.random.split(key)
-print("Building SAC agent for CartPole-v1 (discrete, gymnax)…")
+print(
+    f"Building SAC agent for {env_label} "
+    f"(obs_shape={spec.obs_shape}, action_dim={spec.action_dim})…"
+)
 state, fns, _, debug_fns = create_iqlearn_from_env(
     spec,
     expert_data,
     key_env,
-    buffer_size=1,  # expert buffer capacity; minimum valid size
+    buffer_size=1,
     hp=hp,
     fe_hidden_dims=(64, 64),
     actor_head_dims=(64, 64),
@@ -244,25 +237,24 @@ state, fns, _, debug_fns = create_iqlearn_from_env(
 
 
 def evaluate(agent_state, rng_key, n_episodes: int = 10) -> float:
-    """Run ``n_episodes`` deterministic episodes; return mean episode return."""
     total = 0.0
+    max_steps = int(env_params.max_steps_in_episode)
     for _ in range(n_episodes):
         rng_key, rk = jax.random.split(rng_key)
         ep_obs, ep_state = env.reset(rk, env_params)
         carry = jnp.zeros_like(agent_state.actor_online_carry)
         ep_return = 0.0
         done = False
-        while not done:
+        step = 0
+        while not done and step < max_steps:
             rng_key, sk = jax.random.split(rng_key)
-            # predict returns a float32 scalar action index; gymnax expects int32
             raw, carry = fns.predict(agent_state, ep_obs, carry, sk, deterministic=True)
             action = jnp.round(raw).astype(jnp.int32)
             rng_key, ek = jax.random.split(rng_key)
-            ep_obs, ep_state, reward, done, _ = env.step(
-                ek, ep_state, action, env_params
-            )
+            ep_obs, ep_state, reward, done, _ = env.step(ek, ep_state, action, env_params)
             ep_return += float(reward)
             done = bool(done)
+            step += 1
         total += ep_return
     return total / n_episodes
 
@@ -273,7 +265,6 @@ _wandb = None
 if args.wandb:
     try:
         import wandb as _wandb_mod
-
         _wandb = _wandb_mod
     except ImportError:
         print("wandb not installed — skipping.  Install with:  pip install wandb")
@@ -283,11 +274,11 @@ if args.wandb:
             project=args.wandb_project,
             name=args.wandb_run_name,
             config={
-                "env": "CartPole-v1",
+                "env": env_label,
                 "algo": "SAC",
                 "action_space": "discrete",
                 "approximate_mc": True,
-                "partial_obs": args.partial,
+                "fully_observable": args.fully_observable,
                 "rounds": args.rounds,
                 "train_steps": args.train_steps,
                 "seed": args.seed,
@@ -312,11 +303,8 @@ for rnd in tqdm(range(1, args.rounds + 1)):
     key, eval_key = jax.random.split(key)
     mean_return = evaluate(state, eval_key, n_episodes=10)
 
-    # Q comparison: SAC critic_target vs MC critic_target on a random batch
     key, cmp_key, entropy_key = jax.random.split(key, 3)
     buf_size = int(state.online_buffer.size)
-    # Only sample from slots that are marked sampling_ok (populated and have a
-    # valid successor).
     sampling_ok_f = state.online_buffer.sampling_ok.astype(jnp.float32)
     sampling_ok_probs = sampling_ok_f / sampling_ok_f.sum()
     cmp_idx = jax.random.choice(
@@ -335,7 +323,7 @@ for rnd in tqdm(range(1, args.rounds + 1)):
     print(
         f"Round {rnd:4d}/{args.rounds}  "
         f"mean_return={mean_return:7.1f}  "
-        f"alpha={float(metrics.get('alpha', state.alpha)):.4f}  "
+        f"alpha={float(metrics['alpha']):.4f}  "
         f"mc_critic_loss={float(metrics['mc_critic_loss']):.4f}  "
         f"disc_loss={disc_loss:.4f}  "
         f"q_sac={q_sac.mean():7.3f}  q_mc={q_mc.mean():7.3f}  |Δq|={jnp.abs(q_sac - q_mc).mean():.4f}"
@@ -362,37 +350,3 @@ print(f"Final evaluation (20 episodes): mean_return={final_return:.1f}")
 if _wandb is not None:
     _wandb.log({"final_mean_return": final_return})
     _wandb.finish()
-
-# ── visualise ─────────────────────────────────────────────────────────────────
-
-try:
-    import gymnasium as gym
-except ImportError:
-    print(
-        "\ngymnasium not installed — skipping visualisation.\n"
-        "Install with:  pip install 'gymnasium[classic-control]'"
-    )
-    sys.exit(0)
-
-print("\nVisualising.  Press Enter in this terminal after each episode to continue.")
-print("Ctrl-C to quit.\n")
-
-vis_env = gym.make("CartPole-v1", render_mode="human")
-obs, _ = vis_env.reset()
-key = jax.random.key(args.seed + 1)
-vis_carry = jnp.zeros_like(state.actor_online_carry)
-
-while True:
-    key, subkey = jax.random.split(key)
-    # If partial, strip velocity dims from the gymnasium observation before
-    # passing to the agent (which was trained on 2-dim observations).
-    vis_obs = jnp.array(obs)
-    if args.partial:
-        vis_obs = vis_obs[jnp.array([0, 2])]
-    # predict returns a float32 scalar; gymnasium CartPole expects a plain int
-    raw, vis_carry = fns.predict(state, vis_obs, vis_carry, subkey, deterministic=True)
-    obs, _, terminated, truncated, _ = vis_env.step(int(jnp.round(raw)))
-    if terminated or truncated:
-        obs, _ = vis_env.reset()
-        vis_carry = jnp.zeros_like(state.actor_online_carry)
-        input("Episode done — press Enter to continue…")
