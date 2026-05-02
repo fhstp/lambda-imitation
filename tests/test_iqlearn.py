@@ -18,6 +18,7 @@ from lambda_imitation.iqlearn import (
     IQLearnFunctions,
     IQLearnGraphs,
     IQLearnState,
+    IdentityFeatureExtractor,
     IdentityMemory,
     LSTMMemory,
     MLPFeatureExtractor,
@@ -248,6 +249,41 @@ class TestMLPFeatureExtractor:
         fe = MLPFeatureExtractor(OBS_DIM, (8,), rngs=nnx.Rngs(0))
         out = fe(jnp.ones((2, OBS_DIM)))
         assert out.shape == (2, 8)
+
+
+class TestIdentityFeatureExtractor:
+    """IdentityFeatureExtractor must flatten input and have no parameters."""
+
+    def test_output_equals_flattened_input(self):
+        fe = IdentityFeatureExtractor()
+        x = jnp.arange(24, dtype=jnp.float32).reshape(2, 3, 4)
+        out = fe(x)
+        assert out.shape == (2, 12)
+        assert jnp.array_equal(out, x.reshape(2, -1))
+
+    def test_already_flat_passthrough(self):
+        fe = IdentityFeatureExtractor()
+        x = jnp.ones((5, OBS_DIM))
+        out = fe(x)
+        assert out.shape == (5, OBS_DIM)
+        assert jnp.array_equal(out, x)
+
+    def test_no_parameters(self):
+        """nnx.split must yield an empty parameter state."""
+        fe = IdentityFeatureExtractor()
+        graph, state = nnx.split(fe)
+        assert jax.tree.leaves(state) == []
+
+    def test_split_merge_roundtrip(self):
+        fe = IdentityFeatureExtractor()
+        graph, state = nnx.split(fe)
+        fe2 = nnx.merge(graph, state)
+        x = jnp.ones((3, 5))
+        assert jnp.array_equal(fe2(x), fe(x))
+
+    def test_accepts_rngs_kwarg_for_api_compat(self):
+        """rngs kwarg accepted (and ignored) so factory can pass it uniformly."""
+        IdentityFeatureExtractor(rngs=nnx.Rngs(0))
 
 
 class TestHead:

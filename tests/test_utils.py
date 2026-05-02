@@ -554,6 +554,39 @@ class TestCreateIQLearnFromEnv:
         action = fns.predict(state, obs, deterministic=True)
         assert action.shape == (2,)
 
+    def test_fe_hidden_dims_none_uses_identity(self):
+        """fe_hidden_dims=None must skip MLP encoders and use identity FEs."""
+        spec = _make_spec(obs_shape=(4,), action_dim=2)
+        data = _make_expert_data(obs_dim=4, action_dim=2)
+        state, fns, _ = create_iqlearn_from_env(
+            spec, data, jax.random.key(0),
+            buffer_size=100, train_steps=1,
+            fe_hidden_dims=None,
+        )
+        # FE param state must be empty (no encoder weights).
+        assert jax.tree.leaves(state.actor.fe) == []
+        assert jax.tree.leaves(state.critic.q1.fe) == []
+        assert jax.tree.leaves(state.critic.q2.fe) == []
+        obs = jnp.zeros((4,))
+        action = fns.predict(state, obs, deterministic=True)
+        assert action.shape == (2,)
+
+    def test_fe_hidden_dims_none_multidim_obs(self):
+        """Identity FE flattens multi-dim observations down to flat input."""
+        spec = _make_spec(obs_shape=(2, 3), action_dim=2)
+        data = {
+            "observations": jnp.ones((20, 2, 3)),
+            "actions": jnp.zeros((20, 2)),
+        }
+        state, fns, _ = create_iqlearn_from_env(
+            spec, data, jax.random.key(0),
+            buffer_size=100, train_steps=1,
+            fe_hidden_dims=None,
+        )
+        obs = jnp.zeros((2, 3))
+        action = fns.predict(state, obs, deterministic=True)
+        assert action.shape == (2,)
+
     def test_predictions_within_bounds(self):
         """Predicted actions must always lie within [action_low, action_high]."""
         spec = _make_spec(low=-3.0, high=5.0, action_dim=4)

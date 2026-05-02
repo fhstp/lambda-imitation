@@ -324,7 +324,7 @@ def create_iqlearn_from_env(
     key: jax.Array,
     buffer_size: int = 10_000,
     hp: Hyperparameters = None,
-    fe_hidden_dims: tuple[int, ...] = (256, 256),
+    fe_hidden_dims: tuple[int, ...] | None = (256, 256),
     actor_head_dims: tuple[int, ...] = (),
     critic_head_dims: tuple[int, ...] = (256, 256),
     train_steps: int = 1000,
@@ -374,7 +374,12 @@ def create_iqlearn_from_env(
             feature extractors.  All three share the same architecture;
             construct them manually and call
             :func:`~lambda_imitation.iqlearn.create_iqlearn` directly if you need
-            different backbones.
+            different backbones.  Pass ``None`` to skip the learned encoder
+            entirely — every FE slot becomes a parameter-free
+            :class:`~lambda_imitation.iqlearn.IdentityFeatureExtractor` that
+            flattens observations and feeds them straight into the head (and
+            into ``memory_factory`` when set, with feature dim equal to the
+            flat observation size).
         actor_head_dims: Hidden layer widths for the actor head.  Defaults to
             ``()`` (direct linear projection).
         critic_head_dims: Hidden layer widths for the critic head.  Defaults
@@ -463,20 +468,30 @@ def create_iqlearn_from_env(
         terminated = bool(i == n_transitions - 1)
         buffer = buf_fns.add(buffer, step, terminated)
 
-    # Feature extractors — identical architecture, independent weights
+    # Feature extractors — identical architecture, independent weights.
+    # fe_hidden_dims=None disables the encoder: pass None per FE slot so
+    # create_iqlearn synthesises a parameter-free IdentityFeatureExtractor.
     input_dim = math.prod(env_spec.obs_shape)
     key1, key2 = jax.random.split(key)
     seeds = jax.random.bits(key1,(10,))
-    actor_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(int(seeds[0])))
-    critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(int(seeds[1])))
-    critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(int(seeds[2])))
-    mc_critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(int(seeds[3])))
-    mc_critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(int(seeds[4])))
+    if fe_hidden_dims is None:
+        actor_fe = None
+        critic_q1_fe = None
+        critic_q2_fe = None
+        mc_critic_q1_fe = None
+        mc_critic_q2_fe = None
+        fe_out_dim = input_dim
+    else:
+        actor_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(int(seeds[0])))
+        critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(int(seeds[1])))
+        critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(int(seeds[2])))
+        mc_critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(int(seeds[3])))
+        mc_critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(int(seeds[4])))
+        fe_out_dim = fe_hidden_dims[-1]
 
     # Memory modules — None defers to IdentityMemory (no recurrence, feedforward behaviour).
     # To use recurrence, pass a callable (feature_dim, rngs) -> nnx.Module; for the R2D2
     # default use lambda f, r: LSTMMemory(f, fe_hidden_dims[-1], rngs=r).
-    fe_out_dim = fe_hidden_dims[-1]
     if memory_factory is not None:
         actor_mem = memory_factory(fe_out_dim, nnx.Rngs(int(seeds[5])))
         critic_q1_mem = memory_factory(fe_out_dim, nnx.Rngs(int(seeds[6])))

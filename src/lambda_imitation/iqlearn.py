@@ -123,6 +123,29 @@ class MLPFeatureExtractor(nnx.Module):
         return x
 
 
+class IdentityFeatureExtractor(nnx.Module):
+    """No-op feature extractor — flattens the observation, no parameters.
+
+    Structurally interchangeable with :class:`MLPFeatureExtractor` so the
+    factory can treat all FE slots uniformly.  The output is the input with
+    every non-batch dimension flattened, so the downstream feature dim equals
+    the flat observation size.
+
+    Use this (or pass ``None`` for the corresponding ``*_feature_extractor``
+    argument to :func:`create_iqlearn`) when the head should consume raw
+    observations directly without any learned encoder in front of it.
+
+    Args:
+        rngs: Accepted for API compatibility; not used (no parameters).
+    """
+
+    def __init__(self, *, rngs: nnx.Rngs | None = None):
+        del rngs
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        return x.reshape(x.shape[0], -1)
+
+
 class Head(nnx.Module):
     """Generic MLP head: ReLU on hidden layers, linear output.
 
@@ -586,6 +609,9 @@ class Hyperparameters(NamedTuple):
     # carry hidden state from a stale earlier policy.  Requires
     # burn_in_from_stored_carry=True (otherwise stored carries are unread).
     refresh_stored_carries: bool = False
+    # Global-norm gradient clipping applied to actor, critic, and (when active)
+    # mc_critic optimisers via optax.clip_by_global_norm.  0.0 disables clipping.
+    grad_clip_norm: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -630,9 +656,9 @@ def create_iqlearn(
     params: Hyperparameters,
     buffer: Buffer,
     action_dim: int,
-    actor_feature_extractor: nnx.Module,
-    critic_q1_feature_extractor: nnx.Module,
-    critic_q2_feature_extractor: nnx.Module,
+    actor_feature_extractor: nnx.Module | None,
+    critic_q1_feature_extractor: nnx.Module | None,
+    critic_q2_feature_extractor: nnx.Module | None,
     create_key: jax.Array,
     mc_critic_q1_feature_extractor: nnx.Module | None = None,
     mc_critic_q2_feature_extractor: nnx.Module | None = None,
@@ -685,13 +711,18 @@ def create_iqlearn(
         actor_feature_extractor: Initialised ``nnx.Module`` that maps
             ``(batch, *obs_shape) -> (batch, actor_feature_dim)``.  Ownership
             is transferred; the module is split and should not be used directly
-            afterwards.
+            afterwards.  Pass ``None`` to use a parameter-free
+            :class:`IdentityFeatureExtractor` that flattens observations and
+            feeds them straight into the head.
         critic_q1_feature_extractor: Same contract as ``actor_feature_extractor``.
-            Used exclusively by the first Q-branch.
+            Used exclusively by the first Q-branch.  ``None`` synthesises an
+            :class:`IdentityFeatureExtractor`.
         critic_q2_feature_extractor: Same contract as ``actor_feature_extractor``.
             Used exclusively by the second Q-branch.  Should be initialised with
             a different seed from ``critic_q1_feature_extractor`` to ensure the
-            two branches start with different weights.
+            two branches start with different weights.  ``None`` synthesises an
+            :class:`IdentityFeatureExtractor` (parameter-free, so identical
+            across branches — branch divergence then comes from head init only).
         create_key: JAX PRNG key used to initialise all components that are
             created *inside* :func:`create_iqlearn` — the actor head, both
             critic heads, both MC-critic heads (when ``approximate_mc=True``),
@@ -745,12 +776,6 @@ def create_iqlearn(
         - ``DebugFunctions`` *(only when debug=True)*: named tuple of internal
           helper functions, including ``calculate_td_lambda`` and ``get_q``.
     """
-    assert (
-        not approximate_mc or mc_critic_q1_feature_extractor is not None
-    ), "If approximate_mc is set, feature extractors have to be set as well"
-    assert (
-        not approximate_mc or mc_critic_q2_feature_extractor is not None
-    ), "If approximate_mc is set, feature extractors have to be set as well"
     if params.burn_in_from_stored_carry and (
         params.sequence_length <= 1 and params.burn_in_length <= 0
     ):
@@ -789,6 +814,20 @@ def create_iqlearn(
     def _rngs(i: int) -> nnx.Rngs:
         """Return an nnx.Rngs seeded from the i-th sub-key."""
         return nnx.Rngs(int(jax.random.bits(_sub_keys[i])))
+
+    # Synthesise IdentityFeatureExtractor when caller passes None — flattens
+    # observations, no parameters, output dim equals the flat obs size.
+    if actor_feature_extractor is None:
+        actor_feature_extractor = IdentityFeatureExtractor()
+    if critic_q1_feature_extractor is None:
+        critic_q1_feature_extractor = IdentityFeatureExtractor()
+    if critic_q2_feature_extractor is None:
+        critic_q2_feature_extractor = IdentityFeatureExtractor()
+    if approximate_mc:
+        if mc_critic_q1_feature_extractor is None:
+            mc_critic_q1_feature_extractor = IdentityFeatureExtractor()
+        if mc_critic_q2_feature_extractor is None:
+            mc_critic_q2_feature_extractor = IdentityFeatureExtractor()
 
     # Infer FE output dims via dummy forward pass (before split)
     dummy_obs = jnp.zeros((1,) + buffer.info[obs_key].shape[1:])
@@ -1143,10 +1182,18 @@ def create_iqlearn(
         mc_critic_state = TwinCriticState(mc_critic_q1_state, mc_critic_q2_state)
 
     # Optimizers: actor operates on NetworkState; critic on TwinCriticState.
-    actor_optimizer = optax.adam(params.actor_lr)
-    critic_optimizer = optax.adam(params.critic_lr)
+    def _make_optimizer(lr: float) -> optax.GradientTransformation:
+        if params.grad_clip_norm > 0.0:
+            return optax.chain(
+                optax.clip_by_global_norm(params.grad_clip_norm),
+                optax.adam(lr),
+            )
+        return optax.adam(lr)
+
+    actor_optimizer = _make_optimizer(params.actor_lr)
+    critic_optimizer = _make_optimizer(params.critic_lr)
     if approximate_mc:
-        mc_critic_optimizer = optax.adam(params.mc_critic_lr)
+        mc_critic_optimizer = _make_optimizer(params.mc_critic_lr)
     alpha_optimizer = optax.adam(params.alpha_lr)
 
     log_alpha = jnp.array(jnp.log(params.alpha))
@@ -2525,6 +2572,10 @@ def create_iqlearn(
             td_beh = online_buf.info[behaviour_key][td_idx]
             td_rew = online_buf.info[reward_key][td_idx]
             td_done = online_buf.info[terminated_key][td_idx]
+            # Virtual terminal at write head — slot[pos % size] holds stale
+            # previous-cycle data; truncate the lookahead at this boundary.
+            write_head = online_buf.pos % buf_size
+            td_done = jnp.where(td_idx == write_head, 1.0, td_done)
 
             td, p_k, _fa, _fq1, _fq2 = calculate_td_lambda(
                 actor,
@@ -2586,7 +2637,7 @@ def create_iqlearn(
                 disc = optax.losses.huber_loss(
                     delta, delta=params.lambda_discrepancy_delta
                 )
-                disc_step = (disc * mask_t).mean()
+                disc_step = (disc * coefs * mask_t).mean()
                 loss_step = (
                     loss_step + params.lambda_discrepancy_coef * disc_step
                 )
@@ -3001,7 +3052,7 @@ def create_iqlearn(
                 loss_actor, has_aux=True
             )(
                 sac.actor,
-                sac.critic_target,
+                sac.critic,
                 sac.online_buffer,
                 online_buffer_sample,
                 sac.alpha,
@@ -3041,6 +3092,32 @@ def create_iqlearn(
         if approximate_mc:
             metrics.update(metrics_mc_critic)
 
+        # Diagnostic: pre-optimizer gradient magnitudes per network.  Useful
+        # for detecting outlier updates that destabilise training.
+        def _grad_max_abs(grads):
+            leaves = jax.tree_util.tree_leaves(grads)
+            return jnp.max(jnp.stack([jnp.max(jnp.abs(l)) for l in leaves]))
+
+        metrics["grad_norm_actor"] = optax.global_norm(grads_actor)
+        metrics["grad_norm_critic"] = optax.global_norm(grads_critic)
+        metrics["grad_max_abs_actor"] = _grad_max_abs(grads_actor)
+        metrics["grad_max_abs_critic"] = _grad_max_abs(grads_critic)
+        if approximate_mc:
+            metrics["grad_norm_mc_critic"] = optax.global_norm(grads_mc_critic)
+            metrics["grad_max_abs_mc_critic"] = _grad_max_abs(grads_mc_critic)
+
+        # Diagnostic: online recurrent carry magnitudes — drift detection.
+        metrics["carry_norm_actor"] = jnp.linalg.norm(
+            sac.actor_online_carry.reshape(-1)
+        )
+        metrics["carry_norm_critic_q1"] = jnp.linalg.norm(
+            sac.critic_q1_online_carry.reshape(-1)
+        )
+        if approximate_mc:
+            metrics["carry_norm_mc_critic_q1"] = jnp.linalg.norm(
+                sac.mc_critic_q1_online_carry.reshape(-1)
+            )
+
         # Carry refresh: scatter the per-step input carries that the loss
         # scans just produced into the online buffer at the sampled slots,
         # countering carry drift.  Each loss writes only its own carry key,
@@ -3060,17 +3137,20 @@ def create_iqlearn(
         updates, new_actor_opt = actor_optimizer.update(
             grads_actor, sac.actor_optimizer_state
         )
+        metrics["update_norm_actor"] = optax.global_norm(updates)
         new_actor = optax.apply_updates(sac.actor, updates)  # type: ignore
 
         updates, new_critic_opt = critic_optimizer.update(
             grads_critic, sac.critic_optimizer_state
         )
+        metrics["update_norm_critic"] = optax.global_norm(updates)
         new_critic = optax.apply_updates(sac.critic, updates)  # type: ignore
 
         if approximate_mc:
             updates, new_mc_critic_opt = mc_critic_optimizer.update(
                 grads_mc_critic, sac.mc_critic_optimizer_state
             )
+            metrics["update_norm_mc_critic"] = optax.global_norm(updates)
             new_mc_critic = optax.apply_updates(sac.mc_critic, updates)  # type: ignore
 
         if params.autotune_alpha:
@@ -3080,12 +3160,12 @@ def create_iqlearn(
             )
             new_log_alpha = optax.apply_updates(sac.log_alpha, updates)  # type: ignore
             new_alpha = jnp.exp(new_log_alpha)  # type: ignore
-            metrics.update({"alpha": new_alpha})
         else:
             metrics.update({"alpha": sac.alpha})
             new_alpha_opt = sac.alpha_optimizer_state
             new_log_alpha = sac.log_alpha
             new_alpha = sac.alpha
+        metrics.update({"alpha": new_alpha})
 
         new_actor_target = jax.tree.map(
             lambda x, y: (1 - params.tau) * x + params.tau * y,
@@ -3103,6 +3183,12 @@ def create_iqlearn(
                 sac.mc_critic_target,
                 new_mc_critic,
             )
+
+        metrics["param_norm_actor"] = optax.global_norm(new_actor)
+        metrics["param_norm_critic"] = optax.global_norm(new_critic)
+        if approximate_mc:
+            metrics["param_norm_mc_critic"] = optax.global_norm(new_mc_critic)
+
         return (
             IQLearnState(
                 new_actor,  # type: ignore
