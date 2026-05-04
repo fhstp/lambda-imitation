@@ -70,6 +70,13 @@ parser.add_argument(
     help="smoothing coefficient for target network (default: 0.005)",
 )
 parser.add_argument(
+    "--grad-clip-norm",
+    type=float,
+    default=0.5,
+    metavar="G",
+    help="global-norm gradient clip for actor/critic/mc_critic (0.0 disables; default: 0.0)",
+)
+parser.add_argument(
     "--burn-in-len",
     type=int,
     default=20,
@@ -86,6 +93,21 @@ parser.add_argument(
     action="store",
     default=True,
     help="refresh stored carries each round (default: True)",
+)
+parser.add_argument(
+    "--trunk",
+    action="store_true",
+    help=(
+        "use shared-trunk architecture: one FE+memory shared by actor and both SAC critics, "
+        "a second FE+memory shared by both MC critics (requires approximate_mc=True)"
+    ),
+)
+parser.add_argument(
+    "--trunk-lr",
+    type=float,
+    default=None,
+    metavar="LR",
+    help="learning rate for the shared trunk optimizer (default: same as actor_lr)",
 )
 parser.add_argument(
     "--wandb",
@@ -122,7 +144,6 @@ except ImportError:
 from lambda_imitation.iqlearn import Hyperparameters, LSTMMemory
 from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
-
 # ── env adapter: add params kwarg to get_obs ──────────────────────────────────
 #
 # lambda-imitation calls ``env.get_obs(state, params)`` (gymnax convention),
@@ -130,6 +151,7 @@ from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 # arg.  No env behaviour changes: PocMan's get_obs never reads params, and
 # reset/step pass through unchanged via __getattr__.  Trajectories remain
 # bit-identical to lambda_discrepancy.
+
 
 class _LambdaEnvAdapter:
     def __init__(self, wrapped):
@@ -168,15 +190,15 @@ hp = Hyperparameters(
     critic_lr=1e-4,
     mc_critic_lr=1e-4,
     alpha_lr=1e-4,
-    alpha=1.0,
-    autotune_alpha=True,
+    alpha=0.2,
+    autotune_alpha=False,
     batch_size=256,
     gamma=0.95,  # matches PocMan's intrinsic gamma
     regularizer_coef=1 / 40,
     tau=args.tau,
     lam=0.5,
-    lambda_truncation=15,
-    sequence_length=5,
+    lambda_truncation=17,
+    sequence_length=20,
     burn_in_length=args.burn_in_len,
     n_step=1,
     burn_in_from_stored_carry=args.burn_in_from_stored_carry,
@@ -185,6 +207,7 @@ hp = Hyperparameters(
     lambda_discrepancy_coef=args.lambda_coef,
     lambda_discrepancy_delta=1.0,
     refresh_stored_carries=args.refresh_stored_carries,
+    grad_clip_norm=args.grad_clip_norm,
 )
 
 # ── initial environment reset ─────────────────────────────────────────────────
@@ -194,20 +217,24 @@ key, reset_key = jax.random.split(key)
 obs, env_state = env.reset(reset_key, env_params)
 
 key, key_env = jax.random.split(key)
-print(f"Building SAC agent for {env_label} (obs_shape={spec.obs_shape}, action_dim={spec.action_dim})…")
+print(
+    f"Building SAC agent for {env_label} (obs_shape={spec.obs_shape}, action_dim={spec.action_dim})…"
+)
 state, fns, _, debug_fns = create_iqlearn_from_env(
     spec,
     expert_data,
     key_env,
     buffer_size=1,
     hp=hp,
-    fe_hidden_dims=(64, 64),
-    actor_head_dims=(64, 64),
-    critic_head_dims=(64, 64),
+    fe_hidden_dims=(128,),
+    actor_head_dims=(128,),
+    critic_head_dims=(128,),
     train_steps=args.train_steps,
     approximate_mc=True,
     debug=True,
-    memory_factory=lambda f, r: LSTMMemory(f, 256, rngs=r),
+    memory_factory=lambda f, r: LSTMMemory(f, 512, rngs=r),
+    use_shared_trunk=args.trunk,
+    trunk_lr=args.trunk_lr,
 )
 
 # ── evaluation helper ─────────────────────────────────────────────────────────
@@ -228,7 +255,9 @@ def evaluate(agent_state, rng_key, n_episodes: int = 10) -> float:
             raw, carry = fns.predict(agent_state, ep_obs, carry, sk, deterministic=True)
             action = jnp.round(raw).astype(jnp.int32)
             rng_key, ek = jax.random.split(rng_key)
-            ep_obs, ep_state, reward, done, _ = env.step(ek, ep_state, action, env_params)
+            ep_obs, ep_state, reward, done, _ = env.step(
+                ek, ep_state, action, env_params
+            )
             ep_return += float(reward)
             done = bool(done)
             step += 1
@@ -242,6 +271,7 @@ _wandb = None
 if args.wandb:
     try:
         import wandb as _wandb_mod
+
         _wandb = _wandb_mod
     except ImportError:
         print("wandb not installed — skipping.  Install with:  pip install wandb")
