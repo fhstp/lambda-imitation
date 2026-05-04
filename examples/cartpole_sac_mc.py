@@ -102,6 +102,21 @@ parser.add_argument(
     help="refresh stored carries each round (default: False)",
 )
 parser.add_argument(
+    "--trunk",
+    action="store_true",
+    help=(
+        "use shared-trunk architecture: one FE+memory shared by actor and both SAC critics, "
+        "a second FE+memory shared by both MC critics (requires approximate_mc=True)"
+    ),
+)
+parser.add_argument(
+    "--trunk-lr",
+    type=float,
+    default=None,
+    metavar="LR",
+    help="learning rate for the shared trunk optimizer (default: same as actor_lr)",
+)
+parser.add_argument(
     "--wandb",
     action="store_true",
     help="enable Weights & Biases logging",
@@ -246,6 +261,11 @@ state, fns, _, debug_fns = create_iqlearn_from_env(
     approximate_mc=True,
     debug=True,
     memory_factory=lambda f, r: LSTMMemory(f, 128, rngs=r),
+    # Shared-trunk mode: one FE+LSTM serves actor + both SAC critics;
+    # a second FE+LSTM serves both MC critics.  Pass --trunk to enable.
+    use_shared_trunk=args.trunk,
+    trunk_lr=args.trunk_lr,
+    mc_trunk_lr=args.trunk_lr,
 )
 
 # ── evaluation helper ─────────────────────────────────────────────────────────
@@ -296,6 +316,7 @@ if args.wandb:
                 "action_space": "discrete",
                 "approximate_mc": True,
                 "partial_obs": args.partial,
+                "use_shared_trunk": args.trunk,
                 "rounds": args.rounds,
                 "train_steps": args.train_steps,
                 "seed": args.seed,

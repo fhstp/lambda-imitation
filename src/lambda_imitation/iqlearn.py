@@ -367,6 +367,44 @@ class LSTMMemory(nnx.Module):
 # ---------------------------------------------------------------------------
 
 
+class TrunkState(NamedTuple):
+    """Flax NNX graph states for a shared feature-extractor + memory pair.
+
+    Used by the trunk-sharing architecture where actor, SAC critic Q1, and
+    SAC critic Q2 share a single (FE, memory) pair — reducing parameter count
+    and allowing gradient accumulation across all losses that use the trunk.
+
+    Attributes:
+        fe: Graph state of the feature extractor module.
+        memory: Graph state of the recurrent memory module.
+    """
+
+    fe: Any   # nnx.GraphState
+    memory: Any  # nnx.GraphState
+
+
+class HeadState(NamedTuple):
+    """Flax NNX graph state for a single head.
+
+    Attributes:
+        head: Graph state of the task-specific head module.
+    """
+
+    head: Any  # nnx.GraphState
+
+
+class TwinHeadState(NamedTuple):
+    """Two independent head states for twin-Q critics.
+
+    Attributes:
+        q1: HeadState for the first Q-branch.
+        q2: HeadState for the second Q-branch.
+    """
+
+    q1: "HeadState"
+    q2: "HeadState"
+
+
 class NetworkState(NamedTuple):
     """Flax NNX graph states for a feature-extractor + memory + head triple.
 
@@ -426,6 +464,27 @@ class IQLearnState(NamedTuple):
     All fields are JAX pytrees, so the entire state can be checkpointed,
     passed through ``jax.jit``, or stacked for vectorised environments.
 
+    The fields are split into two groups:
+
+    **IQ-Learn / non-trunk SAC path** (unchanged from pre-trunk design):
+        actor, critic, mc_critic, actor_target, critic_target,
+        mc_critic_target, actor_optimizer_state, critic_optimizer_state,
+        mc_critic_optimizer_state, alpha_optimizer_state, alpha, log_alpha,
+        online_buffer.
+
+    **Shared-trunk SAC path** (``None`` when ``use_shared_trunk=False``):
+        trunk, trunk_target, mc_trunk, mc_trunk_target,
+        actor_head, actor_head_target,
+        critic_head, critic_head_target,
+        mc_critic_head, mc_critic_head_target,
+        trunk_optimizer_state, mc_trunk_optimizer_state,
+        actor_head_optimizer_state, critic_head_optimizer_state,
+        mc_critic_head_optimizer_state.
+
+    **Online carries** (both paths):
+        actor_online_carry, critic_q1_online_carry, critic_q2_online_carry,
+        mc_critic_q1_online_carry, mc_critic_q2_online_carry.
+
     Attributes:
         actor: Online actor network state (feature extractor + head).
         critic: Online twin-critic state (two independent Q-branches).
@@ -440,8 +499,24 @@ class IQLearnState(NamedTuple):
         alpha: Current entropy temperature (``exp(log_alpha)``).
         log_alpha: Log-space entropy temperature; directly optimised to avoid
             a positivity constraint.
+        trunk: Shared (FE, memory) state used by actor + SAC critics (online).
+        trunk_target: EMA-smoothed copy of trunk.
+        mc_trunk: Shared (FE, memory) state used by MC critics (online).
+        mc_trunk_target: EMA-smoothed copy of mc_trunk.
+        actor_head: Head-only state for the actor (trunk mode).
+        actor_head_target: EMA-smoothed actor head.
+        critic_head: Twin head states for SAC critics (trunk mode).
+        critic_head_target: EMA-smoothed critic heads.
+        mc_critic_head: Twin head states for MC critics (trunk mode).
+        mc_critic_head_target: EMA-smoothed MC critic heads.
+        trunk_optimizer_state: Optax state for trunk optimiser.
+        mc_trunk_optimizer_state: Optax state for mc_trunk optimiser.
+        actor_head_optimizer_state: Optax state for actor head optimiser.
+        critic_head_optimizer_state: Optax state for critic heads optimiser.
+        mc_critic_head_optimizer_state: Optax state for MC critic heads optimiser.
     """
 
+    # --- IQ-Learn (non-SAC) fields — unchanged ---
     actor: NetworkState
     critic: TwinCriticState
     mc_critic: TwinCriticState
@@ -455,11 +530,33 @@ class IQLearnState(NamedTuple):
     alpha: jax.Array
     log_alpha: jax.Array
     online_buffer: Buffer
-    actor_online_carry: any
-    critic_q1_online_carry: any
-    critic_q2_online_carry: any
-    mc_critic_q1_online_carry: any
-    mc_critic_q2_online_carry: any
+    # Online carries (used by both paths)
+    actor_online_carry: Any
+    critic_q1_online_carry: Any
+    critic_q2_online_carry: Any
+    mc_critic_q1_online_carry: Any
+    mc_critic_q2_online_carry: Any
+
+    # --- Shared trunk fields (SAC path, None when use_shared_trunk=False) ---
+    trunk: "TrunkState | None" = None
+    trunk_target: "TrunkState | None" = None
+    mc_trunk: "TrunkState | None" = None
+    mc_trunk_target: "TrunkState | None" = None
+
+    # --- Head states (SAC path, trunk mode) ---
+    actor_head: "HeadState | None" = None
+    actor_head_target: "HeadState | None" = None
+    critic_head: "TwinHeadState | None" = None
+    critic_head_target: "TwinHeadState | None" = None
+    mc_critic_head: "TwinHeadState | None" = None
+    mc_critic_head_target: "TwinHeadState | None" = None
+
+    # --- Optimizers (SAC path trunk mode) ---
+    trunk_optimizer_state: Any = None
+    mc_trunk_optimizer_state: Any = None
+    actor_head_optimizer_state: Any = None
+    critic_head_optimizer_state: Any = None
+    mc_critic_head_optimizer_state: Any = None
 
 
 class IQLearnFunctions(NamedTuple):
@@ -567,12 +664,16 @@ class DebugFunctions(NamedTuple):
 class SequenceSample(NamedTuple):
     """Pre-sampled sequence + burned-in carries for all networks.
 
-    Produced once per update step by ``sample_with_burn_in`` and shared
-    across all loss functions, avoiding redundant buffer reads and
-    duplicate actor/critic burn-in passes.
+    Produced once per update step by ``sample_with_burn_in`` (non-trunk path)
+    or ``sample_with_burn_in_trunk`` (trunk path) and shared across all loss
+    functions, avoiding redundant buffer reads and duplicate burn-in passes.
 
     ``burn_ac_tgt``, ``burn_mc_*`` fields are ``None`` when the
     corresponding networks were not passed to ``sample_with_burn_in``.
+
+    ``burn_trunk``, ``burn_trunk_tgt``, ``burn_mc_trunk``,
+    ``burn_mc_trunk_tgt`` are ``None`` in the non-trunk path and populated
+    in the trunk path.
     """
 
     obs: Any
@@ -581,6 +682,7 @@ class SequenceSample(NamedTuple):
     done: Any
     mask: Any
     seq_idx: Any
+    # Old per-network carries (used by IQ-Learn / non-trunk SAC path)
     burn_ac: Any        # actor carry
     burn_ac_tgt: Any    # actor_target carry (None if not provided)
     burn_cq1: Any       # online critic q1 carry
@@ -591,6 +693,11 @@ class SequenceSample(NamedTuple):
     burn_mc_cq2: Any    # mc_critic q2 carry
     burn_mc_cq1_tgt: Any  # mc_critic_target q1 carry (None if not provided)
     burn_mc_cq2_tgt: Any  # mc_critic_target q2 carry
+    # New shared-trunk carries (None when not using trunk mode)
+    burn_trunk: Any = None        # trunk carry (online) for actor+critic
+    burn_trunk_tgt: Any = None    # trunk_target carry
+    burn_mc_trunk: Any = None     # mc_trunk carry (online)
+    burn_mc_trunk_tgt: Any = None  # mc_trunk_target carry
 
 
 class Hyperparameters(NamedTuple):
@@ -753,6 +860,14 @@ def create_iqlearn(
     is_discrete: bool = False,
     approximate_mc: bool = False,
     debug: bool = False,
+    # --- Shared-trunk parameters (ignored when use_shared_trunk=False) ---
+    use_shared_trunk: bool = False,
+    shared_feature_extractor: nnx.Module | None = None,
+    mc_feature_extractor: nnx.Module | None = None,
+    shared_memory: nnx.Module | None = None,
+    mc_shared_memory: nnx.Module | None = None,
+    trunk_lr: float | None = None,
+    mc_trunk_lr: float | None = None,
 ) -> (
     "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs] | "
     "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs, DebugFunctions]"
@@ -1249,6 +1364,119 @@ def create_iqlearn(
             burn_mc_cq2_tgt=_burn_mc_cq2_tgt,
         )
 
+    if use_shared_trunk:
+
+        def sample_with_burn_in_trunk(
+            online_buffer,
+            trunk: TrunkState,
+            trunk_target: TrunkState,
+            actor_head: HeadState,
+            key_sample: jax.Array,
+            mc_trunk: "TrunkState | None" = None,
+            mc_trunk_target: "TrunkState | None" = None,
+        ) -> SequenceSample:
+            """Sample a sequence and burn in shared trunk carries.
+
+            Actor and critic share the same trunk → a single carry covers both.
+            Burns in ``trunk`` (online) and ``trunk_target`` (EMA target).
+            Optionally burns in ``mc_trunk`` and ``mc_trunk_target``.
+
+            Returns a :class:`SequenceSample` with old per-network carry fields
+            set to ``None`` (they are unused in trunk mode) and the new
+            ``burn_trunk*`` / ``burn_mc_trunk*`` fields populated.
+            """
+            _B = params.burn_in_length
+            _SL = params.sequence_length + 1
+            _bs = params.online_batch_size
+
+            seq, seq_idx = online_sequence_sample_fn(online_buffer, key_sample)
+            obs = seq.info[obs_key][:, _B:]
+            act = seq.info[action_key][:, _B:]
+            rew = seq.info[reward_key][:, _B:].reshape(_bs, _SL)
+            done = seq.info[terminated_key][:, _B:].reshape(_bs, _SL)
+            mask = seq.mask[:, _B:]
+
+            # Compute initial carries (zero or from stored carry)
+            if params.burn_in_from_stored_carry:
+                _init_trunk = seq.info[actor_carry_key][:, 0]
+                if mc_trunk is not None:
+                    _init_mc_trunk = seq.info[mc_critic_q1_carry_key][:, 0]
+                else:
+                    _init_mc_trunk = None
+            else:
+                _init_trunk = _make_trunk_carry(_bs)
+                _init_mc_trunk = _make_mc_trunk_carry(_bs) if mc_trunk is not None else None
+
+            if _B > 0:
+                _burn_obs = seq.info[obs_key][:, :_B]
+                _burn_done = seq.info[terminated_key][:, :_B].astype(jnp.float32)
+
+                # Burn in online trunk (actor + critic share the same trunk)
+                _burn_trunk, _ = jax.lax.stop_gradient(
+                    run_trunk_actor_scan(trunk, actor_head, _burn_obs, _init_trunk, _burn_done)
+                )
+                # Burn in target trunk
+                _burn_trunk_tgt, _ = jax.lax.stop_gradient(
+                    run_trunk_actor_scan(trunk_target, actor_head, _burn_obs, _init_trunk, _burn_done)
+                )
+
+                if mc_trunk is not None:
+                    # Use a dummy critic_head for the FE+memory-only burn-in
+                    _burn_mc_trunk, _ = jax.lax.stop_gradient(
+                        run_trunk_critic_scan(
+                            mc_trunk, _make_dummy_mc_head(), None, None,
+                            use_mc=True, initial_carry=_init_mc_trunk, dones=_burn_done
+                        )[:2]
+                    )
+                    _burn_mc_trunk_tgt, _ = jax.lax.stop_gradient(
+                        run_trunk_critic_scan(
+                            mc_trunk_target, _make_dummy_mc_head(), None, None,
+                            use_mc=True, initial_carry=_init_mc_trunk, dones=_burn_done
+                        )[:2]
+                    )
+                else:
+                    _burn_mc_trunk = None
+                    _burn_mc_trunk_tgt = None
+            else:
+                _burn_trunk = _init_trunk
+                _burn_trunk_tgt = _init_trunk
+                _burn_mc_trunk = _init_mc_trunk
+                _burn_mc_trunk_tgt = _init_mc_trunk
+
+            return SequenceSample(
+                obs=obs,
+                act=act,
+                rew=rew,
+                done=done,
+                mask=mask,
+                seq_idx=seq_idx,
+                # Old per-network carries — unused in trunk mode
+                burn_ac=None,
+                burn_ac_tgt=None,
+                burn_cq1=None,
+                burn_cq2=None,
+                burn_cq1_tgt=None,
+                burn_cq2_tgt=None,
+                burn_mc_cq1=None,
+                burn_mc_cq2=None,
+                burn_mc_cq1_tgt=None,
+                burn_mc_cq2_tgt=None,
+                # New trunk carries
+                burn_trunk=_burn_trunk,
+                burn_trunk_tgt=_burn_trunk_tgt,
+                burn_mc_trunk=_burn_mc_trunk,
+                burn_mc_trunk_tgt=_burn_mc_trunk_tgt,
+            )
+
+        # Dummy mc head used for mc trunk burn-in (only carry matters, not outputs)
+        def _make_dummy_mc_head():
+            if approximate_mc:
+                return TwinHeadState(
+                    HeadState(_trunk_mc_cq1_head_st),
+                    HeadState(_trunk_mc_cq2_head_st),
+                )
+            return None
+
     if approximate_mc:
         # Pre-initialise every behaviour_key slot to 1.0 so that slots which
         # have never been written by run_env_step (pre-fill and as-yet-unwritten
@@ -1438,6 +1666,184 @@ def create_iqlearn(
         mc_critic_q1_online_carry_init = None
         mc_critic_q2_online_carry_init = None
 
+    # ------------------------------------------------------------------
+    # Trunk-mode network creation (use_shared_trunk=True)
+    # ------------------------------------------------------------------
+    _trunk_optimizer_state = None
+    _mc_trunk_optimizer_state = None
+    _actor_head_optimizer_state = None
+    _critic_head_optimizer_state = None
+    _mc_critic_head_optimizer_state = None
+    _trunk_state = None
+    _trunk_target_state = None
+    _mc_trunk_state = None
+    _mc_trunk_target_state = None
+    _actor_head_state = None
+    _actor_head_target_state = None
+    _critic_head_state = None
+    _critic_head_target_state = None
+    _mc_critic_head_state = None
+    _mc_critic_head_target_state = None
+
+    if use_shared_trunk:
+        # ---- Shared FE for actor + SAC critic branches ----
+        _shared_fe = shared_feature_extractor
+        if _shared_fe is None:
+            _shared_fe = IdentityFeatureExtractor()
+        _shared_memory = shared_memory
+        if _shared_memory is None:
+            _shared_memory = IdentityMemory(
+                _shared_fe(dummy_obs).shape[-1], rngs=_rngs(5)
+            )
+
+        # ---- MC FE (optional) ----
+        if approximate_mc:
+            _mc_fe = mc_feature_extractor
+            if _mc_fe is None:
+                _mc_fe = IdentityFeatureExtractor()
+            _mc_mem = mc_shared_memory
+            if _mc_mem is None:
+                _mc_mem = IdentityMemory(
+                    _mc_fe(dummy_obs).shape[-1], rngs=_rngs(8)
+                )
+
+        # ---- Infer dims ----
+        _shared_fe_dim = _shared_fe(dummy_obs).shape[-1]
+        _shared_dummy_carry = _shared_memory.initial_carry(1)
+        _, _shared_dummy_mem_out = _shared_memory(_shared_fe(dummy_obs), _shared_dummy_carry)
+        _shared_mem_out_dim = _shared_dummy_mem_out.shape[-1]
+
+        if approximate_mc:
+            _mc_fe_dim = _mc_fe(dummy_obs).shape[-1]
+            _mc_dummy_carry = _mc_mem.initial_carry(1)
+            _, _mc_dummy_mem_out = _mc_mem(_mc_fe(dummy_obs), _mc_dummy_carry)
+            _mc_mem_out_dim = _mc_dummy_mem_out.shape[-1]
+
+        # ---- Carry templates for trunk ----
+        _trunk_carry_template = _shared_memory.initial_carry(1)
+        if approximate_mc:
+            _mc_trunk_carry_template = _mc_mem.initial_carry(1)
+
+        def _make_trunk_carry(batch_size: int):
+            return _make_zero_carry(_trunk_carry_template, batch_size)
+
+        if approximate_mc:
+            def _make_mc_trunk_carry(batch_size: int):
+                return _make_zero_carry(_mc_trunk_carry_template, batch_size)
+
+        # ---- Create head models (trunk mode: no FE dim prefix in actor head) ----
+        if is_discrete:
+            _trunk_actor_head = Head(
+                _shared_mem_out_dim, actor_head_dims, action_dim, rngs=_rngs(0)
+            )
+            _trunk_cq1_head = Head(
+                _shared_mem_out_dim, critic_head_dims, action_dim, rngs=_rngs(1)
+            )
+            _trunk_cq2_head = Head(
+                _shared_mem_out_dim, critic_head_dims, action_dim, rngs=_rngs(2)
+            )
+            if approximate_mc:
+                _trunk_mc_cq1_head = Head(
+                    _mc_mem_out_dim, mc_critic_head_dims, action_dim, rngs=_rngs(3)
+                )
+                _trunk_mc_cq2_head = Head(
+                    _mc_mem_out_dim, mc_critic_head_dims, action_dim, rngs=_rngs(4)
+                )
+        else:
+            _trunk_actor_head = Head(
+                _shared_mem_out_dim, actor_head_dims, 2 * action_dim, rngs=_rngs(0)
+            )
+            _trunk_cq1_head = Head(
+                _shared_mem_out_dim + action_dim, critic_head_dims, 1, rngs=_rngs(1)
+            )
+            _trunk_cq2_head = Head(
+                _shared_mem_out_dim + action_dim, critic_head_dims, 1, rngs=_rngs(2)
+            )
+            if approximate_mc:
+                _trunk_mc_cq1_head = Head(
+                    _mc_mem_out_dim + action_dim, mc_critic_head_dims, 1, rngs=_rngs(3)
+                )
+                _trunk_mc_cq2_head = Head(
+                    _mc_mem_out_dim + action_dim, mc_critic_head_dims, 1, rngs=_rngs(4)
+                )
+
+        # ---- Split trunk into (graph_def, state) ----
+        _shared_fe_graph, _shared_fe_st = nnx.split(_shared_fe)
+        _shared_mem_graph, _shared_mem_st, _shared_mem_rngs = nnx.split(
+            _shared_memory, nnx.Param, ...
+        )
+        if approximate_mc:
+            _mc_fe_graph, _mc_fe_st = nnx.split(_mc_fe)
+            _mc_mem_graph, _mc_mem_st, _mc_mem_rngs = nnx.split(
+                _mc_mem, nnx.Param, ...
+            )
+
+        # ---- Split heads ----
+        _trunk_actor_head_graph, _trunk_actor_head_st = nnx.split(_trunk_actor_head)
+        _trunk_cq1_head_graph, _trunk_cq1_head_st = nnx.split(_trunk_cq1_head)
+        _trunk_cq2_head_graph, _trunk_cq2_head_st = nnx.split(_trunk_cq2_head)
+        if approximate_mc:
+            _trunk_mc_cq1_head_graph, _trunk_mc_cq1_head_st = nnx.split(_trunk_mc_cq1_head)
+            _trunk_mc_cq2_head_graph, _trunk_mc_cq2_head_st = nnx.split(_trunk_mc_cq2_head)
+
+        # ---- Assemble TrunkState / HeadState ----
+        _trunk_state = TrunkState(
+            remove_weak_types(_shared_fe_st), remove_weak_types(_shared_mem_st)
+        )
+        _trunk_target_state = TrunkState(
+            remove_weak_types(_shared_fe_st), remove_weak_types(_shared_mem_st)
+        )
+        if approximate_mc:
+            _mc_trunk_state = TrunkState(
+                remove_weak_types(_mc_fe_st), remove_weak_types(_mc_mem_st)
+            )
+            _mc_trunk_target_state = TrunkState(
+                remove_weak_types(_mc_fe_st), remove_weak_types(_mc_mem_st)
+            )
+
+        _actor_head_state = HeadState(remove_weak_types(_trunk_actor_head_st))
+        _actor_head_target_state = HeadState(remove_weak_types(_trunk_actor_head_st))
+        _critic_head_state = TwinHeadState(
+            HeadState(remove_weak_types(_trunk_cq1_head_st)),
+            HeadState(remove_weak_types(_trunk_cq2_head_st)),
+        )
+        _critic_head_target_state = TwinHeadState(
+            HeadState(remove_weak_types(_trunk_cq1_head_st)),
+            HeadState(remove_weak_types(_trunk_cq2_head_st)),
+        )
+        if approximate_mc:
+            _mc_critic_head_state = TwinHeadState(
+                HeadState(remove_weak_types(_trunk_mc_cq1_head_st)),
+                HeadState(remove_weak_types(_trunk_mc_cq2_head_st)),
+            )
+            _mc_critic_head_target_state = TwinHeadState(
+                HeadState(remove_weak_types(_trunk_mc_cq1_head_st)),
+                HeadState(remove_weak_types(_trunk_mc_cq2_head_st)),
+            )
+
+        # ---- Trunk optimizers ----
+        _eff_trunk_lr = trunk_lr if trunk_lr is not None else params.actor_lr
+        _eff_mc_trunk_lr = mc_trunk_lr if mc_trunk_lr is not None else params.mc_critic_lr
+        _trunk_optimizer = _make_optimizer(_eff_trunk_lr)
+        _actor_head_optimizer = _make_optimizer(params.actor_lr)
+        _critic_head_optimizer = _make_optimizer(params.critic_lr)
+        _trunk_optimizer_state = remove_weak_types(_trunk_optimizer.init(_trunk_state))
+        _actor_head_optimizer_state = remove_weak_types(
+            _actor_head_optimizer.init(_actor_head_state)
+        )
+        _critic_head_optimizer_state = remove_weak_types(
+            _critic_head_optimizer.init(_critic_head_state)
+        )
+        if approximate_mc:
+            _mc_trunk_optimizer = _make_optimizer(_eff_mc_trunk_lr)
+            _mc_critic_head_optimizer = _make_optimizer(params.mc_critic_lr)
+            _mc_trunk_optimizer_state = remove_weak_types(
+                _mc_trunk_optimizer.init(_mc_trunk_state)
+            )
+            _mc_critic_head_optimizer_state = remove_weak_types(
+                _mc_critic_head_optimizer.init(_mc_critic_head_state)
+            )
+
     iqlearn = IQLearnState(
         remove_weak_types(actor_state),
         remove_weak_types(critic_state),
@@ -1457,6 +1863,22 @@ def create_iqlearn(
         critic_q2_online_carry_init,
         mc_critic_q1_online_carry_init,
         mc_critic_q2_online_carry_init,
+        # Trunk-mode fields (None when use_shared_trunk=False)
+        trunk=_trunk_state,
+        trunk_target=_trunk_target_state,
+        mc_trunk=_mc_trunk_state if use_shared_trunk and approximate_mc else None,
+        mc_trunk_target=_mc_trunk_target_state if use_shared_trunk and approximate_mc else None,
+        actor_head=_actor_head_state,
+        actor_head_target=_actor_head_target_state,
+        critic_head=_critic_head_state,
+        critic_head_target=_critic_head_target_state,
+        mc_critic_head=_mc_critic_head_state if use_shared_trunk and approximate_mc else None,
+        mc_critic_head_target=_mc_critic_head_target_state if use_shared_trunk and approximate_mc else None,
+        trunk_optimizer_state=_trunk_optimizer_state,
+        mc_trunk_optimizer_state=_mc_trunk_optimizer_state if use_shared_trunk and approximate_mc else None,
+        actor_head_optimizer_state=_actor_head_optimizer_state,
+        critic_head_optimizer_state=_critic_head_optimizer_state,
+        mc_critic_head_optimizer_state=_mc_critic_head_optimizer_state if use_shared_trunk and approximate_mc else None,
     )
 
     # ------------------------------------------------------------------
@@ -1515,6 +1937,155 @@ def create_iqlearn(
         if return_input_carries:
             return final_carry, ys, input_carries
         return final_carry, ys
+
+    # ------------------------------------------------------------------
+    # Trunk-mode forward pass helpers (only populated when use_shared_trunk)
+    # ------------------------------------------------------------------
+
+    if use_shared_trunk:
+
+        def run_trunk_actor(
+            trunk: TrunkState,
+            actor_head: HeadState,
+            x: jax.Array,
+            carry,
+        ) -> tuple[Any, jax.Array]:
+            """Single-step actor forward pass using shared trunk."""
+            fe = nnx.merge(_shared_fe_graph, trunk.fe)
+            memory = nnx.merge(_shared_mem_graph, trunk.memory, _shared_mem_rngs)
+            head = nnx.merge(_trunk_actor_head_graph, actor_head.head)
+            new_carry, mem_out = memory(fe(x), carry)
+            return new_carry, head(mem_out)
+
+        def run_trunk_actor_scan(
+            trunk: TrunkState,
+            actor_head: HeadState,
+            xs: jax.Array,
+            initial_carry,
+            dones: jax.Array | None = None,
+            return_input_carries: bool = False,
+        ) -> tuple[Any, jax.Array]:
+            """Sequence actor forward pass using shared trunk."""
+            fe = nnx.merge(_shared_fe_graph, trunk.fe)
+            memory = nnx.merge(_shared_mem_graph, trunk.memory, _shared_mem_rngs)
+            head = nnx.merge(_trunk_actor_head_graph, actor_head.head)
+            batch, T = xs.shape[0], xs.shape[1]
+            flat_feats = fe(xs.reshape(batch * T, *xs.shape[2:]))
+            feats = flat_feats.reshape(batch, T, -1)
+            if return_input_carries:
+                final_carry, mem_outs, input_carries = memory.scan(
+                    feats, initial_carry, dones, return_input_carries=True
+                )
+            else:
+                final_carry, mem_outs = memory.scan(feats, initial_carry, dones)
+            ys = head(mem_outs.reshape(batch * T, -1)).reshape(batch, T, -1)
+            if return_input_carries:
+                return final_carry, ys, input_carries
+            return final_carry, ys
+
+        def run_trunk_critic_scan(
+            trunk: TrunkState,
+            critic_head: TwinHeadState,
+            xs: jax.Array,
+            actions: jax.Array | None = None,
+            use_mc: bool = False,
+            initial_carry=None,
+            dones: jax.Array | None = None,
+            return_input_carries: bool = False,
+        ):
+            """Sequence critic forward pass using shared trunk.
+
+            Both Q1 and Q2 share the same (FE, memory) → one carry.
+
+            Returns:
+                ``(final_carry, qs)`` where qs is ``(batch, T, num_actions, 2)``
+                for discrete or ``(batch, T, 2)`` for continuous.
+                When ``return_input_carries=True``, a third element with per-step
+                input carries is appended.
+            """
+            if use_mc:
+                fe = nnx.merge(_mc_fe_graph, trunk.fe)
+                memory = nnx.merge(_mc_mem_graph, trunk.memory, _mc_mem_rngs)
+                q1_graph = _trunk_mc_cq1_head_graph
+                q2_graph = _trunk_mc_cq2_head_graph
+            else:
+                fe = nnx.merge(_shared_fe_graph, trunk.fe)
+                memory = nnx.merge(_shared_mem_graph, trunk.memory, _shared_mem_rngs)
+                q1_graph = _trunk_cq1_head_graph
+                q2_graph = _trunk_cq2_head_graph
+            head1 = nnx.merge(q1_graph, critic_head.q1.head)
+            head2 = nnx.merge(q2_graph, critic_head.q2.head)
+
+            batch, T = xs.shape[0], xs.shape[1]
+            flat_xs = xs.reshape(batch * T, *xs.shape[2:])
+            feats = fe(flat_xs).reshape(batch, T, -1)
+
+            if initial_carry is None:
+                if use_mc:
+                    initial_carry = _make_mc_trunk_carry(batch)
+                else:
+                    initial_carry = _make_trunk_carry(batch)
+
+            if return_input_carries:
+                final_carry, mem_outs, input_carries = memory.scan(
+                    feats, initial_carry, dones, return_input_carries=True
+                )
+            else:
+                final_carry, mem_outs = memory.scan(feats, initial_carry, dones)
+
+            flat_mem = mem_outs.reshape(batch * T, -1)
+
+            if is_discrete:
+                q1 = head1(flat_mem).reshape(batch, T, -1)  # (B, T, num_actions)
+                q2 = head2(flat_mem).reshape(batch, T, -1)
+                qs = jnp.stack([q1, q2], axis=-1)  # (B, T, num_actions, 2)
+            else:
+                flat_actions = actions.reshape(batch * T, -1)
+                q1 = head1(jnp.concat([flat_mem, flat_actions], axis=-1)).reshape(batch, T, 1)
+                q2 = head2(jnp.concat([flat_mem, flat_actions], axis=-1)).reshape(batch, T, 1)
+                qs = jnp.concat([q1, q2], axis=-1)  # (B, T, 2)
+
+            if return_input_carries:
+                return final_carry, qs, input_carries
+            return final_carry, qs
+
+        def run_trunk_critic(
+            trunk: TrunkState,
+            critic_head: TwinHeadState,
+            x: jax.Array,
+            actions: jax.Array | None = None,
+            use_mc: bool = False,
+            carry=None,
+        ):
+            """Single-step critic forward pass using shared trunk."""
+            if use_mc:
+                fe = nnx.merge(_mc_fe_graph, trunk.fe)
+                memory = nnx.merge(_mc_mem_graph, trunk.memory, _mc_mem_rngs)
+                q1_graph = _trunk_mc_cq1_head_graph
+                q2_graph = _trunk_mc_cq2_head_graph
+            else:
+                fe = nnx.merge(_shared_fe_graph, trunk.fe)
+                memory = nnx.merge(_shared_mem_graph, trunk.memory, _shared_mem_rngs)
+                q1_graph = _trunk_cq1_head_graph
+                q2_graph = _trunk_cq2_head_graph
+            head1 = nnx.merge(q1_graph, critic_head.q1.head)
+            head2 = nnx.merge(q2_graph, critic_head.q2.head)
+
+            batch = x.shape[0]
+            if carry is None:
+                carry = _make_mc_trunk_carry(batch) if use_mc else _make_trunk_carry(batch)
+            new_carry, mem_out = memory(fe(x), carry)
+
+            if is_discrete:
+                q1 = head1(mem_out)  # (batch, num_actions)
+                q2 = head2(mem_out)
+                qs = jnp.stack([q1, q2], axis=-1)  # (batch, num_actions, 2)
+            else:
+                q1 = head1(jnp.concat([mem_out, actions], axis=-1))  # (batch, 1)
+                q2 = head2(jnp.concat([mem_out, actions], axis=-1))
+                qs = jnp.concat([q1, q2], axis=-1)  # (batch, 2)
+
+            return new_carry, qs
 
     # ------------------------------------------------------------------
     # Action-space-specific helpers
@@ -1803,8 +2374,14 @@ def create_iqlearn(
                 Action index as a ``float32`` scalar.
             """
             obs_batch = jnp.expand_dims(obs, 0)
-            new_carry, logits_batch = run_actor(iqlearn.actor, obs_batch, carry)
-            logits = logits_batch[0]  # (num_actions,)
+            if use_shared_trunk:
+                new_carry, logits_batch = run_trunk_actor(
+                    iqlearn.trunk, iqlearn.actor_head, obs_batch, carry
+                )
+                logits = logits_batch[0]  # (num_actions,)
+            else:
+                new_carry, logits_batch = run_actor(iqlearn.actor, obs_batch, carry)
+                logits = logits_batch[0]  # (num_actions,)
             if deterministic:
                 action = jnp.argmax(logits)
             else:
@@ -3110,6 +3687,680 @@ def create_iqlearn(
         return losses.mean(), (metrics, refresh)
 
     # ------------------------------------------------------------------
+    # Trunk-mode loss functions (only defined when use_shared_trunk=True)
+    # ------------------------------------------------------------------
+
+    if use_shared_trunk:
+
+        def _trunk_get_v_seq(
+            trunk: TrunkState,
+            actor_head: HeadState,
+            critic_head: TwinHeadState,
+            alpha: jax.Array,
+            obs: jax.Array,
+            initial_carry,
+            key: jax.Array,
+        ):
+            """Get soft value V(s) over a sequence using shared trunk.
+
+            Returns:
+                ``(v, actor_out_T)`` where v has shape ``(batch, T)`` and
+                actor_out_T has shape ``(batch, T, out_dim)``.
+            """
+            _bs, SL = obs.shape[0], obs.shape[1]
+            _, actor_out_T = run_trunk_actor_scan(
+                trunk, actor_head, obs, initial_carry
+            )  # (B, SL, out_dim)
+
+            if is_discrete:
+                probs_T = jax.nn.softmax(actor_out_T, axis=-1)
+                log_probs_T = jax.nn.log_softmax(actor_out_T, axis=-1)
+                _, q_twin_T = run_trunk_critic_scan(
+                    trunk, critic_head, obs, initial_carry=initial_carry
+                )  # (B, SL, num_actions, 2)
+                q_min_T = jnp.minimum(q_twin_T[..., 0], q_twin_T[..., 1])
+                entropy_T = -(probs_T * log_probs_T).sum(-1)
+                v = (probs_T * q_min_T).sum(-1) + alpha * entropy_T
+            else:
+                mean_T = actor_out_T[..., :action_dim]
+                log_std_T = actor_out_T[..., action_dim:]
+                log_std_T = jnp.tanh(log_std_T)
+                log_std_T = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std_T + 1)
+                std_T = jnp.exp(log_std_T)
+                obs_T_v = jnp.swapaxes(obs, 0, 1)
+                mean_t = mean_T.swapaxes(0, 1)
+                std_t = std_T.swapaxes(0, 1)
+
+                def _v_scan(carry, x):
+                    trunk_c, k = carry
+                    obs_t, m_t, s_t = x
+                    k, k_step = jax.random.split(k)
+                    u = jax.random.normal(k_step, m_t.shape) * s_t + m_t
+                    y = jnp.tanh(u)
+                    a = y * action_scale + action_bias
+                    log_prob = (
+                        -((u - m_t) ** 2) / (2 * s_t**2)
+                        - 0.5 * jnp.log(2 * jnp.pi)
+                        - jnp.log(s_t)
+                        - jnp.log(action_scale * (1 - y**2) + 1e-6)
+                    ).sum(-1)
+                    new_c, qs_t = run_trunk_critic(
+                        trunk, critic_head, obs_t, a[:, None, :].squeeze(1), carry=trunk_c
+                    )
+                    q_t = jnp.minimum(qs_t[:, 0], qs_t[:, 1])
+                    v_t = q_t - alpha * log_prob
+                    return (new_c, k), v_t
+
+                _, v_T_t = jax.lax.scan(
+                    _v_scan,
+                    (initial_carry, key),
+                    (obs_T_v, mean_t, std_t),
+                )
+                v = jnp.swapaxes(v_T_t, 0, 1)  # (B, SL)
+            return v, actor_out_T
+
+        def loss_actor_trunk(
+            actor_head: HeadState,
+            trunk: TrunkState,
+            critic_head: TwinHeadState,
+            sample: SequenceSample,
+            alpha: jax.Array,
+            key: jax.Array,
+            mc_critic_head_target: "TwinHeadState | None" = None,
+            mc_trunk_target: "TrunkState | None" = None,
+        ) -> Tuple[jax.Array, dict]:
+            """Actor loss using shared trunk (gradient flows through trunk)."""
+            key_v = key
+            obs, act, mask = sample.obs, sample.act, sample.mask
+            burn_trunk = sample.burn_trunk
+            seq_idx = sample.seq_idx
+
+            use_disc_loss = (
+                mc_critic_head_target is not None
+                and mc_trunk_target is not None
+                and params.lambda_discrepancy_coef > 0.0
+            )
+
+            critic_head_sg = jax.tree.map(jax.lax.stop_gradient, critic_head)
+
+            xs = (
+                jnp.swapaxes(obs, 0, 1),
+                jnp.swapaxes(act, 0, 1),
+                jnp.swapaxes(mask, 0, 1),
+            )
+
+            def scan_fun(carry, x):
+                actor_carry, mc_q_carry = carry
+                input_actor_carry = actor_carry
+                actor_carry = jax.lax.stop_gradient(actor_carry)
+                mc_q_carry = jax.lax.stop_gradient(mc_q_carry)
+                obs_t, act_t, mask_t = x
+
+                obs_b = obs_t[:, None, :]  # add T dim
+                # Soft value V(s) through trunk (gradient flows through trunk + actor_head)
+                new_actor_carry, logits_or_params = run_trunk_actor(
+                    trunk, actor_head, obs_t, actor_carry
+                )
+                if is_discrete:
+                    probs = jax.nn.softmax(logits_or_params)
+                    log_probs = jax.nn.log_softmax(logits_or_params)
+                    _, qs_t = run_trunk_critic(
+                        jax.tree.map(jax.lax.stop_gradient, trunk),
+                        critic_head_sg, obs_t, carry=actor_carry
+                    )
+                    q_min = jnp.minimum(qs_t[..., 0], qs_t[..., 1])
+                    entropy = -(probs * log_probs).sum(-1)
+                    v = (probs * q_min).sum(-1) + alpha * entropy
+                    metrics_step = {
+                        "train/q": (probs * q_min).sum(-1).mean(),
+                        "train/entropy": entropy.mean(),
+                        "train/v": v.mean(),
+                    }
+                else:
+                    mean = logits_or_params[:, :action_dim]
+                    log_std = jnp.tanh(logits_or_params[:, action_dim:])
+                    log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
+                    std = jnp.exp(log_std)
+                    u = jax.random.normal(key_v, mean.shape) * std + mean
+                    y = jnp.tanh(u)
+                    a = y * action_scale + action_bias
+                    log_prob = (
+                        -((u - mean) ** 2) / (2 * std**2)
+                        - 0.5 * jnp.log(2 * jnp.pi)
+                        - jnp.log(std)
+                        - jnp.log(action_scale * (1 - y**2) + 1e-6)
+                    ).sum(-1)
+                    _, qs_t = run_trunk_critic(
+                        jax.tree.map(jax.lax.stop_gradient, trunk),
+                        critic_head_sg, obs_t, a, carry=actor_carry
+                    )
+                    q_min = jnp.minimum(qs_t[:, 0], qs_t[:, 1])
+                    entropy = -log_prob
+                    v = q_min - alpha * log_prob
+                    metrics_step = {
+                        "train/q": q_min.mean(),
+                        "train/entropy": entropy.mean(),
+                        "train/v": v.mean(),
+                    }
+
+                step_loss = -(v * jnp.reshape(mask_t, -1)).mean()
+
+                if use_disc_loss:
+                    # Lambda-discrepancy: pull (Q_sac + α·H) toward Q_mc
+                    if is_discrete:
+                        q_sac = jnp.minimum(qs_t[..., 0], qs_t[..., 1])
+                        ai = jnp.round(act_t.reshape(-1)).astype(jnp.int32)
+                        q_sac_act = q_sac[jnp.arange(obs_t.shape[0]), ai]
+                        _, mc_qs_t = run_trunk_critic(
+                            jax.tree.map(jax.lax.stop_gradient, mc_trunk_target),
+                            jax.tree.map(jax.lax.stop_gradient, mc_critic_head_target),
+                            obs_t, carry=mc_q_carry, use_mc=True
+                        )
+                        q_mc_act = jnp.minimum(mc_qs_t[..., 0], mc_qs_t[..., 1])[
+                            jnp.arange(obs_t.shape[0]), ai
+                        ]
+                        new_mc_q_carry = mc_q_carry  # identity-like update for carry
+                    else:
+                        q_sac_act = jnp.minimum(qs_t[:, 0], qs_t[:, 1])
+                        _, mc_qs_t = run_trunk_critic(
+                            jax.tree.map(jax.lax.stop_gradient, mc_trunk_target),
+                            jax.tree.map(jax.lax.stop_gradient, mc_critic_head_target),
+                            obs_t, a, carry=mc_q_carry, use_mc=True
+                        )
+                        q_mc_act = jnp.minimum(mc_qs_t[:, 0], mc_qs_t[:, 1])
+                        new_mc_q_carry = mc_q_carry
+
+                    H = entropy
+                    delta = (
+                        jax.lax.stop_gradient(q_sac_act)
+                        + alpha * H
+                        - jax.lax.stop_gradient(q_mc_act)
+                    )
+                    disc = optax.losses.huber_loss(delta, delta=params.lambda_discrepancy_delta)
+                    disc_loss = (disc * jnp.reshape(mask_t, -1)).mean()
+                    step_loss = step_loss + params.lambda_discrepancy_coef * disc_loss
+                    metrics_step["disc/loss"] = disc_loss
+                else:
+                    new_mc_q_carry = mc_q_carry
+
+                return (new_actor_carry, new_mc_q_carry), (
+                    step_loss,
+                    metrics_step,
+                    jax.lax.stop_gradient(input_actor_carry),
+                )
+
+            _bs = obs.shape[0]
+            if use_disc_loss:
+                init_mc_q_carry = _make_mc_trunk_carry(_bs)
+            else:
+                init_mc_q_carry = _make_trunk_carry(_bs)
+
+            _, (losses, metrics, actor_input_carries_T) = jax.lax.scan(
+                scan_fun,
+                (burn_trunk, init_mc_q_carry),
+                xs,
+            )
+
+            metrics.update({"train/actor_loss": losses})
+
+            if params.refresh_stored_carries:
+                B = params.burn_in_length
+                SL = params.sequence_length + 1
+                actor_input_carries = jax.tree.map(
+                    lambda c: jnp.swapaxes(c, 0, 1), actor_input_carries_T
+                )
+                refresh = {
+                    actor_carry_key: (seq_idx[:, B:B + SL], actor_input_carries),
+                }
+            else:
+                refresh = {}
+
+            return losses.mean(), (
+                jax.tree.map(lambda x: x.mean(), metrics),
+                refresh,
+            )
+
+        def loss_critic_sac_trunk(
+            critic_head: TwinHeadState,
+            trunk: TrunkState,
+            trunk_target: TrunkState,
+            actor_head_target: HeadState,
+            sample: SequenceSample,
+            alpha: jax.Array,
+            key: jax.Array,
+            mc_critic_head_target: "TwinHeadState | None" = None,
+            mc_trunk_target: "TrunkState | None" = None,
+        ) -> Tuple[jax.Array, dict]:
+            """SAC Bellman MSE critic loss using shared trunk."""
+            key_v = key
+            obs, act, rew, done, mask, seq_idx = (
+                sample.obs, sample.act, sample.rew, sample.done,
+                sample.mask, sample.seq_idx
+            )
+            burn_trunk = sample.burn_trunk
+            burn_trunk_tgt = sample.burn_trunk_tgt
+            burn_mc_trunk = sample.burn_mc_trunk_tgt  # use target for MC critic
+
+            SL_static = params.sequence_length + 1
+            _bs = obs.shape[0]
+
+            # Pass 1: target V(s') using trunk_target and actor_head_target
+            trunk_target_sg = jax.tree.map(jax.lax.stop_gradient, trunk_target)
+            actor_head_target_sg = jax.tree.map(jax.lax.stop_gradient, actor_head_target)
+
+            v, _ = _trunk_get_v_seq(
+                trunk_target_sg,
+                actor_head_target_sg,
+                jax.tree.map(jax.lax.stop_gradient, critic_head),
+                alpha,
+                obs,
+                jax.lax.stop_gradient(burn_trunk_tgt),
+                key_v,
+            )
+
+            # Pass 2: online Q(s,a) with TBPTT chunking
+            K = params.tbptt_chunk_size
+            T_total = SL_static
+            _refresh = params.refresh_stored_carries
+
+            def _chunk_scan(start, end, trunk_c):
+                xs_chunk = obs[:, start:end]
+                if not is_discrete:
+                    acts_chunk = act[:, start:end]
+                else:
+                    acts_chunk = None
+                if _refresh:
+                    fc, qs_c, ic = run_trunk_critic_scan(
+                        trunk, critic_head, xs_chunk, acts_chunk,
+                        initial_carry=trunk_c,
+                        return_input_carries=True,
+                    )
+                    return fc, qs_c, ic
+                fc, qs_c = run_trunk_critic_scan(
+                    trunk, critic_head, xs_chunk, acts_chunk,
+                    initial_carry=trunk_c,
+                )
+                return fc, qs_c, None
+
+            if K <= 0 or K >= T_total:
+                _, q_twin_T, cq_input_T = _chunk_scan(0, T_total, burn_trunk)
+            else:
+                n_chunks = (T_total + K - 1) // K
+                cq = burn_trunk
+                all_qs, all_ic = [], []
+                for i in range(n_chunks):
+                    start, end = i * K, min((i + 1) * K, T_total)
+                    fc, qs_c, ic_c = _chunk_scan(start, end, cq)
+                    all_qs.append(qs_c)
+                    if _refresh:
+                        all_ic.append(ic_c)
+                    cq = jax.lax.stop_gradient(fc)
+                q_twin_T = jnp.concatenate(all_qs, axis=1)
+                cq_input_T = jnp.concatenate(all_ic, axis=1) if _refresh else None
+
+            if is_discrete:
+                ai = jnp.round(act.reshape(_bs, SL_static)).astype(jnp.int32)
+                bi = jnp.arange(_bs)[:, None]
+                ti = jnp.arange(SL_static)[None, :]
+                q1 = q_twin_T[bi, ti, ai, 0]
+                q2 = q_twin_T[bi, ti, ai, 1]
+            else:
+                q1 = q_twin_T[..., 0]
+                q2 = q_twin_T[..., 1]
+
+            target_q = jax.lax.stop_gradient(
+                rew[:, :-1] + params.gamma * (1.0 - done[:, :-1]) * v[:, 1:]
+            )
+            m = mask[:, :-1]
+            denom = jnp.maximum(m.sum(), 1.0)
+            loss = 0.5 * (
+                ((q1[:, :-1] - target_q) ** 2 * m).sum() / denom
+                + ((q2[:, :-1] - target_q) ** 2 * m).sum() / denom
+            )
+            metrics = {
+                "train/critic_loss": loss,
+                "train/target_q": target_q.mean(),
+                "debug/target_q_std": target_q.std(),
+                "debug/target_q_max": target_q.max(),
+                "debug/target_q_min": target_q.min(),
+                "debug/sac_q1_mean": q1[:, :-1].mean(),
+                "debug/sac_q2_mean": q2[:, :-1].mean(),
+                "debug/sac_q_twin_gap_mean": jnp.abs(q1[:, :-1] - q2[:, :-1]).mean(),
+            }
+
+            # Lambda-discrepancy (trunk critic)
+            if mc_critic_head_target is not None and params.lambda_discrepancy_coef > 0.0:
+                mc_ct_sg = jax.tree.map(jax.lax.stop_gradient, mc_trunk_target)
+                mc_hd_sg = jax.tree.map(jax.lax.stop_gradient, mc_critic_head_target)
+                _, q_mc_twin_T = run_trunk_critic_scan(
+                    mc_ct_sg, mc_hd_sg, obs, act if not is_discrete else None,
+                    use_mc=True,
+                    initial_carry=jax.lax.stop_gradient(burn_mc_trunk),
+                )
+                if is_discrete:
+                    q_mc = jnp.minimum(
+                        q_mc_twin_T[bi, ti, ai, 0], q_mc_twin_T[bi, ti, ai, 1]
+                    )
+                else:
+                    q_mc = jnp.minimum(q_mc_twin_T[..., 0], q_mc_twin_T[..., 1])
+
+                # Entropy H using actor_head_target + trunk_target
+                _, dist_T_h = run_trunk_actor_scan(
+                    trunk_target_sg, actor_head_target_sg, obs,
+                    jax.lax.stop_gradient(burn_trunk_tgt)
+                )
+                if is_discrete:
+                    probs_h = jax.nn.softmax(dist_T_h, axis=-1)
+                    log_probs_h = jax.nn.log_softmax(dist_T_h, axis=-1)
+                    H = -(probs_h * log_probs_h).sum(-1)
+                else:
+                    mean_h = dist_T_h[..., :action_dim]
+                    log_std_h = jnp.tanh(dist_T_h[..., action_dim:])
+                    log_std_h = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std_h + 1)
+                    std_h = jnp.exp(log_std_h)
+                    noise = jax.random.normal(key_v, (_bs, action_dim))
+                    noise_T = jnp.broadcast_to(noise[:, None, :], mean_h.shape)
+                    u_T = noise_T * std_h + mean_h
+                    y_T = jnp.tanh(u_T)
+                    log_prob_T = (
+                        -((u_T - mean_h) ** 2) / (2 * std_h**2)
+                        - 0.5 * jnp.log(2 * jnp.pi)
+                        - jnp.log(std_h)
+                        - jnp.log(action_scale * (1 - y_T**2) + 1e-6)
+                    ).sum(-1)
+                    H = -log_prob_T
+
+                q_sac = jnp.minimum(q1, q2)
+                delta = (
+                    q_sac
+                    + alpha * jax.lax.stop_gradient(H)
+                    - jax.lax.stop_gradient(q_mc)
+                )
+                disc = optax.losses.huber_loss(delta, delta=params.lambda_discrepancy_delta)
+                disc_loss = (disc * mask).sum() / jnp.maximum(mask.sum(), 1.0)
+                loss = loss + params.lambda_discrepancy_coef * disc_loss
+                metrics["disc/loss"] = disc_loss
+                metrics["train/critic_loss"] = loss
+
+            if params.refresh_stored_carries:
+                B = params.burn_in_length
+                SL = params.sequence_length + 1
+                refresh = {
+                    critic_q1_carry_key: (seq_idx[:, B:B + SL], cq_input_T),
+                }
+            else:
+                refresh = {}
+
+            return loss, (metrics, refresh)
+
+        def loss_mc_critic_sac_trunk(
+            mc_critic_head: TwinHeadState,
+            mc_trunk: TrunkState,
+            mc_trunk_target: TrunkState,
+            trunk_target: TrunkState,
+            actor_head_target: HeadState,
+            online_buf: Buffer,
+            sample: SequenceSample,
+            alpha: jax.Array,
+            key: jax.Array,
+            critic_head_target: "TwinHeadState | None" = None,
+        ) -> Tuple[jax.Array, dict]:
+            """MC critic loss using shared mc_trunk with TD(λ) targets."""
+            key_scan = key
+
+            obs, act, rew, done, mask, seq_idx = (
+                sample.obs, sample.act, sample.rew, sample.done,
+                sample.mask, sample.seq_idx
+            )
+            burn_mc_trunk = sample.burn_mc_trunk
+            burn_mc_trunk_tgt = sample.burn_mc_trunk_tgt
+            burn_actor_trunk = sample.burn_trunk
+
+            B = params.burn_in_length
+            N1 = params.lambda_truncation + 1
+            buf_size = online_buf.info[obs_key].shape[0]
+
+            obs_T = jnp.swapaxes(obs, 0, 1)
+            act_T = jnp.swapaxes(act, 0, 1)
+            mask_T = jnp.swapaxes(mask, 0, 1)
+            done_T = jnp.swapaxes(done, 0, 1)
+            seq_start_T = jnp.swapaxes(seq_idx[:, B:], 0, 1)
+
+            trunk_target_sg = jax.tree.map(jax.lax.stop_gradient, trunk_target)
+            actor_head_target_sg = jax.tree.map(jax.lax.stop_gradient, actor_head_target)
+            mc_trunk_target_sg = jax.tree.map(jax.lax.stop_gradient, mc_trunk_target)
+
+            use_disc = (
+                critic_head_target is not None and params.lambda_discrepancy_coef > 0.0
+            )
+            if use_disc:
+                critic_head_target_sg = jax.tree.map(jax.lax.stop_gradient, critic_head_target)
+
+            def reset_on_done(c, done_t):
+                d = done_t.reshape((-1,) + (1,) * (c.ndim - 1))
+                return jnp.where(d, jnp.zeros_like(c), c)
+
+            def scan_fun(carries, xs):
+                (actor_carry, mc_q_carry, mc_tgt_carry,
+                 sac_tgt_carry, key_c) = carries
+                input_mc_q1c = mc_q_carry
+                obs_t, act_t, mask_t, done_t, start_t = xs
+                key_c, k_td, k_step = jax.random.split(key_c, 3)
+
+                actor_carry_sg = jax.lax.stop_gradient(actor_carry)
+                mc_q_carry_sg = jax.lax.stop_gradient(mc_q_carry)
+                mc_tgt_carry_sg = jax.lax.stop_gradient(mc_tgt_carry)
+                sac_tgt_carry_sg = jax.lax.stop_gradient(sac_tgt_carry)
+
+                # TD(λ) look-ahead from buffer
+                td_idx = (start_t[:, None] + jnp.arange(N1)[None, :]) % buf_size
+                td_obs = online_buf.info[obs_key][td_idx]
+                td_act_key = unsquashed_action_key if not is_discrete else action_key
+                td_act = online_buf.info[td_act_key][td_idx]
+                td_beh = online_buf.info[behaviour_key][td_idx]
+                td_rew = online_buf.info[reward_key][td_idx]
+                td_done = online_buf.info[terminated_key][td_idx]
+                write_head = online_buf.pos % buf_size
+                td_done = jnp.where(td_idx == write_head, 1.0, td_done)
+
+                # Use standard calculate_td_lambda with trunk-based carries
+                # We need actor + mc_critic_target carries for calculate_td_lambda.
+                # The function uses sac.actor (NetworkState) — but in trunk mode we
+                # proxy: we'll use the existing calculate_td_lambda which expects
+                # NetworkState args. We can't easily patch that, so for trunk mode
+                # we use a simplified 1-step TD bootstrap instead when the trunk
+                # is active and calculate_td_lambda is not directly usable.
+                # As a pragmatic choice: call get_v via trunk-based helper.
+
+                # Bootstrap V at start of look-ahead window
+                # V(s_t) using mc_trunk_target + actor_head_target
+                _, qs_boot = run_trunk_critic(
+                    mc_trunk_target_sg,
+                    jax.tree.map(jax.lax.stop_gradient, mc_critic_head),
+                    td_obs[:, 0],
+                    td_act[:, 0] if not is_discrete else None,
+                    use_mc=True,
+                    carry=mc_tgt_carry_sg,
+                )
+                new_actor_carry_td, logits_boot = run_trunk_actor(
+                    trunk_target_sg, actor_head_target_sg, td_obs[:, 0], actor_carry_sg
+                )
+                if is_discrete:
+                    probs_b = jax.nn.softmax(logits_boot)
+                    lp_b = jax.nn.log_softmax(logits_boot)
+                    v_boot = (probs_b * jnp.minimum(qs_boot[..., 0], qs_boot[..., 1])).sum(-1) + alpha * -(probs_b * lp_b).sum(-1)
+                else:
+                    u_b = jax.random.normal(k_td, logits_boot[:, :action_dim].shape) * jnp.exp(
+                        LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (jnp.tanh(logits_boot[:, action_dim:]) + 1)
+                    ) + logits_boot[:, :action_dim]
+                    y_b = jnp.tanh(u_b)
+                    a_b = y_b * action_scale + action_bias
+                    q_b = jnp.minimum(qs_boot[:, 0], qs_boot[:, 1])
+                    log_prob_b = (
+                        -((u_b - logits_boot[:, :action_dim]) ** 2) / (2 * jnp.exp(logits_boot[:, action_dim:]) ** 2)
+                        - 0.5 * jnp.log(2 * jnp.pi)
+                        - logits_boot[:, action_dim:]
+                        - jnp.log(action_scale * (1 - y_b**2) + 1e-6)
+                    ).sum(-1)
+                    v_boot = q_b - alpha * log_prob_b
+
+                # Simple 1-step target: r + γ(1-done)·V(s_next)
+                # (degraded to 1-step bootstrap for trunk mode — full TD-λ
+                # would require threaded trunk carries through calculate_td_lambda)
+                target_q = jax.lax.stop_gradient(
+                    td_rew[:, 0] + params.gamma * (1.0 - td_done[:, 0]) * v_boot
+                )
+                p_k = jnp.ones(obs_t.shape[0])  # IS weight = 1 (no V-trace in trunk mode)
+
+                # Online MC critic Q (gradient flows through mc_critic_head + mc_trunk)
+                new_mc_q_carry, qs_online = run_trunk_critic(
+                    mc_trunk, mc_critic_head, obs_t,
+                    act_t if not is_discrete else None,
+                    use_mc=True, carry=mc_q_carry_sg,
+                )
+                if is_discrete:
+                    ai_t = jnp.round(act_t.reshape(-1)).astype(jnp.int32)
+                    q1 = qs_online[jnp.arange(obs_t.shape[0]), ai_t, 0]
+                    q2 = qs_online[jnp.arange(obs_t.shape[0]), ai_t, 1]
+                else:
+                    q1 = qs_online[:, 0]
+                    q2 = qs_online[:, 1]
+
+                # Advance actor carry by 1 step
+                new_actor_carry, _ = run_trunk_actor(
+                    trunk_target_sg, actor_head_target_sg, obs_t, actor_carry_sg
+                )
+                # Advance mc_target carry by 1 step
+                new_mc_tgt_carry, _ = run_trunk_critic(
+                    mc_trunk_target_sg,
+                    jax.tree.map(jax.lax.stop_gradient, mc_critic_head),
+                    obs_t,
+                    act_t if not is_discrete else None,
+                    use_mc=True, carry=mc_tgt_carry_sg,
+                )
+
+                new_actor_carry = reset_on_done(new_actor_carry, done_t)
+                new_mc_q_carry = reset_on_done(new_mc_q_carry, done_t)
+                new_mc_tgt_carry = reset_on_done(new_mc_tgt_carry, done_t)
+
+                loss_step = 0.5 * (
+                    jnp.mean(mask_t * (q1 - target_q) ** 2)
+                    + jnp.mean(mask_t * (q2 - target_q) ** 2)
+                )
+
+                disc_step = jnp.float32(0.0)
+                if use_disc:
+                    _, qs_sac_tgt = run_trunk_critic(
+                        trunk_target_sg,
+                        critic_head_target_sg,
+                        obs_t,
+                        act_t if not is_discrete else None,
+                        carry=sac_tgt_carry_sg,
+                    )
+                    new_sac_tgt_carry, _ = run_trunk_critic(
+                        trunk_target_sg,
+                        critic_head_target_sg,
+                        obs_t,
+                        act_t if not is_discrete else None,
+                        carry=sac_tgt_carry_sg,
+                    )
+                    new_sac_tgt_carry = new_sac_tgt_carry
+                    if is_discrete:
+                        ai_t2 = jnp.round(act_t.reshape(-1)).astype(jnp.int32)
+                        q_sac_act = jnp.minimum(
+                            qs_sac_tgt[jnp.arange(obs_t.shape[0]), ai_t2, 0],
+                            qs_sac_tgt[jnp.arange(obs_t.shape[0]), ai_t2, 1]
+                        )
+                    else:
+                        q_sac_act = jnp.minimum(qs_sac_tgt[:, 0], qs_sac_tgt[:, 1])
+                    _, logits_act = run_trunk_actor(
+                        trunk_target_sg, actor_head_target_sg, obs_t, actor_carry_sg
+                    )
+                    if is_discrete:
+                        probs_a = jax.nn.softmax(logits_act)
+                        lp_a = jax.nn.log_softmax(logits_act)
+                        H_t = -(probs_a * lp_a).sum(-1)
+                    else:
+                        std_a = jnp.exp(LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (jnp.tanh(logits_act[:, action_dim:]) + 1))
+                        u_a = jax.random.normal(k_step, logits_act[:, :action_dim].shape) * std_a + logits_act[:, :action_dim]
+                        y_a = jnp.tanh(u_a)
+                        H_t = -(
+                            -((u_a - logits_act[:, :action_dim]) ** 2) / (2 * std_a**2)
+                            - 0.5 * jnp.log(2 * jnp.pi)
+                            - jnp.log(std_a)
+                            - jnp.log(action_scale * (1 - y_a**2) + 1e-6)
+                        ).sum(-1)
+                    q_mc_min = jnp.minimum(q1, q2)
+                    delta = jax.lax.stop_gradient(q_sac_act + alpha * H_t) - q_mc_min
+                    disc = optax.losses.huber_loss(delta, delta=params.lambda_discrepancy_delta)
+                    disc_step = (disc * mask_t).mean()
+                    loss_step = loss_step + params.lambda_discrepancy_coef * disc_step
+                    new_sac_tgt_carry = reset_on_done(new_sac_tgt_carry, done_t)
+                else:
+                    new_sac_tgt_carry = sac_tgt_carry
+
+                q_min_online = jnp.minimum(q1, q2)
+                return (
+                    new_actor_carry,
+                    new_mc_q_carry,
+                    new_mc_tgt_carry,
+                    new_sac_tgt_carry,
+                    key_c,
+                ), (
+                    loss_step,
+                    disc_step,
+                    jax.lax.stop_gradient(input_mc_q1c),
+                    jax.lax.stop_gradient(p_k),
+                    jax.lax.stop_gradient(target_q),
+                    jax.lax.stop_gradient(q_min_online),
+                )
+
+            _bs = obs.shape[0]
+            if use_disc:
+                init_sac_tgt_carry = _make_trunk_carry(_bs)
+            else:
+                init_sac_tgt_carry = burn_mc_trunk
+
+            _, (
+                losses,
+                disc_losses,
+                mcq_inputs_T,
+                p_k_T,
+                target_q_T,
+                q_min_T,
+            ) = jax.lax.scan(
+                scan_fun,
+                (
+                    burn_actor_trunk,
+                    burn_mc_trunk,
+                    burn_mc_trunk_tgt,
+                    init_sac_tgt_carry,
+                    key_scan,
+                ),
+                (obs_T, act_T, mask_T, done_T, seq_start_T),
+            )
+            metrics = {"mc/loss": losses.mean()}
+            if use_disc:
+                metrics["disc/loss"] = disc_losses.mean()
+            metrics["mc/pk_mean"] = p_k_T.mean()
+            metrics["mc/target_q_mean"] = target_q_T.mean()
+            metrics["mc/target_q_std"] = target_q_T.std()
+            metrics["mc/q_online_mean"] = q_min_T.mean()
+            metrics["mc/td_residual_abs_mean"] = jnp.abs(target_q_T - q_min_T).mean()
+
+            if params.refresh_stored_carries:
+                SL = params.sequence_length + 1
+                mcq_inputs = jax.tree.map(
+                    lambda c: jnp.swapaxes(c, 0, 1), mcq_inputs_T
+                )
+                refresh = {
+                    mc_critic_q1_carry_key: (seq_idx[:, B:B + SL], mcq_inputs),
+                }
+            else:
+                refresh = {}
+            return losses.mean(), (metrics, refresh)
+
+    # ------------------------------------------------------------------
     # Online helpers: environment interaction and SAC update
     # ------------------------------------------------------------------
 
@@ -3146,9 +4397,14 @@ def create_iqlearn(
             prev_mcq1_carry = sac.mc_critic_q1_online_carry
             prev_mcq2_carry = sac.mc_critic_q2_online_carry
         # Run actor with current online carry to get action + updated carry
-        new_actor_carry, actor_out = run_actor(
-            sac.actor, obs_batch, sac.actor_online_carry
-        )
+        if use_shared_trunk:
+            new_actor_carry, actor_out = run_trunk_actor(
+                sac.trunk, sac.actor_head, obs_batch, sac.actor_online_carry
+            )
+        else:
+            new_actor_carry, actor_out = run_actor(
+                sac.actor, obs_batch, sac.actor_online_carry
+            )
 
         def _step_mem(fe_graph, fe_state, mem_graph, mem_state, mem_rngs, x, c):
             fe_mod = nnx.merge(fe_graph, fe_state)
@@ -3156,43 +4412,56 @@ def create_iqlearn(
             new_c, _ = mem_mod(fe_mod(x), c)
             return new_c
 
-        new_cq1_carry = _step_mem(
-            critic_q1_fe_graph,
-            sac.critic.q1.fe,
-            critic_q1_memory_graph,
-            sac.critic.q1.memory,
-            critic_q1_memory_rngs,
-            obs_batch,
-            sac.critic_q1_online_carry,
-        )
-        new_cq2_carry = _step_mem(
-            critic_q2_fe_graph,
-            sac.critic.q2.fe,
-            critic_q2_memory_graph,
-            sac.critic.q2.memory,
-            critic_q2_memory_rngs,
-            obs_batch,
-            sac.critic_q2_online_carry,
-        )
-        if approximate_mc:
-            new_mcq1_carry = _step_mem(
-                mc_critic_q1_fe_graph,
-                sac.mc_critic.q1.fe,
-                mc_critic_q1_memory_graph,
-                sac.mc_critic.q1.memory,
-                mc_critic_q1_memory_rngs,
+        if use_shared_trunk:
+            # In trunk mode, critic carry = actor carry (shared trunk)
+            new_cq1_carry = new_actor_carry
+            new_cq2_carry = new_actor_carry
+            if approximate_mc:
+                # Step mc_trunk memory for mc carries
+                _mc_fe_mod = nnx.merge(_mc_fe_graph, sac.mc_trunk.fe)
+                _mc_mem_mod = nnx.merge(_mc_mem_graph, sac.mc_trunk.memory, _mc_mem_rngs)
+                new_mcq1_carry, _ = _mc_mem_mod(
+                    _mc_fe_mod(obs_batch), sac.mc_critic_q1_online_carry
+                )
+                new_mcq2_carry = new_mcq1_carry
+        else:
+            new_cq1_carry = _step_mem(
+                critic_q1_fe_graph,
+                sac.critic.q1.fe,
+                critic_q1_memory_graph,
+                sac.critic.q1.memory,
+                critic_q1_memory_rngs,
                 obs_batch,
-                sac.mc_critic_q1_online_carry,
+                sac.critic_q1_online_carry,
             )
-            new_mcq2_carry = _step_mem(
-                mc_critic_q2_fe_graph,
-                sac.mc_critic.q2.fe,
-                mc_critic_q2_memory_graph,
-                sac.mc_critic.q2.memory,
-                mc_critic_q2_memory_rngs,
+            new_cq2_carry = _step_mem(
+                critic_q2_fe_graph,
+                sac.critic.q2.fe,
+                critic_q2_memory_graph,
+                sac.critic.q2.memory,
+                critic_q2_memory_rngs,
                 obs_batch,
-                sac.mc_critic_q2_online_carry,
+                sac.critic_q2_online_carry,
             )
+            if approximate_mc:
+                new_mcq1_carry = _step_mem(
+                    mc_critic_q1_fe_graph,
+                    sac.mc_critic.q1.fe,
+                    mc_critic_q1_memory_graph,
+                    sac.mc_critic.q1.memory,
+                    mc_critic_q1_memory_rngs,
+                    obs_batch,
+                    sac.mc_critic_q1_online_carry,
+                )
+                new_mcq2_carry = _step_mem(
+                    mc_critic_q2_fe_graph,
+                    sac.mc_critic.q2.fe,
+                    mc_critic_q2_memory_graph,
+                    sac.mc_critic.q2.memory,
+                    mc_critic_q2_memory_rngs,
+                    obs_batch,
+                    sac.mc_critic_q2_online_carry,
+                )
         if is_discrete:
             logits = actor_out[0]
             action = jax.random.categorical(key_act, logits).astype(jnp.float32)
@@ -3462,59 +4731,136 @@ def create_iqlearn(
         else:
             key_sample, key_actor, key_critic, key_mc_critic = jax.random.split(key, 4)
 
-            # Sample once; all three losses share this sequence + burned-in carries.
-            shared_sample = sample_with_burn_in(
-                sac.online_buffer,
-                actor=sac.actor,
-                critic=sac.critic,
-                critic_target=sac.critic_target,
-                key_sample=key_sample,
-                mc_critic=sac.mc_critic if approximate_mc else None,
-                mc_critic_target=sac.mc_critic_target if approximate_mc else None,
-                actor_target=sac.actor_target,
-            )
-
-            _mc_for_disc = sac.mc_critic_target if approximate_mc else None
-
-            # Actor gradient: maximise soft value V(s) = Q(s,a) - α log π(a|s)
-            grads_actor, (metrics, refresh_actor) = jax.grad(
-                loss_actor, has_aux=True
-            )(
-                sac.actor,
-                sac.critic,
-                shared_sample,
-                sac.alpha,
-                key_actor,
-                _mc_for_disc,
-            )
-            # Critic gradient: minimise SAC Bellman MSE
-            grads_critic, (metrics_critic, refresh_critic) = jax.grad(
-                loss_critic_sac, argnums=1, has_aux=True
-            )(
-                sac.actor_target,
-                sac.critic,
-                sac.critic_target,
-                shared_sample,
-                sac.alpha,
-                key_critic,
-                _mc_for_disc,
-            )
-
-            if approximate_mc:
-                grads_mc_critic, (metrics_mc_critic, refresh_mc) = jax.grad(
-                    loss_mc_critic_sac, argnums=1, has_aux=True
-                )(
-                    sac.actor,
-                    sac.mc_critic,
-                    sac.mc_critic_target,
+            if use_shared_trunk:
+                # ----------------------------------------------------------
+                # Trunk-mode SAC update: actor + critic share a single trunk
+                # ----------------------------------------------------------
+                shared_sample = sample_with_burn_in_trunk(
                     sac.online_buffer,
+                    trunk=sac.trunk,
+                    trunk_target=sac.trunk_target,
+                    actor_head=sac.actor_head,
+                    key_sample=key_sample,
+                    mc_trunk=sac.mc_trunk if approximate_mc else None,
+                    mc_trunk_target=sac.mc_trunk_target if approximate_mc else None,
+                )
+
+                _mc_head_for_disc = sac.mc_critic_head_target if approximate_mc else None
+                _mc_trunk_for_disc = sac.mc_trunk_target if approximate_mc else None
+
+                # Actor gradient: grad w.r.t. (actor_head, trunk)
+                (grads_actor_head, grads_trunk_a), (metrics, refresh_actor) = jax.grad(
+                    loss_actor_trunk, argnums=(0, 1), has_aux=True
+                )(
+                    sac.actor_head,
+                    sac.trunk,
+                    sac.critic_head,
                     shared_sample,
                     sac.alpha,
-                    key_mc_critic,
-                    sac.critic_target,
+                    key_actor,
+                    _mc_head_for_disc,
+                    _mc_trunk_for_disc,
                 )
+
+                # Critic gradient: grad w.r.t. (critic_head, trunk)
+                (grads_critic_head, grads_trunk_c), (metrics_critic, refresh_critic) = jax.grad(
+                    loss_critic_sac_trunk, argnums=(0, 1), has_aux=True
+                )(
+                    sac.critic_head,
+                    sac.trunk,
+                    sac.trunk_target,
+                    sac.actor_head_target,
+                    shared_sample,
+                    sac.alpha,
+                    key_critic,
+                    _mc_head_for_disc,
+                    _mc_trunk_for_disc,
+                )
+
+                # Accumulate trunk grads from actor + critic losses
+                total_trunk_grad = jax.tree.map(
+                    lambda a, c: a + c, grads_trunk_a, grads_trunk_c
+                )
+
+                if approximate_mc:
+                    (grads_mc_head, grads_mc_trunk), (metrics_mc_critic, refresh_mc) = jax.grad(
+                        loss_mc_critic_sac_trunk, argnums=(0, 1), has_aux=True
+                    )(
+                        sac.mc_critic_head,
+                        sac.mc_trunk,
+                        sac.mc_trunk_target,
+                        sac.trunk_target,
+                        sac.actor_head_target,
+                        sac.online_buffer,
+                        shared_sample,
+                        sac.alpha,
+                        key_mc_critic,
+                        sac.critic_head_target,
+                    )
+                else:
+                    refresh_mc = {}
+
+                # Store for diagnostics
+                grads_actor = grads_actor_head  # for diagnostics compat
+                grads_critic = grads_critic_head
+
             else:
-                refresh_mc = {}
+                # ----------------------------------------------------------
+                # Standard SAC update (non-trunk path — unchanged)
+                # ----------------------------------------------------------
+                # Sample once; all three losses share this sequence + burned-in carries.
+                shared_sample = sample_with_burn_in(
+                    sac.online_buffer,
+                    actor=sac.actor,
+                    critic=sac.critic,
+                    critic_target=sac.critic_target,
+                    key_sample=key_sample,
+                    mc_critic=sac.mc_critic if approximate_mc else None,
+                    mc_critic_target=sac.mc_critic_target if approximate_mc else None,
+                    actor_target=sac.actor_target,
+                )
+
+                _mc_for_disc = sac.mc_critic_target if approximate_mc else None
+
+                # Actor gradient: maximise soft value V(s) = Q(s,a) - α log π(a|s)
+                grads_actor, (metrics, refresh_actor) = jax.grad(
+                    loss_actor, has_aux=True
+                )(
+                    sac.actor,
+                    sac.critic,
+                    shared_sample,
+                    sac.alpha,
+                    key_actor,
+                    _mc_for_disc,
+                )
+                # Critic gradient: minimise SAC Bellman MSE
+                grads_critic, (metrics_critic, refresh_critic) = jax.grad(
+                    loss_critic_sac, argnums=1, has_aux=True
+                )(
+                    sac.actor_target,
+                    sac.critic,
+                    sac.critic_target,
+                    shared_sample,
+                    sac.alpha,
+                    key_critic,
+                    _mc_for_disc,
+                )
+
+                if approximate_mc:
+                    grads_mc_critic, (metrics_mc_critic, refresh_mc) = jax.grad(
+                        loss_mc_critic_sac, argnums=1, has_aux=True
+                    )(
+                        sac.actor,
+                        sac.mc_critic,
+                        sac.mc_critic_target,
+                        sac.online_buffer,
+                        shared_sample,
+                        sac.alpha,
+                        key_mc_critic,
+                        sac.critic_target,
+                    )
+                else:
+                    refresh_mc = {}
 
         metrics.update(metrics_critic)
 
@@ -3564,88 +4910,211 @@ def create_iqlearn(
             info=new_online_buffer_info
         )
 
-        updates, new_actor_opt = actor_optimizer.update(
-            grads_actor, sac.actor_optimizer_state
+        _ema = lambda old, new: jax.tree.map(
+            lambda x, y: (1 - params.tau) * x + params.tau * y, old, new
         )
-        if params.diagnostics:
-            metrics["debug/update_norm_actor"] = optax.global_norm(updates)
-        new_actor = optax.apply_updates(sac.actor, updates)  # type: ignore
 
-        updates, new_critic_opt = critic_optimizer.update(
-            grads_critic, sac.critic_optimizer_state
-        )
-        if params.diagnostics:
-            metrics["debug/update_norm_critic"] = optax.global_norm(updates)
-        new_critic = optax.apply_updates(sac.critic, updates)  # type: ignore
-
-        if approximate_mc:
-            updates, new_mc_critic_opt = mc_critic_optimizer.update(
-                grads_mc_critic, sac.mc_critic_optimizer_state
+        if use_shared_trunk:
+            # ---- Trunk mode optimizer updates ----
+            updates, new_trunk_opt = _trunk_optimizer.update(
+                total_trunk_grad, sac.trunk_optimizer_state
             )
             if params.diagnostics:
-                metrics["debug/update_norm_mc_critic"] = optax.global_norm(updates)
-            new_mc_critic = optax.apply_updates(sac.mc_critic, updates)  # type: ignore
+                metrics["debug/grad_norm_trunk"] = optax.global_norm(total_trunk_grad)
+                metrics["debug/update_norm_trunk"] = optax.global_norm(updates)
+            new_trunk = optax.apply_updates(sac.trunk, updates)
 
-        if params.autotune_alpha:
-            grads_alpha = jax.grad(loss_alpha)(sac.log_alpha, -metrics["train/entropy"])
-            updates, new_alpha_opt = alpha_optimizer.update(
-                grads_alpha, sac.alpha_optimizer_state
+            updates, new_actor_head_opt = _actor_head_optimizer.update(
+                grads_actor_head, sac.actor_head_optimizer_state
             )
-            new_log_alpha = optax.apply_updates(sac.log_alpha, updates)  # type: ignore
-            new_alpha = jnp.exp(new_log_alpha)  # type: ignore
-        else:
-            metrics.update({"train/alpha": sac.alpha})
-            new_alpha_opt = sac.alpha_optimizer_state
-            new_log_alpha = sac.log_alpha
-            new_alpha = sac.alpha
-        metrics.update({"train/alpha": new_alpha})
+            if params.diagnostics:
+                metrics["debug/grad_norm_actor"] = optax.global_norm(grads_actor_head)
+                metrics["debug/update_norm_actor"] = optax.global_norm(updates)
+            new_actor_head = optax.apply_updates(sac.actor_head, updates)
 
-        new_actor_target = jax.tree.map(
-            lambda x, y: (1 - params.tau) * x + params.tau * y,
-            sac.actor_target,
-            new_actor,
-        )
-        new_critic_target = jax.tree.map(
-            lambda x, y: (1 - params.tau) * x + params.tau * y,
-            sac.critic_target,
-            new_critic,
-        )
-        if approximate_mc:
-            new_mc_critic_target = jax.tree.map(
-                lambda x, y: (1 - params.tau) * x + params.tau * y,
-                sac.mc_critic_target,
-                new_mc_critic,
+            updates, new_critic_head_opt = _critic_head_optimizer.update(
+                grads_critic_head, sac.critic_head_optimizer_state
             )
+            if params.diagnostics:
+                metrics["debug/grad_norm_critic"] = optax.global_norm(grads_critic_head)
+                metrics["debug/update_norm_critic"] = optax.global_norm(updates)
+            new_critic_head = optax.apply_updates(sac.critic_head, updates)
 
-        if params.diagnostics:
-            metrics["debug/param_norm_actor"] = optax.global_norm(new_actor)
-            metrics["debug/param_norm_critic"] = optax.global_norm(new_critic)
             if approximate_mc:
-                metrics["debug/param_norm_mc_critic"] = optax.global_norm(new_mc_critic)
+                updates, new_mc_trunk_opt = _mc_trunk_optimizer.update(
+                    grads_mc_trunk, sac.mc_trunk_optimizer_state
+                )
+                if params.diagnostics:
+                    metrics["debug/grad_norm_mc_trunk"] = optax.global_norm(grads_mc_trunk)
+                    metrics["debug/update_norm_mc_trunk"] = optax.global_norm(updates)
+                new_mc_trunk = optax.apply_updates(sac.mc_trunk, updates)
 
-        return (
-            IQLearnState(
-                new_actor,  # type: ignore
-                new_critic,  # type: ignore
-                new_mc_critic if approximate_mc else None,
-                new_actor_target,
-                new_critic_target,
-                new_mc_critic_target if approximate_mc else None,
-                new_actor_opt,
-                new_critic_opt,
-                new_mc_critic_opt if approximate_mc else None,
-                new_alpha_opt,  # type: ignore
-                new_alpha,
-                new_log_alpha,  # type: ignore
-                new_online_buffer,
-                sac.actor_online_carry,
-                sac.critic_q1_online_carry,
-                sac.critic_q2_online_carry,
-                sac.mc_critic_q1_online_carry,
-                sac.mc_critic_q2_online_carry,
-            ),
-            metrics,
-        )
+                updates, new_mc_head_opt = _mc_critic_head_optimizer.update(
+                    grads_mc_head, sac.mc_critic_head_optimizer_state
+                )
+                if params.diagnostics:
+                    metrics["debug/grad_norm_mc_critic"] = optax.global_norm(grads_mc_head)
+                    metrics["debug/update_norm_mc_critic"] = optax.global_norm(updates)
+                new_mc_critic_head = optax.apply_updates(sac.mc_critic_head, updates)
+
+            # Alpha update
+            if params.autotune_alpha:
+                grads_alpha = jax.grad(loss_alpha)(sac.log_alpha, -metrics["train/entropy"])
+                updates, new_alpha_opt = alpha_optimizer.update(
+                    grads_alpha, sac.alpha_optimizer_state
+                )
+                new_log_alpha = optax.apply_updates(sac.log_alpha, updates)
+                new_alpha = jnp.exp(new_log_alpha)
+            else:
+                metrics.update({"train/alpha": sac.alpha})
+                new_alpha_opt = sac.alpha_optimizer_state
+                new_log_alpha = sac.log_alpha
+                new_alpha = sac.alpha
+            metrics.update({"train/alpha": new_alpha})
+
+            # EMA targets
+            new_trunk_target = _ema(sac.trunk_target, new_trunk)
+            new_actor_head_target = _ema(sac.actor_head_target, new_actor_head)
+            new_critic_head_target = _ema(sac.critic_head_target, new_critic_head)
+            if approximate_mc:
+                new_mc_trunk_target = _ema(sac.mc_trunk_target, new_mc_trunk)
+                new_mc_critic_head_target = _ema(sac.mc_critic_head_target, new_mc_critic_head)
+
+            if params.diagnostics:
+                metrics["debug/param_norm_actor"] = optax.global_norm(new_actor_head)
+                metrics["debug/param_norm_critic"] = optax.global_norm(new_critic_head)
+                metrics["debug/param_norm_trunk"] = optax.global_norm(new_trunk)
+                if approximate_mc:
+                    metrics["debug/param_norm_mc_critic"] = optax.global_norm(new_mc_critic_head)
+
+            return (
+                IQLearnState(
+                    # Keep old-style fields unchanged
+                    sac.actor,
+                    sac.critic,
+                    sac.mc_critic,
+                    sac.actor_target,
+                    sac.critic_target,
+                    sac.mc_critic_target,
+                    sac.actor_optimizer_state,
+                    sac.critic_optimizer_state,
+                    sac.mc_critic_optimizer_state,
+                    new_alpha_opt,
+                    new_alpha,
+                    new_log_alpha,
+                    new_online_buffer,
+                    sac.actor_online_carry,
+                    sac.critic_q1_online_carry,
+                    sac.critic_q2_online_carry,
+                    sac.mc_critic_q1_online_carry,
+                    sac.mc_critic_q2_online_carry,
+                    # New trunk fields
+                    trunk=new_trunk,
+                    trunk_target=new_trunk_target,
+                    mc_trunk=new_mc_trunk if approximate_mc else sac.mc_trunk,
+                    mc_trunk_target=new_mc_trunk_target if approximate_mc else sac.mc_trunk_target,
+                    actor_head=new_actor_head,
+                    actor_head_target=new_actor_head_target,
+                    critic_head=new_critic_head,
+                    critic_head_target=new_critic_head_target,
+                    mc_critic_head=new_mc_critic_head if approximate_mc else sac.mc_critic_head,
+                    mc_critic_head_target=new_mc_critic_head_target if approximate_mc else sac.mc_critic_head_target,
+                    trunk_optimizer_state=new_trunk_opt,
+                    mc_trunk_optimizer_state=new_mc_trunk_opt if approximate_mc else sac.mc_trunk_optimizer_state,
+                    actor_head_optimizer_state=new_actor_head_opt,
+                    critic_head_optimizer_state=new_critic_head_opt,
+                    mc_critic_head_optimizer_state=new_mc_head_opt if approximate_mc else sac.mc_critic_head_optimizer_state,
+                ),
+                metrics,
+            )
+        else:
+            # ---- Standard (non-trunk) optimizer updates ----
+            updates, new_actor_opt = actor_optimizer.update(
+                grads_actor, sac.actor_optimizer_state
+            )
+            if params.diagnostics:
+                metrics["debug/update_norm_actor"] = optax.global_norm(updates)
+            new_actor = optax.apply_updates(sac.actor, updates)  # type: ignore
+
+            updates, new_critic_opt = critic_optimizer.update(
+                grads_critic, sac.critic_optimizer_state
+            )
+            if params.diagnostics:
+                metrics["debug/update_norm_critic"] = optax.global_norm(updates)
+            new_critic = optax.apply_updates(sac.critic, updates)  # type: ignore
+
+            if approximate_mc:
+                updates, new_mc_critic_opt = mc_critic_optimizer.update(
+                    grads_mc_critic, sac.mc_critic_optimizer_state
+                )
+                if params.diagnostics:
+                    metrics["debug/update_norm_mc_critic"] = optax.global_norm(updates)
+                new_mc_critic = optax.apply_updates(sac.mc_critic, updates)  # type: ignore
+
+            if params.autotune_alpha:
+                grads_alpha = jax.grad(loss_alpha)(sac.log_alpha, -metrics["train/entropy"])
+                updates, new_alpha_opt = alpha_optimizer.update(
+                    grads_alpha, sac.alpha_optimizer_state
+                )
+                new_log_alpha = optax.apply_updates(sac.log_alpha, updates)  # type: ignore
+                new_alpha = jnp.exp(new_log_alpha)  # type: ignore
+            else:
+                metrics.update({"train/alpha": sac.alpha})
+                new_alpha_opt = sac.alpha_optimizer_state
+                new_log_alpha = sac.log_alpha
+                new_alpha = sac.alpha
+            metrics.update({"train/alpha": new_alpha})
+
+            new_actor_target = _ema(sac.actor_target, new_actor)
+            new_critic_target = _ema(sac.critic_target, new_critic)
+            if approximate_mc:
+                new_mc_critic_target = _ema(sac.mc_critic_target, new_mc_critic)
+
+            if params.diagnostics:
+                metrics["debug/param_norm_actor"] = optax.global_norm(new_actor)
+                metrics["debug/param_norm_critic"] = optax.global_norm(new_critic)
+                if approximate_mc:
+                    metrics["debug/param_norm_mc_critic"] = optax.global_norm(new_mc_critic)
+
+            return (
+                IQLearnState(
+                    new_actor,  # type: ignore
+                    new_critic,  # type: ignore
+                    new_mc_critic if approximate_mc else None,
+                    new_actor_target,
+                    new_critic_target,
+                    new_mc_critic_target if approximate_mc else None,
+                    new_actor_opt,
+                    new_critic_opt,
+                    new_mc_critic_opt if approximate_mc else None,
+                    new_alpha_opt,  # type: ignore
+                    new_alpha,
+                    new_log_alpha,  # type: ignore
+                    new_online_buffer,
+                    sac.actor_online_carry,
+                    sac.critic_q1_online_carry,
+                    sac.critic_q2_online_carry,
+                    sac.mc_critic_q1_online_carry,
+                    sac.mc_critic_q2_online_carry,
+                    # Trunk fields pass through unchanged (None in non-trunk mode)
+                    trunk=sac.trunk,
+                    trunk_target=sac.trunk_target,
+                    mc_trunk=sac.mc_trunk,
+                    mc_trunk_target=sac.mc_trunk_target,
+                    actor_head=sac.actor_head,
+                    actor_head_target=sac.actor_head_target,
+                    critic_head=sac.critic_head,
+                    critic_head_target=sac.critic_head_target,
+                    mc_critic_head=sac.mc_critic_head,
+                    mc_critic_head_target=sac.mc_critic_head_target,
+                    trunk_optimizer_state=sac.trunk_optimizer_state,
+                    mc_trunk_optimizer_state=sac.mc_trunk_optimizer_state,
+                    actor_head_optimizer_state=sac.actor_head_optimizer_state,
+                    critic_head_optimizer_state=sac.critic_head_optimizer_state,
+                    mc_critic_head_optimizer_state=sac.mc_critic_head_optimizer_state,
+                ),
+                metrics,
+            )
 
     def update_step(iqlearn: IQLearnState, key: jax.Array) -> Tuple[IQLearnState, dict]:
         """Execute one full SAC-style update (actor + critic + alpha + EMA targets).
@@ -3769,6 +5238,22 @@ def create_iqlearn(
                 iqlearn.critic_q2_online_carry,
                 iqlearn.mc_critic_q1_online_carry,
                 iqlearn.mc_critic_q2_online_carry,
+                # Trunk fields pass through unchanged
+                trunk=iqlearn.trunk,
+                trunk_target=iqlearn.trunk_target,
+                mc_trunk=iqlearn.mc_trunk,
+                mc_trunk_target=iqlearn.mc_trunk_target,
+                actor_head=iqlearn.actor_head,
+                actor_head_target=iqlearn.actor_head_target,
+                critic_head=iqlearn.critic_head,
+                critic_head_target=iqlearn.critic_head_target,
+                mc_critic_head=iqlearn.mc_critic_head,
+                mc_critic_head_target=iqlearn.mc_critic_head_target,
+                trunk_optimizer_state=iqlearn.trunk_optimizer_state,
+                mc_trunk_optimizer_state=iqlearn.mc_trunk_optimizer_state,
+                actor_head_optimizer_state=iqlearn.actor_head_optimizer_state,
+                critic_head_optimizer_state=iqlearn.critic_head_optimizer_state,
+                mc_critic_head_optimizer_state=iqlearn.mc_critic_head_optimizer_state,
             ),
             metrics,
         )

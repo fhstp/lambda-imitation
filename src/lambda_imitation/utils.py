@@ -333,6 +333,9 @@ def create_iqlearn_from_env(
     approximate_mc: bool = False,
     debug: bool = False,
     memory_factory=None,
+    use_shared_trunk: bool = False,
+    trunk_lr: float | None = None,
+    mc_trunk_lr: float | None = None,
 ) -> (
     "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs] | "
     "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs, DebugFunctions]"
@@ -473,7 +476,7 @@ def create_iqlearn_from_env(
     # create_iqlearn synthesises a parameter-free IdentityFeatureExtractor.
     input_dim = math.prod(env_spec.obs_shape)
     key1, key2 = jax.random.split(key)
-    seeds = jax.random.bits(key1,(10,))
+    seeds = jax.random.bits(key1,(12,))
     if fe_hidden_dims is None:
         actor_fe = None
         critic_q1_fe = None
@@ -505,6 +508,26 @@ def create_iqlearn_from_env(
         mc_critic_q1_mem = None
         mc_critic_q2_mem = None
 
+    # Shared-trunk modules (only built when use_shared_trunk=True).
+    # One FE + one memory serve actor, cq1, and cq2 together; a second pair
+    # serves mc_cq1 and mc_cq2 when approximate_mc is True.
+    shared_fe = None
+    mc_fe = None
+    shared_mem = None
+    mc_shared_mem = None
+    if use_shared_trunk:
+        if fe_hidden_dims is None:
+            shared_fe = None
+            mc_fe = None
+            trunk_fe_out_dim = input_dim
+        else:
+            shared_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(int(seeds[10])))
+            mc_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=nnx.Rngs(int(seeds[11]))) if approximate_mc else None
+            trunk_fe_out_dim = fe_hidden_dims[-1]
+        if memory_factory is not None:
+            shared_mem = memory_factory(trunk_fe_out_dim, nnx.Rngs(int(seeds[5])))
+            mc_shared_mem = memory_factory(trunk_fe_out_dim, nnx.Rngs(int(seeds[8]))) if approximate_mc else None
+
     import jax as _jax
     return create_iqlearn(
         params=hp,
@@ -531,4 +554,11 @@ def create_iqlearn_from_env(
         is_discrete=env_spec.is_discrete,
         approximate_mc=approximate_mc,
         debug=debug,
+        use_shared_trunk=use_shared_trunk,
+        shared_feature_extractor=shared_fe,
+        mc_feature_extractor=mc_fe,
+        shared_memory=shared_mem,
+        mc_shared_memory=mc_shared_mem,
+        trunk_lr=trunk_lr,
+        mc_trunk_lr=mc_trunk_lr,
     )
