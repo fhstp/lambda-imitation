@@ -183,8 +183,8 @@ expert_data = {
 # ── build agent ───────────────────────────────────────────────────────────────
 
 hp = Hyperparameters(
-    online_batch_size=32,
-    online_buffer_size=10_000,
+    online_batch_size=128,
+    online_buffer_size=100_000,
     target_entropy=0.3,
     actor_lr=1e-4,
     critic_lr=1e-4,
