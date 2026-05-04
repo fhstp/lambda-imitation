@@ -92,14 +92,14 @@ parser.add_argument(
 parser.add_argument(
     "--burn-in-from-stored-carry",
     action="store",
-    default=True,
-    help="set stored carry for burn-in (default: True)",
+    default=False,
+    help="set stored carry for burn-in (default: False)",
 )
 parser.add_argument(
     "--refresh-stored-carries",
     action="store",
-    default=True,
-    help="refresh stored carries each round (default: True)",
+    default=False,
+    help="refresh stored carries each round (default: False)",
 )
 parser.add_argument(
     "--wandb",
@@ -198,9 +198,9 @@ expert_data = {
 # ── build agent ───────────────────────────────────────────────────────────────
 
 hp = Hyperparameters(
-    online_batch_size=32,
+    online_batch_size=256,
     online_buffer_size=10_000,
-    target_entropy=0.3,  # float(0.98 * math.log(spec.action_dim)),
+    target_entropy=0.2,  # float(0.98 * math.log(spec.action_dim)),
     actor_lr=1e-4,
     critic_lr=1e-4,
     mc_critic_lr=1e-4,
@@ -213,10 +213,10 @@ hp = Hyperparameters(
     tau=args.tau,
     lam=0.5,
     lambda_truncation=17,
-    sequence_length=20,
+    sequence_length=50,
     burn_in_length=20,
     n_step=1,
-    burn_in_from_stored_carry=False,
+    burn_in_from_stored_carry=args.burn_in_from_stored_carry,
     value_rescaling=False,
     value_rescaling_eps=1e-3,
     lambda_discrepancy_coef=args.lambda_coef,
