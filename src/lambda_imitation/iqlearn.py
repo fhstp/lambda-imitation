@@ -1762,8 +1762,8 @@ def create_iqlearn(
                         v,
                         (new_actor_carry, new_q_carry1, new_q_carry2),
                         {
-                            "q": (probs * q_min).sum(-1).mean(),
-                            "entropy": entropy.mean(),
+                            "train/q": (probs * q_min).sum(-1).mean(),
+                            "train/entropy": entropy.mean(),
                         },
                     )
                 return v, (new_actor_carry, new_q_carry1, new_q_carry2)
@@ -2171,8 +2171,8 @@ def create_iqlearn(
                         v,
                         new_carries,
                         {
-                            "q": q.mean(),
-                            "entropy": -logprob.mean(),
+                            "train/q": q.mean(),
+                            "train/entropy": -logprob.mean(),
                         },
                     )
                 return v, new_carries
@@ -2394,7 +2394,7 @@ def create_iqlearn(
         Returns:
             ``(scalar_loss, metrics)`` where metrics contains ``"q"``,
             ``"entropy"``, ``"v"``, and (when discrepancy enabled)
-            ``"lambda_discrepancy_loss"``.
+            ``"disc/loss"``.
         """
         use_disc = (
             mc_critic_target is not None and params.lambda_discrepancy_coef > 0.0
@@ -2435,7 +2435,7 @@ def create_iqlearn(
                 include_entropy=True,
                 include_log=True,
             )
-            metrics = {**metrics, "v": v.mean()}
+            metrics = {**metrics, "train/v": v.mean()}
             step_loss = -(v * jnp.reshape(mask, -1)).mean()
             new_a_c, new_q1c, new_q2c = new_carries
             if use_disc:
@@ -2454,7 +2454,7 @@ def create_iqlearn(
                 )
                 disc_loss = (disc * jnp.reshape(mask, -1)).mean()
                 step_loss = step_loss + params.lambda_discrepancy_coef * disc_loss
-                metrics = {**metrics, "lambda_discrepancy_loss": disc_loss}
+                metrics = {**metrics, "disc/loss": disc_loss}
             else:
                 new_mc_q1c, new_mc_q2c = mc_q1c, mc_q2c
             return (new_a_c, new_q1c, new_q2c, new_mc_q1c, new_mc_q2c), (
@@ -2477,7 +2477,7 @@ def create_iqlearn(
             xs,
         )
 
-        metrics.update({"loss_actor": losses})
+        metrics.update({"train/actor_loss": losses})
         # Carry-refresh payload: input actor carry per scan step → slot
         # seq_idx[:, B + t].  Empty when refresh disabled to avoid extra work.
         if params.refresh_stored_carries:
@@ -2517,8 +2517,8 @@ def create_iqlearn(
 
         Returns:
             ``(scalar_loss, metrics)`` where metrics contains
-            ``"demonstration_loss"``, ``"mixed_loss"``,
-            ``"regularizer_loss"``, and ``"critic_loss"``.
+            ``"iq/demonstration_loss"``, ``"iq/mixed_loss"``,
+            ``"iq/regularizer_loss"``, and ``"train/critic_loss"``.
         """
         key_sample, key_v, key_next_v = jax.random.split(key, 3)
         sample, _ = buffer_sample(buffer, key_sample)
@@ -2566,10 +2566,10 @@ def create_iqlearn(
         loss = -(demonstration_loss - mixed_loss - regularizer_loss).mean()
 
         return loss, {
-            "demonstration_loss": demonstration_loss.mean(),
-            "mixed_loss": mixed_loss.mean(),
-            "regularizer_loss": regularizer_loss.mean(),
-            "critic_loss": loss,
+            "iq/demonstration_loss": demonstration_loss.mean(),
+            "iq/mixed_loss": mixed_loss.mean(),
+            "iq/regularizer_loss": regularizer_loss.mean(),
+            "iq/critic_loss": loss,
         }
 
     def loss_critic_sac(
@@ -2599,7 +2599,7 @@ def create_iqlearn(
 
         Returns:
             ``(scalar_loss, metrics)`` where metrics contains
-            ``"critic_loss"`` and ``"target_q"``.
+            ``"train/critic_loss"`` and ``"target_q"``.
         """
         key_v = key
         obs, act, rew, done, mask, seq_idx = (
@@ -2772,14 +2772,14 @@ def create_iqlearn(
             + ((q2[:, :-1] - target_q) ** 2 * m).sum() / denom
         )
         metrics = {
-            "critic_loss": loss,
-            "target_q": target_q.mean(),
-            "target_q_std": target_q.std(),
-            "target_q_max": target_q.max(),
-            "target_q_min": target_q.min(),
-            "sac_q1_mean": q1[:, :-1].mean(),
-            "sac_q2_mean": q2[:, :-1].mean(),
-            "sac_q_twin_gap_mean": jnp.abs(q1[:, :-1] - q2[:, :-1]).mean(),
+            "train/critic_loss": loss,
+            "train/target_q": target_q.mean(),
+            "debug/target_q_std": target_q.std(),
+            "debug/target_q_max": target_q.max(),
+            "debug/target_q_min": target_q.min(),
+            "debug/sac_q1_mean": q1[:, :-1].mean(),
+            "debug/sac_q2_mean": q2[:, :-1].mean(),
+            "debug/sac_q_twin_gap_mean": jnp.abs(q1[:, :-1] - q2[:, :-1]).mean(),
         }
 
         # Lambda-discrepancy auxiliary loss: pulls Q_sac + α·H toward Q_mc.
@@ -2857,15 +2857,15 @@ def create_iqlearn(
             )
             disc_loss = (disc * mask).sum() / jnp.maximum(mask.sum(), 1.0)
             loss = loss + params.lambda_discrepancy_coef * disc_loss
-            metrics["lambda_discrepancy_loss"] = disc_loss
-            metrics["critic_loss"] = loss
+            metrics["disc/loss"] = disc_loss
+            metrics["train/critic_loss"] = loss
             m_full = mask
             m_denom = jnp.maximum(m_full.sum(), 1.0)
-            metrics["disc_delta_abs_mean"] = (jnp.abs(delta) * m_full).sum() / m_denom
-            metrics["disc_delta_abs_max"] = jnp.abs(delta).max()
-            metrics["disc_q_sac_mean"] = (q_sac * m_full).sum() / m_denom
-            metrics["disc_q_mc_mean"] = (q_mc * m_full).sum() / m_denom
-            metrics["disc_entropy_mean"] = (H * m_full).sum() / m_denom
+            metrics["disc/delta_abs_mean"] = (jnp.abs(delta) * m_full).sum() / m_denom
+            metrics["disc/delta_abs_max"] = jnp.abs(delta).max()
+            metrics["disc/q_sac_mean"] = (q_sac * m_full).sum() / m_denom
+            metrics["disc/q_mc_mean"] = (q_mc * m_full).sum() / m_denom
+            metrics["disc/entropy_mean"] = (H * m_full).sum() / m_denom
 
         # Carry-refresh payload: input online-critic carries per scan step.
         # ``run_critic_scan`` with ``return_input_carries=True`` already returns
@@ -3078,20 +3078,20 @@ def create_iqlearn(
             ),
             (obs_T, act_T, mask_T, done_T, seq_start_T),
         )
-        metrics = {"mc_critic_loss": losses.mean()}
+        metrics = {"mc/loss": losses.mean()}
         if use_disc:
-            metrics["lambda_discrepancy_loss"] = disc_losses.mean()
-        metrics["mc_pk_mean"] = p_k_T.mean()
-        metrics["mc_pk_min"] = p_k_T.min()
-        metrics["mc_pk_max"] = p_k_T.max()
-        metrics["mc_pk_frac_collapsed"] = (p_k_T < 0.01).mean().astype(jnp.float32)
-        metrics["mc_pk_frac_at_clip"] = (p_k_T >= 0.999).mean().astype(jnp.float32)
-        metrics["mc_target_q_mean"] = target_q_T.mean()
-        metrics["mc_target_q_std"] = target_q_T.std()
-        metrics["mc_target_q_max"] = target_q_T.max()
-        metrics["mc_target_q_min"] = target_q_T.min()
-        metrics["mc_q_online_mean"] = q_min_T.mean()
-        metrics["mc_td_residual_abs_mean"] = jnp.abs(target_q_T - q_min_T).mean()
+            metrics["disc/loss"] = disc_losses.mean()
+        metrics["mc/pk_mean"] = p_k_T.mean()
+        metrics["mc/pk_min"] = p_k_T.min()
+        metrics["mc/pk_max"] = p_k_T.max()
+        metrics["mc/pk_frac_collapsed"] = (p_k_T < 0.01).mean().astype(jnp.float32)
+        metrics["mc/pk_frac_at_clip"] = (p_k_T >= 0.999).mean().astype(jnp.float32)
+        metrics["mc/target_q_mean"] = target_q_T.mean()
+        metrics["mc/target_q_std"] = target_q_T.std()
+        metrics["mc/target_q_max"] = target_q_T.max()
+        metrics["mc/target_q_min"] = target_q_T.min()
+        metrics["mc/q_online_mean"] = q_min_T.mean()
+        metrics["mc/td_residual_abs_mean"] = jnp.abs(target_q_T - q_min_T).mean()
 
         if params.refresh_stored_carries:
             SL = params.sequence_length + 1
@@ -3294,7 +3294,7 @@ def create_iqlearn(
 
         Returns:
             ``(new_state, metrics)`` where metrics contains ``"q"``,
-            ``"entropy"``, ``"v"``, ``"critic_loss"``, ``"target_q"``,
+            ``"entropy"``, ``"v"``, ``"train/critic_loss"``, ``"target_q"``,
             and ``"alpha"`` (when ``params.autotune_alpha`` is True).
         """
         # TODO: just lookup, remove
@@ -3320,9 +3320,9 @@ def create_iqlearn(
                     v = (probs * qm).sum(-1) + sac.alpha * ent
                     L = -(v * learn_mask).sum() / jnp.maximum(learn_mask.sum(), 1.0)
                     return L, {
-                        "q": (probs * qm).sum(-1).mean(),
-                        "entropy": ent.mean(),
-                        "v": v.mean(),
+                        "train/q": (probs * qm).sum(-1).mean(),
+                        "train/entropy": ent.mean(),
+                        "train/v": v.mean(),
                     }
 
                 def loss_critic_sac_seq(critic):
@@ -3362,7 +3362,7 @@ def create_iqlearn(
                         ((q1 - tq) ** 2 * learn_mask).sum() / dn
                         + ((q2 - tq) ** 2 * learn_mask).sum() / dn
                     )
-                    return L, {"critic_loss": L, "target_q": tq.mean()}
+                    return L, {"train/critic_loss": L, "train/target_q": tq.mean()}
 
             else:
 
@@ -3392,7 +3392,7 @@ def create_iqlearn(
                     qm = jnp.minimum(qtw[..., 0], qtw[..., 1])
                     v = qm - sac.alpha * lp
                     L = -(v * learn_mask).sum() / jnp.maximum(learn_mask.sum(), 1.0)
-                    return L, {"q": qm.mean(), "entropy": -lp.mean(), "v": v.mean()}
+                    return L, {"train/q": qm.mean(), "train/entropy": -lp.mean(), "train/v": v.mean()}
 
                 def loss_critic_sac_seq(critic):
                     _, tg = run_actor_scan(sac.actor_target, learn_obs, _burn_ac)
@@ -3440,7 +3440,7 @@ def create_iqlearn(
                         ((q1 - tq) ** 2 * learn_mask).sum() / dn
                         + ((q2 - tq) ** 2 * learn_mask).sum() / dn
                     )
-                    return L, {"critic_loss": L, "target_q": tq.mean()}
+                    return L, {"train/critic_loss": L, "train/target_q": tq.mean()}
 
             grads_actor, metrics = jax.grad(loss_actor_seq, has_aux=True)(sac.actor)
             grads_critic, metrics_critic = jax.grad(loss_critic_sac_seq, has_aux=True)(
@@ -3528,23 +3528,23 @@ def create_iqlearn(
                 leaves = jax.tree_util.tree_leaves(grads)
                 return jnp.max(jnp.stack([jnp.max(jnp.abs(l)) for l in leaves]))
 
-            metrics["grad_norm_actor"] = optax.global_norm(grads_actor)
-            metrics["grad_norm_critic"] = optax.global_norm(grads_critic)
-            metrics["grad_max_abs_actor"] = _grad_max_abs(grads_actor)
-            metrics["grad_max_abs_critic"] = _grad_max_abs(grads_critic)
+            metrics["debug/grad_norm_actor"] = optax.global_norm(grads_actor)
+            metrics["debug/grad_norm_critic"] = optax.global_norm(grads_critic)
+            metrics["debug/grad_max_abs_actor"] = _grad_max_abs(grads_actor)
+            metrics["debug/grad_max_abs_critic"] = _grad_max_abs(grads_critic)
             if approximate_mc:
-                metrics["grad_norm_mc_critic"] = optax.global_norm(grads_mc_critic)
-                metrics["grad_max_abs_mc_critic"] = _grad_max_abs(grads_mc_critic)
+                metrics["debug/grad_norm_mc_critic"] = optax.global_norm(grads_mc_critic)
+                metrics["debug/grad_max_abs_mc_critic"] = _grad_max_abs(grads_mc_critic)
 
             # Diagnostic: online recurrent carry magnitudes — drift detection.
-            metrics["carry_norm_actor"] = jnp.linalg.norm(
+            metrics["debug/carry_norm_actor"] = jnp.linalg.norm(
                 sac.actor_online_carry.reshape(-1)
             )
-            metrics["carry_norm_critic_q1"] = jnp.linalg.norm(
+            metrics["debug/carry_norm_critic_q1"] = jnp.linalg.norm(
                 sac.critic_q1_online_carry.reshape(-1)
             )
             if approximate_mc:
-                metrics["carry_norm_mc_critic_q1"] = jnp.linalg.norm(
+                metrics["debug/carry_norm_mc_critic_q1"] = jnp.linalg.norm(
                     sac.mc_critic_q1_online_carry.reshape(-1)
                 )
 
@@ -3568,14 +3568,14 @@ def create_iqlearn(
             grads_actor, sac.actor_optimizer_state
         )
         if params.diagnostics:
-            metrics["update_norm_actor"] = optax.global_norm(updates)
+            metrics["debug/update_norm_actor"] = optax.global_norm(updates)
         new_actor = optax.apply_updates(sac.actor, updates)  # type: ignore
 
         updates, new_critic_opt = critic_optimizer.update(
             grads_critic, sac.critic_optimizer_state
         )
         if params.diagnostics:
-            metrics["update_norm_critic"] = optax.global_norm(updates)
+            metrics["debug/update_norm_critic"] = optax.global_norm(updates)
         new_critic = optax.apply_updates(sac.critic, updates)  # type: ignore
 
         if approximate_mc:
@@ -3583,22 +3583,22 @@ def create_iqlearn(
                 grads_mc_critic, sac.mc_critic_optimizer_state
             )
             if params.diagnostics:
-                metrics["update_norm_mc_critic"] = optax.global_norm(updates)
+                metrics["debug/update_norm_mc_critic"] = optax.global_norm(updates)
             new_mc_critic = optax.apply_updates(sac.mc_critic, updates)  # type: ignore
 
         if params.autotune_alpha:
-            grads_alpha = jax.grad(loss_alpha)(sac.log_alpha, -metrics["entropy"])
+            grads_alpha = jax.grad(loss_alpha)(sac.log_alpha, -metrics["train/entropy"])
             updates, new_alpha_opt = alpha_optimizer.update(
                 grads_alpha, sac.alpha_optimizer_state
             )
             new_log_alpha = optax.apply_updates(sac.log_alpha, updates)  # type: ignore
             new_alpha = jnp.exp(new_log_alpha)  # type: ignore
         else:
-            metrics.update({"alpha": sac.alpha})
+            metrics.update({"train/alpha": sac.alpha})
             new_alpha_opt = sac.alpha_optimizer_state
             new_log_alpha = sac.log_alpha
             new_alpha = sac.alpha
-        metrics.update({"alpha": new_alpha})
+        metrics.update({"train/alpha": new_alpha})
 
         new_actor_target = jax.tree.map(
             lambda x, y: (1 - params.tau) * x + params.tau * y,
@@ -3618,10 +3618,10 @@ def create_iqlearn(
             )
 
         if params.diagnostics:
-            metrics["param_norm_actor"] = optax.global_norm(new_actor)
-            metrics["param_norm_critic"] = optax.global_norm(new_critic)
+            metrics["debug/param_norm_actor"] = optax.global_norm(new_actor)
+            metrics["debug/param_norm_critic"] = optax.global_norm(new_critic)
             if approximate_mc:
-                metrics["param_norm_mc_critic"] = optax.global_norm(new_mc_critic)
+                metrics["debug/param_norm_mc_critic"] = optax.global_norm(new_mc_critic)
 
         return (
             IQLearnState(
@@ -3663,7 +3663,29 @@ def create_iqlearn(
             critic metric dicts, plus ``"alpha"`` when autotune is enabled.
         """
         print("compiling...")
-        key_actor, key_critic = jax.random.split(key, 2)
+        key_actor, key_critic, key_sample_actor = jax.random.split(key, 3)
+
+        # Sample once for the actor loss (IQ-Learn is IID, T=1, zero carries).
+        _raw_actor, _ = buffer_sample(buffer, key_sample_actor)
+        _bs = _raw_actor.this_info[obs_key].shape[0]
+        _iq_sample = SequenceSample(
+            obs=_raw_actor.this_info[obs_key][:, None, :],
+            act=_raw_actor.this_info[action_key][:, None, :],
+            rew=jnp.zeros((_bs, 1)),
+            done=jnp.zeros((_bs, 1)),
+            mask=jnp.ones((_bs, 1)),
+            seq_idx=None,
+            burn_ac=_make_actor_carry(_bs),
+            burn_ac_tgt=None,
+            burn_cq1=_make_critic_q1_carry(_bs),
+            burn_cq2=_make_critic_q2_carry(_bs),
+            burn_cq1_tgt=None,
+            burn_cq2_tgt=None,
+            burn_mc_cq1=None,
+            burn_mc_cq2=None,
+            burn_mc_cq1_tgt=None,
+            burn_mc_cq2_tgt=None,
+        )
 
         # actor gradients (loss_actor returns aux=(metrics, refresh); IQ-Learn
         # path doesn't refresh stored carries, so refresh dict is discarded).
@@ -3672,8 +3694,7 @@ def create_iqlearn(
         )(
             iqlearn.actor,
             iqlearn.critic_target,
-            buffer,
-            buffer_sample,
+            _iq_sample,
             iqlearn.alpha,
             key_actor,
         )
@@ -3704,13 +3725,13 @@ def create_iqlearn(
 
         # update alpha
         if params.autotune_alpha:
-            grads_alpha = jax.grad(loss_alpha)(iqlearn.log_alpha, -metrics["entropy"])
+            grads_alpha = jax.grad(loss_alpha)(iqlearn.log_alpha, -metrics["train/entropy"])
             updates, new_alpha_optimizer_state = alpha_optimizer.update(
                 grads_alpha, iqlearn.alpha_optimizer_state
             )
             new_log_alpha = optax.apply_updates(iqlearn.log_alpha, updates)  # type: ignore
             new_alpha = jnp.exp(new_log_alpha)  # type: ignore
-            metrics.update({"alpha": new_alpha})
+            metrics.update({"train/alpha": new_alpha})
         else:
             new_alpha_optimizer_state = iqlearn.alpha_optimizer_state
             new_log_alpha = iqlearn.log_alpha
@@ -3775,23 +3796,23 @@ def create_iqlearn(
         # Default reduction is mean over the round; for spike-detection
         # diagnostics also expose max-over-round under "{key}_max".
         max_keys = (
-            "grad_norm_actor",
-            "grad_norm_critic",
-            "grad_norm_mc_critic",
-            "update_norm_actor",
-            "update_norm_critic",
-            "update_norm_mc_critic",
-            "sac_q_twin_gap_mean",
-            "mc_td_residual_abs_mean",
+            "debug/grad_norm_actor",
+            "debug/grad_norm_critic",
+            "debug/grad_norm_mc_critic",
+            "debug/update_norm_actor",
+            "debug/update_norm_critic",
+            "debug/update_norm_mc_critic",
+            "debug/sac_q_twin_gap_mean",
+            "mc/td_residual_abs_mean",
         )
         round_max_keys = (
-            "grad_max_abs_actor",
-            "grad_max_abs_critic",
-            "grad_max_abs_mc_critic",
-            "target_q_max",
-            "mc_target_q_max",
-            "mc_pk_max",
-            "disc_delta_abs_max",
+            "debug/grad_max_abs_actor",
+            "debug/grad_max_abs_critic",
+            "debug/grad_max_abs_mc_critic",
+            "debug/target_q_max",
+            "mc/target_q_max",
+            "mc/pk_max",
+            "disc/delta_abs_max",
         )
         max_extras = {
             f"{k}_round_max": metrics[k].max()

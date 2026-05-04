@@ -525,9 +525,9 @@ class TestTrain:
     def test_expected_metric_keys(self, trained):
         _, _, _, metrics = trained
         expected = {
-            "q", "entropy", "v",
-            "demonstration_loss", "mixed_loss",
-            "regularizer_loss", "critic_loss", "alpha",
+            "train/q", "train/entropy", "train/v",
+            "iq/demonstration_loss", "iq/mixed_loss",
+            "iq/regularizer_loss", "iq/critic_loss", "train/alpha",
         }
         assert expected <= set(metrics.keys())
 
@@ -591,7 +591,7 @@ class TestTrain:
         new_state, metrics = fns.train(state, jax.random.key(0))
         assert jnp.allclose(state.alpha, new_state.alpha), \
             "alpha should stay fixed when autotune_alpha=False"
-        assert "alpha" not in metrics
+        assert "train/alpha" not in metrics
 
     def test_reproducible_with_same_key(self):
         buf, _ = make_filled_buffer()
@@ -790,9 +790,9 @@ class TestTrainDiscrete:
     def test_expected_metric_keys(self, trained):
         _, _, _, metrics = trained
         expected = {
-            "q", "entropy", "v",
-            "demonstration_loss", "mixed_loss",
-            "regularizer_loss", "critic_loss", "alpha",
+            "train/q", "train/entropy", "train/v",
+            "iq/demonstration_loss", "iq/mixed_loss",
+            "iq/regularizer_loss", "iq/critic_loss", "train/alpha",
         }
         assert expected <= set(metrics.keys())
 
@@ -845,7 +845,7 @@ class TestTrainDiscrete:
         new_state, metrics = fns.train(state, jax.random.key(0))
         assert jnp.allclose(state.alpha, new_state.alpha), \
             "alpha should stay fixed when autotune_alpha=False"
-        assert "alpha" not in metrics
+        assert "train/alpha" not in metrics
 
     def test_reproducible_with_same_key(self):
         buf, _ = make_discrete_buffer()
@@ -1313,14 +1313,14 @@ class TestTrainSACWarm:
 
     def test_expected_metric_keys_continuous(self):
         _, _, _, metrics = _make_warm_sac(discrete=False)
-        expected = {"q", "entropy", "v", "critic_loss", "target_q", "alpha"}
+        expected = {"train/q", "train/entropy", "train/v", "train/critic_loss", "train/target_q", "train/alpha"}
         assert expected <= set(metrics.keys()), (
             f"missing keys: {expected - set(metrics.keys())}"
         )
 
     def test_expected_metric_keys_discrete(self):
         _, _, _, metrics = _make_warm_sac(discrete=True)
-        expected = {"q", "entropy", "v", "critic_loss", "target_q", "alpha"}
+        expected = {"train/q", "train/entropy", "train/v", "train/critic_loss", "train/target_q", "train/alpha"}
         assert expected <= set(metrics.keys())
 
     def test_metrics_finite_continuous(self):
@@ -1414,7 +1414,7 @@ class TestTrainSACWarm:
         assert jnp.allclose(state.alpha, new_state.alpha), (
             "alpha should not change when autotune_alpha=False"
         )
-        assert "alpha" not in metrics
+        assert "train/alpha" not in metrics
 
 
 # ---------------------------------------------------------------------------
@@ -2154,7 +2154,7 @@ class TestSeqTrainSAC:
 
     def test_discrete_metric_keys(self):
         _, _, _, metrics = _make_seq_sac(discrete=True)
-        expected = {"q", "entropy", "v", "critic_loss", "target_q", "alpha"}
+        expected = {"train/q", "train/entropy", "train/v", "train/critic_loss", "train/target_q", "train/alpha"}
         assert expected <= set(metrics.keys())
 
     def test_discrete_metrics_finite(self):
@@ -2190,7 +2190,7 @@ class TestSeqTrainSAC:
 
     def test_continuous_metric_keys(self):
         _, _, _, metrics = _make_seq_sac(discrete=False)
-        expected = {"q", "entropy", "v", "critic_loss", "target_q", "alpha"}
+        expected = {"train/q", "train/entropy", "train/v", "train/critic_loss", "train/target_q", "train/alpha"}
         assert expected <= set(metrics.keys())
 
     def test_continuous_metrics_finite(self):
@@ -2227,7 +2227,7 @@ class TestSeqTrainSAC:
             state, env, env_params, env_state0, jax.random.key(9)
         )
         assert isinstance(new_state, IQLearnState)
-        assert "critic_loss" in metrics
+        assert "train/critic_loss" in metrics
 
 
 # ---------------------------------------------------------------------------
@@ -2456,7 +2456,7 @@ class TestLambdaDiscrepancy:
         _, _, metrics = fns.train_sac(
             state, env, env_params, env_state0, jax.random.key(7)
         )
-        assert "lambda_discrepancy_loss" not in metrics
+        assert "disc/loss" not in metrics
 
     def test_metric_finite_when_enabled(self):
         """coef>0 surfaces a finite, non-negative `lambda_discrepancy_loss`."""
@@ -2464,8 +2464,8 @@ class TestLambdaDiscrepancy:
         _, _, metrics = fns.train_sac(
             state, env, env_params, env_state0, jax.random.key(7)
         )
-        assert "lambda_discrepancy_loss" in metrics
-        v = float(metrics["lambda_discrepancy_loss"])
+        assert "disc/loss" in metrics
+        v = float(metrics["disc/loss"])
         import math as _math
         assert _math.isfinite(v)
         assert v >= 0.0
