@@ -229,7 +229,7 @@ hp = Hyperparameters(
     lam=0.5,
     lambda_truncation=17,
     sequence_length=20,
-    burn_in_length=20,
+    burn_in_length=args.burn_in_len,
     n_step=1,
     burn_in_from_stored_carry=args.burn_in_from_stored_carry,
     value_rescaling=False,
@@ -265,7 +265,6 @@ state, fns, _, debug_fns = create_iqlearn_from_env(
     # a second FE+LSTM serves both MC critics.  Pass --trunk to enable.
     use_shared_trunk=args.trunk,
     trunk_lr=args.trunk_lr,
-    mc_trunk_lr=args.trunk_lr,
 )
 
 # ── evaluation helper ─────────────────────────────────────────────────────────

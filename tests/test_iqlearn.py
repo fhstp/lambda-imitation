@@ -2328,12 +2328,12 @@ class TestNStepReturn:
             size=BUFFER_SIZE, batch_size=BATCH_SIZE,
         )
         state, fns, _ = create_iqlearn(
-            hp, buf, _SEQ_NUM_ACTS2,
+            hp, buf, _SEQ_ACT_DIM2,
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
             MLPFeatureExtractor(_SEQ_OBS_DIM2, (8,), rngs=rngs),
             create_key=jax.random.key(0),
-            train_steps=1, critic_head_dims=(16,), is_discrete=True,
+            train_steps=1, critic_head_dims=(16,), is_discrete=False,
         )
         state, env_state0 = fns.prefill_buffer(
             state, env, env_params, env_state0, 20, jax.random.key(1)

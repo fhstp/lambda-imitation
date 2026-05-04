@@ -473,11 +473,11 @@ class IQLearnState(NamedTuple):
         online_buffer.
 
     **Shared-trunk SAC path** (``None`` when ``use_shared_trunk=False``):
-        trunk, trunk_target, mc_trunk, mc_trunk_target,
+        trunk, trunk_target,
         actor_head, actor_head_target,
         critic_head, critic_head_target,
         mc_critic_head, mc_critic_head_target,
-        trunk_optimizer_state, mc_trunk_optimizer_state,
+        trunk_optimizer_state,
         actor_head_optimizer_state, critic_head_optimizer_state,
         mc_critic_head_optimizer_state.
 
@@ -499,18 +499,15 @@ class IQLearnState(NamedTuple):
         alpha: Current entropy temperature (``exp(log_alpha)``).
         log_alpha: Log-space entropy temperature; directly optimised to avoid
             a positivity constraint.
-        trunk: Shared (FE, memory) state used by actor + SAC critics (online).
+        trunk: Shared (FE, memory) state used by actor + SAC critics + MC critics (online).
         trunk_target: EMA-smoothed copy of trunk.
-        mc_trunk: Shared (FE, memory) state used by MC critics (online).
-        mc_trunk_target: EMA-smoothed copy of mc_trunk.
         actor_head: Head-only state for the actor (trunk mode).
         actor_head_target: EMA-smoothed actor head.
         critic_head: Twin head states for SAC critics (trunk mode).
         critic_head_target: EMA-smoothed critic heads.
         mc_critic_head: Twin head states for MC critics (trunk mode).
         mc_critic_head_target: EMA-smoothed MC critic heads.
-        trunk_optimizer_state: Optax state for trunk optimiser.
-        mc_trunk_optimizer_state: Optax state for mc_trunk optimiser.
+        trunk_optimizer_state: Optax state for trunk optimiser (shared by all networks).
         actor_head_optimizer_state: Optax state for actor head optimiser.
         critic_head_optimizer_state: Optax state for critic heads optimiser.
         mc_critic_head_optimizer_state: Optax state for MC critic heads optimiser.
@@ -540,8 +537,6 @@ class IQLearnState(NamedTuple):
     # --- Shared trunk fields (SAC path, None when use_shared_trunk=False) ---
     trunk: "TrunkState | None" = None
     trunk_target: "TrunkState | None" = None
-    mc_trunk: "TrunkState | None" = None
-    mc_trunk_target: "TrunkState | None" = None
 
     # --- Head states (SAC path, trunk mode) ---
     actor_head: "HeadState | None" = None
@@ -553,7 +548,6 @@ class IQLearnState(NamedTuple):
 
     # --- Optimizers (SAC path trunk mode) ---
     trunk_optimizer_state: Any = None
-    mc_trunk_optimizer_state: Any = None
     actor_head_optimizer_state: Any = None
     critic_head_optimizer_state: Any = None
     mc_critic_head_optimizer_state: Any = None
@@ -671,9 +665,8 @@ class SequenceSample(NamedTuple):
     ``burn_ac_tgt``, ``burn_mc_*`` fields are ``None`` when the
     corresponding networks were not passed to ``sample_with_burn_in``.
 
-    ``burn_trunk``, ``burn_trunk_tgt``, ``burn_mc_trunk``,
-    ``burn_mc_trunk_tgt`` are ``None`` in the non-trunk path and populated
-    in the trunk path.
+    ``burn_trunk``, ``burn_trunk_tgt`` are ``None`` in the non-trunk path
+    and populated in the trunk path (shared by actor, SAC critic, and MC critic).
     """
 
     obs: Any
@@ -694,10 +687,8 @@ class SequenceSample(NamedTuple):
     burn_mc_cq1_tgt: Any  # mc_critic_target q1 carry (None if not provided)
     burn_mc_cq2_tgt: Any  # mc_critic_target q2 carry
     # New shared-trunk carries (None when not using trunk mode)
-    burn_trunk: Any = None        # trunk carry (online) for actor+critic
+    burn_trunk: Any = None        # trunk carry (online) for actor+critic+mc_critic
     burn_trunk_tgt: Any = None    # trunk_target carry
-    burn_mc_trunk: Any = None     # mc_trunk carry (online)
-    burn_mc_trunk_tgt: Any = None  # mc_trunk_target carry
 
 
 class Hyperparameters(NamedTuple):
@@ -863,11 +854,8 @@ def create_iqlearn(
     # --- Shared-trunk parameters (ignored when use_shared_trunk=False) ---
     use_shared_trunk: bool = False,
     shared_feature_extractor: nnx.Module | None = None,
-    mc_feature_extractor: nnx.Module | None = None,
     shared_memory: nnx.Module | None = None,
-    mc_shared_memory: nnx.Module | None = None,
     trunk_lr: float | None = None,
-    mc_trunk_lr: float | None = None,
 ) -> (
     "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs] | "
     "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs, DebugFunctions]"
@@ -1372,18 +1360,16 @@ def create_iqlearn(
             trunk_target: TrunkState,
             actor_head: HeadState,
             key_sample: jax.Array,
-            mc_trunk: "TrunkState | None" = None,
-            mc_trunk_target: "TrunkState | None" = None,
         ) -> SequenceSample:
             """Sample a sequence and burn in shared trunk carries.
 
-            Actor and critic share the same trunk → a single carry covers both.
+            All networks (actor, SAC critic, MC critic) share the same trunk
+            → a single carry covers all of them.
             Burns in ``trunk`` (online) and ``trunk_target`` (EMA target).
-            Optionally burns in ``mc_trunk`` and ``mc_trunk_target``.
 
             Returns a :class:`SequenceSample` with old per-network carry fields
             set to ``None`` (they are unused in trunk mode) and the new
-            ``burn_trunk*`` / ``burn_mc_trunk*`` fields populated.
+            ``burn_trunk`` / ``burn_trunk_tgt`` fields populated.
             """
             _B = params.burn_in_length
             _SL = params.sequence_length + 1
@@ -1399,19 +1385,14 @@ def create_iqlearn(
             # Compute initial carries (zero or from stored carry)
             if params.burn_in_from_stored_carry:
                 _init_trunk = seq.info[actor_carry_key][:, 0]
-                if mc_trunk is not None:
-                    _init_mc_trunk = seq.info[mc_critic_q1_carry_key][:, 0]
-                else:
-                    _init_mc_trunk = None
             else:
                 _init_trunk = _make_trunk_carry(_bs)
-                _init_mc_trunk = _make_mc_trunk_carry(_bs) if mc_trunk is not None else None
 
             if _B > 0:
                 _burn_obs = seq.info[obs_key][:, :_B]
                 _burn_done = seq.info[terminated_key][:, :_B].astype(jnp.float32)
 
-                # Burn in online trunk (actor + critic share the same trunk)
+                # Burn in online trunk (actor + critic + mc_critic share the same trunk)
                 _burn_trunk, _ = jax.lax.stop_gradient(
                     run_trunk_actor_scan(trunk, actor_head, _burn_obs, _init_trunk, _burn_done)
                 )
@@ -1419,29 +1400,9 @@ def create_iqlearn(
                 _burn_trunk_tgt, _ = jax.lax.stop_gradient(
                     run_trunk_actor_scan(trunk_target, actor_head, _burn_obs, _init_trunk, _burn_done)
                 )
-
-                if mc_trunk is not None:
-                    # Use a dummy critic_head for the FE+memory-only burn-in
-                    _burn_mc_trunk, _ = jax.lax.stop_gradient(
-                        run_trunk_critic_scan(
-                            mc_trunk, _make_dummy_mc_head(), None, None,
-                            use_mc=True, initial_carry=_init_mc_trunk, dones=_burn_done
-                        )[:2]
-                    )
-                    _burn_mc_trunk_tgt, _ = jax.lax.stop_gradient(
-                        run_trunk_critic_scan(
-                            mc_trunk_target, _make_dummy_mc_head(), None, None,
-                            use_mc=True, initial_carry=_init_mc_trunk, dones=_burn_done
-                        )[:2]
-                    )
-                else:
-                    _burn_mc_trunk = None
-                    _burn_mc_trunk_tgt = None
             else:
                 _burn_trunk = _init_trunk
                 _burn_trunk_tgt = _init_trunk
-                _burn_mc_trunk = _init_mc_trunk
-                _burn_mc_trunk_tgt = _init_mc_trunk
 
             return SequenceSample(
                 obs=obs,
@@ -1461,21 +1422,10 @@ def create_iqlearn(
                 burn_mc_cq2=None,
                 burn_mc_cq1_tgt=None,
                 burn_mc_cq2_tgt=None,
-                # New trunk carries
+                # New trunk carries (shared by all networks)
                 burn_trunk=_burn_trunk,
                 burn_trunk_tgt=_burn_trunk_tgt,
-                burn_mc_trunk=_burn_mc_trunk,
-                burn_mc_trunk_tgt=_burn_mc_trunk_tgt,
             )
-
-        # Dummy mc head used for mc trunk burn-in (only carry matters, not outputs)
-        def _make_dummy_mc_head():
-            if approximate_mc:
-                return TwinHeadState(
-                    HeadState(_trunk_mc_cq1_head_st),
-                    HeadState(_trunk_mc_cq2_head_st),
-                )
-            return None
 
     if approximate_mc:
         # Pre-initialise every behaviour_key slot to 1.0 so that slots which
@@ -1670,14 +1620,11 @@ def create_iqlearn(
     # Trunk-mode network creation (use_shared_trunk=True)
     # ------------------------------------------------------------------
     _trunk_optimizer_state = None
-    _mc_trunk_optimizer_state = None
     _actor_head_optimizer_state = None
     _critic_head_optimizer_state = None
     _mc_critic_head_optimizer_state = None
     _trunk_state = None
     _trunk_target_state = None
-    _mc_trunk_state = None
-    _mc_trunk_target_state = None
     _actor_head_state = None
     _actor_head_target_state = None
     _critic_head_state = None
@@ -1696,40 +1643,26 @@ def create_iqlearn(
                 _shared_fe(dummy_obs).shape[-1], rngs=_rngs(5)
             )
 
-        # ---- MC FE (optional) ----
-        if approximate_mc:
-            _mc_fe = mc_feature_extractor
-            if _mc_fe is None:
-                _mc_fe = IdentityFeatureExtractor()
-            _mc_mem = mc_shared_memory
-            if _mc_mem is None:
-                _mc_mem = IdentityMemory(
-                    _mc_fe(dummy_obs).shape[-1], rngs=_rngs(8)
-                )
-
         # ---- Infer dims ----
         _shared_fe_dim = _shared_fe(dummy_obs).shape[-1]
         _shared_dummy_carry = _shared_memory.initial_carry(1)
         _, _shared_dummy_mem_out = _shared_memory(_shared_fe(dummy_obs), _shared_dummy_carry)
         _shared_mem_out_dim = _shared_dummy_mem_out.shape[-1]
 
-        if approximate_mc:
-            _mc_fe_dim = _mc_fe(dummy_obs).shape[-1]
-            _mc_dummy_carry = _mc_mem.initial_carry(1)
-            _, _mc_dummy_mem_out = _mc_mem(_mc_fe(dummy_obs), _mc_dummy_carry)
-            _mc_mem_out_dim = _mc_dummy_mem_out.shape[-1]
-
         # ---- Carry templates for trunk ----
         _trunk_carry_template = _shared_memory.initial_carry(1)
-        if approximate_mc:
-            _mc_trunk_carry_template = _mc_mem.initial_carry(1)
 
         def _make_trunk_carry(batch_size: int):
             return _make_zero_carry(_trunk_carry_template, batch_size)
 
+        # In trunk mode all networks share one carry; override online
+        # carry inits so predict/env-step uses the correct LSTM carry shape.
+        actor_online_carry_init = remove_weak_types(_make_trunk_carry(1))
+        critic_q1_online_carry_init = actor_online_carry_init
+        critic_q2_online_carry_init = actor_online_carry_init
         if approximate_mc:
-            def _make_mc_trunk_carry(batch_size: int):
-                return _make_zero_carry(_mc_trunk_carry_template, batch_size)
+            mc_critic_q1_online_carry_init = remove_weak_types(_make_trunk_carry(1))
+            mc_critic_q2_online_carry_init = mc_critic_q1_online_carry_init
 
         # ---- Create head models (trunk mode: no FE dim prefix in actor head) ----
         if is_discrete:
@@ -1744,10 +1677,10 @@ def create_iqlearn(
             )
             if approximate_mc:
                 _trunk_mc_cq1_head = Head(
-                    _mc_mem_out_dim, mc_critic_head_dims, action_dim, rngs=_rngs(3)
+                    _shared_mem_out_dim, mc_critic_head_dims, action_dim, rngs=_rngs(3)
                 )
                 _trunk_mc_cq2_head = Head(
-                    _mc_mem_out_dim, mc_critic_head_dims, action_dim, rngs=_rngs(4)
+                    _shared_mem_out_dim, mc_critic_head_dims, action_dim, rngs=_rngs(4)
                 )
         else:
             _trunk_actor_head = Head(
@@ -1761,10 +1694,10 @@ def create_iqlearn(
             )
             if approximate_mc:
                 _trunk_mc_cq1_head = Head(
-                    _mc_mem_out_dim + action_dim, mc_critic_head_dims, 1, rngs=_rngs(3)
+                    _shared_mem_out_dim + action_dim, mc_critic_head_dims, 1, rngs=_rngs(3)
                 )
                 _trunk_mc_cq2_head = Head(
-                    _mc_mem_out_dim + action_dim, mc_critic_head_dims, 1, rngs=_rngs(4)
+                    _shared_mem_out_dim + action_dim, mc_critic_head_dims, 1, rngs=_rngs(4)
                 )
 
         # ---- Split trunk into (graph_def, state) ----
@@ -1772,11 +1705,6 @@ def create_iqlearn(
         _shared_mem_graph, _shared_mem_st, _shared_mem_rngs = nnx.split(
             _shared_memory, nnx.Param, ...
         )
-        if approximate_mc:
-            _mc_fe_graph, _mc_fe_st = nnx.split(_mc_fe)
-            _mc_mem_graph, _mc_mem_st, _mc_mem_rngs = nnx.split(
-                _mc_mem, nnx.Param, ...
-            )
 
         # ---- Split heads ----
         _trunk_actor_head_graph, _trunk_actor_head_st = nnx.split(_trunk_actor_head)
@@ -1793,13 +1721,6 @@ def create_iqlearn(
         _trunk_target_state = TrunkState(
             remove_weak_types(_shared_fe_st), remove_weak_types(_shared_mem_st)
         )
-        if approximate_mc:
-            _mc_trunk_state = TrunkState(
-                remove_weak_types(_mc_fe_st), remove_weak_types(_mc_mem_st)
-            )
-            _mc_trunk_target_state = TrunkState(
-                remove_weak_types(_mc_fe_st), remove_weak_types(_mc_mem_st)
-            )
 
         _actor_head_state = HeadState(remove_weak_types(_trunk_actor_head_st))
         _actor_head_target_state = HeadState(remove_weak_types(_trunk_actor_head_st))
@@ -1823,7 +1744,6 @@ def create_iqlearn(
 
         # ---- Trunk optimizers ----
         _eff_trunk_lr = trunk_lr if trunk_lr is not None else params.actor_lr
-        _eff_mc_trunk_lr = mc_trunk_lr if mc_trunk_lr is not None else params.mc_critic_lr
         _trunk_optimizer = _make_optimizer(_eff_trunk_lr)
         _actor_head_optimizer = _make_optimizer(params.actor_lr)
         _critic_head_optimizer = _make_optimizer(params.critic_lr)
@@ -1835,11 +1755,7 @@ def create_iqlearn(
             _critic_head_optimizer.init(_critic_head_state)
         )
         if approximate_mc:
-            _mc_trunk_optimizer = _make_optimizer(_eff_mc_trunk_lr)
             _mc_critic_head_optimizer = _make_optimizer(params.mc_critic_lr)
-            _mc_trunk_optimizer_state = remove_weak_types(
-                _mc_trunk_optimizer.init(_mc_trunk_state)
-            )
             _mc_critic_head_optimizer_state = remove_weak_types(
                 _mc_critic_head_optimizer.init(_mc_critic_head_state)
             )
@@ -1866,8 +1782,6 @@ def create_iqlearn(
         # Trunk-mode fields (None when use_shared_trunk=False)
         trunk=_trunk_state,
         trunk_target=_trunk_target_state,
-        mc_trunk=_mc_trunk_state if use_shared_trunk and approximate_mc else None,
-        mc_trunk_target=_mc_trunk_target_state if use_shared_trunk and approximate_mc else None,
         actor_head=_actor_head_state,
         actor_head_target=_actor_head_target_state,
         critic_head=_critic_head_state,
@@ -1875,7 +1789,6 @@ def create_iqlearn(
         mc_critic_head=_mc_critic_head_state if use_shared_trunk and approximate_mc else None,
         mc_critic_head_target=_mc_critic_head_target_state if use_shared_trunk and approximate_mc else None,
         trunk_optimizer_state=_trunk_optimizer_state,
-        mc_trunk_optimizer_state=_mc_trunk_optimizer_state if use_shared_trunk and approximate_mc else None,
         actor_head_optimizer_state=_actor_head_optimizer_state,
         critic_head_optimizer_state=_critic_head_optimizer_state,
         mc_critic_head_optimizer_state=_mc_critic_head_optimizer_state if use_shared_trunk and approximate_mc else None,
@@ -1996,6 +1909,8 @@ def create_iqlearn(
             """Sequence critic forward pass using shared trunk.
 
             Both Q1 and Q2 share the same (FE, memory) → one carry.
+            ``use_mc=True`` selects the MC critic head graphs while still
+            using the shared trunk FE and memory.
 
             Returns:
                 ``(final_carry, qs)`` where qs is ``(batch, T, num_actions, 2)``
@@ -2003,16 +1918,10 @@ def create_iqlearn(
                 When ``return_input_carries=True``, a third element with per-step
                 input carries is appended.
             """
-            if use_mc:
-                fe = nnx.merge(_mc_fe_graph, trunk.fe)
-                memory = nnx.merge(_mc_mem_graph, trunk.memory, _mc_mem_rngs)
-                q1_graph = _trunk_mc_cq1_head_graph
-                q2_graph = _trunk_mc_cq2_head_graph
-            else:
-                fe = nnx.merge(_shared_fe_graph, trunk.fe)
-                memory = nnx.merge(_shared_mem_graph, trunk.memory, _shared_mem_rngs)
-                q1_graph = _trunk_cq1_head_graph
-                q2_graph = _trunk_cq2_head_graph
+            fe = nnx.merge(_shared_fe_graph, trunk.fe)
+            memory = nnx.merge(_shared_mem_graph, trunk.memory, _shared_mem_rngs)
+            q1_graph = _trunk_mc_cq1_head_graph if use_mc else _trunk_cq1_head_graph
+            q2_graph = _trunk_mc_cq2_head_graph if use_mc else _trunk_cq2_head_graph
             head1 = nnx.merge(q1_graph, critic_head.q1.head)
             head2 = nnx.merge(q2_graph, critic_head.q2.head)
 
@@ -2021,10 +1930,7 @@ def create_iqlearn(
             feats = fe(flat_xs).reshape(batch, T, -1)
 
             if initial_carry is None:
-                if use_mc:
-                    initial_carry = _make_mc_trunk_carry(batch)
-                else:
-                    initial_carry = _make_trunk_carry(batch)
+                initial_carry = _make_trunk_carry(batch)
 
             if return_input_carries:
                 final_carry, mem_outs, input_carries = memory.scan(
@@ -2058,22 +1964,16 @@ def create_iqlearn(
             carry=None,
         ):
             """Single-step critic forward pass using shared trunk."""
-            if use_mc:
-                fe = nnx.merge(_mc_fe_graph, trunk.fe)
-                memory = nnx.merge(_mc_mem_graph, trunk.memory, _mc_mem_rngs)
-                q1_graph = _trunk_mc_cq1_head_graph
-                q2_graph = _trunk_mc_cq2_head_graph
-            else:
-                fe = nnx.merge(_shared_fe_graph, trunk.fe)
-                memory = nnx.merge(_shared_mem_graph, trunk.memory, _shared_mem_rngs)
-                q1_graph = _trunk_cq1_head_graph
-                q2_graph = _trunk_cq2_head_graph
+            fe = nnx.merge(_shared_fe_graph, trunk.fe)
+            memory = nnx.merge(_shared_mem_graph, trunk.memory, _shared_mem_rngs)
+            q1_graph = _trunk_mc_cq1_head_graph if use_mc else _trunk_cq1_head_graph
+            q2_graph = _trunk_mc_cq2_head_graph if use_mc else _trunk_cq2_head_graph
             head1 = nnx.merge(q1_graph, critic_head.q1.head)
             head2 = nnx.merge(q2_graph, critic_head.q2.head)
 
             batch = x.shape[0]
             if carry is None:
-                carry = _make_mc_trunk_carry(batch) if use_mc else _make_trunk_carry(batch)
+                carry = _make_trunk_carry(batch)
             new_carry, mem_out = memory(fe(x), carry)
 
             if is_discrete:
@@ -3767,7 +3667,7 @@ def create_iqlearn(
             alpha: jax.Array,
             key: jax.Array,
             mc_critic_head_target: "TwinHeadState | None" = None,
-            mc_trunk_target: "TrunkState | None" = None,
+            trunk_target: "TrunkState | None" = None,
         ) -> Tuple[jax.Array, dict]:
             """Actor loss using shared trunk (gradient flows through trunk)."""
             key_v = key
@@ -3777,7 +3677,7 @@ def create_iqlearn(
 
             use_disc_loss = (
                 mc_critic_head_target is not None
-                and mc_trunk_target is not None
+                and trunk_target is not None
                 and params.lambda_discrepancy_coef > 0.0
             )
 
@@ -3852,7 +3752,7 @@ def create_iqlearn(
                         ai = jnp.round(act_t.reshape(-1)).astype(jnp.int32)
                         q_sac_act = q_sac[jnp.arange(obs_t.shape[0]), ai]
                         _, mc_qs_t = run_trunk_critic(
-                            jax.tree.map(jax.lax.stop_gradient, mc_trunk_target),
+                            jax.tree.map(jax.lax.stop_gradient, trunk_target),
                             jax.tree.map(jax.lax.stop_gradient, mc_critic_head_target),
                             obs_t, carry=mc_q_carry, use_mc=True
                         )
@@ -3863,7 +3763,7 @@ def create_iqlearn(
                     else:
                         q_sac_act = jnp.minimum(qs_t[:, 0], qs_t[:, 1])
                         _, mc_qs_t = run_trunk_critic(
-                            jax.tree.map(jax.lax.stop_gradient, mc_trunk_target),
+                            jax.tree.map(jax.lax.stop_gradient, trunk_target),
                             jax.tree.map(jax.lax.stop_gradient, mc_critic_head_target),
                             obs_t, a, carry=mc_q_carry, use_mc=True
                         )
@@ -3890,10 +3790,7 @@ def create_iqlearn(
                 )
 
             _bs = obs.shape[0]
-            if use_disc_loss:
-                init_mc_q_carry = _make_mc_trunk_carry(_bs)
-            else:
-                init_mc_q_carry = _make_trunk_carry(_bs)
+            init_mc_q_carry = _make_trunk_carry(_bs)
 
             _, (losses, metrics, actor_input_carries_T) = jax.lax.scan(
                 scan_fun,
@@ -3929,7 +3826,6 @@ def create_iqlearn(
             alpha: jax.Array,
             key: jax.Array,
             mc_critic_head_target: "TwinHeadState | None" = None,
-            mc_trunk_target: "TrunkState | None" = None,
         ) -> Tuple[jax.Array, dict]:
             """SAC Bellman MSE critic loss using shared trunk."""
             key_v = key
@@ -3939,7 +3835,7 @@ def create_iqlearn(
             )
             burn_trunk = sample.burn_trunk
             burn_trunk_tgt = sample.burn_trunk_tgt
-            burn_mc_trunk = sample.burn_mc_trunk_tgt  # use target for MC critic
+            burn_trunk_tgt_sg = jax.lax.stop_gradient(burn_trunk_tgt)  # used for MC critic too
 
             SL_static = params.sequence_length + 1
             _bs = obs.shape[0]
@@ -4030,12 +3926,11 @@ def create_iqlearn(
 
             # Lambda-discrepancy (trunk critic)
             if mc_critic_head_target is not None and params.lambda_discrepancy_coef > 0.0:
-                mc_ct_sg = jax.tree.map(jax.lax.stop_gradient, mc_trunk_target)
                 mc_hd_sg = jax.tree.map(jax.lax.stop_gradient, mc_critic_head_target)
                 _, q_mc_twin_T = run_trunk_critic_scan(
-                    mc_ct_sg, mc_hd_sg, obs, act if not is_discrete else None,
+                    trunk_target_sg, mc_hd_sg, obs, act if not is_discrete else None,
                     use_mc=True,
-                    initial_carry=jax.lax.stop_gradient(burn_mc_trunk),
+                    initial_carry=burn_trunk_tgt_sg,
                 )
                 if is_discrete:
                     q_mc = jnp.minimum(
@@ -4047,7 +3942,7 @@ def create_iqlearn(
                 # Entropy H using actor_head_target + trunk_target
                 _, dist_T_h = run_trunk_actor_scan(
                     trunk_target_sg, actor_head_target_sg, obs,
-                    jax.lax.stop_gradient(burn_trunk_tgt)
+                    burn_trunk_tgt_sg
                 )
                 if is_discrete:
                     probs_h = jax.nn.softmax(dist_T_h, axis=-1)
@@ -4095,8 +3990,7 @@ def create_iqlearn(
 
         def loss_mc_critic_sac_trunk(
             mc_critic_head: TwinHeadState,
-            mc_trunk: TrunkState,
-            mc_trunk_target: TrunkState,
+            trunk: TrunkState,
             trunk_target: TrunkState,
             actor_head_target: HeadState,
             online_buf: Buffer,
@@ -4105,15 +3999,15 @@ def create_iqlearn(
             key: jax.Array,
             critic_head_target: "TwinHeadState | None" = None,
         ) -> Tuple[jax.Array, dict]:
-            """MC critic loss using shared mc_trunk with TD(λ) targets."""
+            """MC critic loss using shared trunk with TD(λ) targets."""
             key_scan = key
 
             obs, act, rew, done, mask, seq_idx = (
                 sample.obs, sample.act, sample.rew, sample.done,
                 sample.mask, sample.seq_idx
             )
-            burn_mc_trunk = sample.burn_mc_trunk
-            burn_mc_trunk_tgt = sample.burn_mc_trunk_tgt
+            burn_trunk = sample.burn_trunk
+            burn_trunk_tgt = sample.burn_trunk_tgt
             burn_actor_trunk = sample.burn_trunk
 
             B = params.burn_in_length
@@ -4128,7 +4022,6 @@ def create_iqlearn(
 
             trunk_target_sg = jax.tree.map(jax.lax.stop_gradient, trunk_target)
             actor_head_target_sg = jax.tree.map(jax.lax.stop_gradient, actor_head_target)
-            mc_trunk_target_sg = jax.tree.map(jax.lax.stop_gradient, mc_trunk_target)
 
             use_disc = (
                 critic_head_target is not None and params.lambda_discrepancy_coef > 0.0
@@ -4173,9 +4066,9 @@ def create_iqlearn(
                 # As a pragmatic choice: call get_v via trunk-based helper.
 
                 # Bootstrap V at start of look-ahead window
-                # V(s_t) using mc_trunk_target + actor_head_target
+                # V(s_t) using trunk_target + mc_critic_head
                 _, qs_boot = run_trunk_critic(
-                    mc_trunk_target_sg,
+                    trunk_target_sg,
                     jax.tree.map(jax.lax.stop_gradient, mc_critic_head),
                     td_obs[:, 0],
                     td_act[:, 0] if not is_discrete else None,
@@ -4212,9 +4105,9 @@ def create_iqlearn(
                 )
                 p_k = jnp.ones(obs_t.shape[0])  # IS weight = 1 (no V-trace in trunk mode)
 
-                # Online MC critic Q (gradient flows through mc_critic_head + mc_trunk)
+                # Online MC critic Q (gradient flows through mc_critic_head + trunk)
                 new_mc_q_carry, qs_online = run_trunk_critic(
-                    mc_trunk, mc_critic_head, obs_t,
+                    trunk, mc_critic_head, obs_t,
                     act_t if not is_discrete else None,
                     use_mc=True, carry=mc_q_carry_sg,
                 )
@@ -4232,7 +4125,7 @@ def create_iqlearn(
                 )
                 # Advance mc_target carry by 1 step
                 new_mc_tgt_carry, _ = run_trunk_critic(
-                    mc_trunk_target_sg,
+                    trunk_target_sg,
                     jax.tree.map(jax.lax.stop_gradient, mc_critic_head),
                     obs_t,
                     act_t if not is_discrete else None,
@@ -4316,10 +4209,7 @@ def create_iqlearn(
                 )
 
             _bs = obs.shape[0]
-            if use_disc:
-                init_sac_tgt_carry = _make_trunk_carry(_bs)
-            else:
-                init_sac_tgt_carry = burn_mc_trunk
+            init_sac_tgt_carry = _make_trunk_carry(_bs)
 
             _, (
                 losses,
@@ -4332,8 +4222,8 @@ def create_iqlearn(
                 scan_fun,
                 (
                     burn_actor_trunk,
-                    burn_mc_trunk,
-                    burn_mc_trunk_tgt,
+                    burn_trunk,
+                    burn_trunk_tgt,
                     init_sac_tgt_carry,
                     key_scan,
                 ),
@@ -4413,17 +4303,12 @@ def create_iqlearn(
             return new_c
 
         if use_shared_trunk:
-            # In trunk mode, critic carry = actor carry (shared trunk)
+            # In trunk mode, all carries (critic + mc_critic) share the trunk carry
             new_cq1_carry = new_actor_carry
             new_cq2_carry = new_actor_carry
             if approximate_mc:
-                # Step mc_trunk memory for mc carries
-                _mc_fe_mod = nnx.merge(_mc_fe_graph, sac.mc_trunk.fe)
-                _mc_mem_mod = nnx.merge(_mc_mem_graph, sac.mc_trunk.memory, _mc_mem_rngs)
-                new_mcq1_carry, _ = _mc_mem_mod(
-                    _mc_fe_mod(obs_batch), sac.mc_critic_q1_online_carry
-                )
-                new_mcq2_carry = new_mcq1_carry
+                new_mcq1_carry = new_actor_carry
+                new_mcq2_carry = new_actor_carry
         else:
             new_cq1_carry = _step_mem(
                 critic_q1_fe_graph,
@@ -4733,7 +4618,7 @@ def create_iqlearn(
 
             if use_shared_trunk:
                 # ----------------------------------------------------------
-                # Trunk-mode SAC update: actor + critic share a single trunk
+                # Trunk-mode SAC update: single trunk shared by all networks
                 # ----------------------------------------------------------
                 shared_sample = sample_with_burn_in_trunk(
                     sac.online_buffer,
@@ -4741,12 +4626,10 @@ def create_iqlearn(
                     trunk_target=sac.trunk_target,
                     actor_head=sac.actor_head,
                     key_sample=key_sample,
-                    mc_trunk=sac.mc_trunk if approximate_mc else None,
-                    mc_trunk_target=sac.mc_trunk_target if approximate_mc else None,
                 )
 
                 _mc_head_for_disc = sac.mc_critic_head_target if approximate_mc else None
-                _mc_trunk_for_disc = sac.mc_trunk_target if approximate_mc else None
+                _trunk_for_disc = sac.trunk_target if approximate_mc else None
 
                 # Actor gradient: grad w.r.t. (actor_head, trunk)
                 (grads_actor_head, grads_trunk_a), (metrics, refresh_actor) = jax.grad(
@@ -4759,7 +4642,7 @@ def create_iqlearn(
                     sac.alpha,
                     key_actor,
                     _mc_head_for_disc,
-                    _mc_trunk_for_disc,
+                    _trunk_for_disc,
                 )
 
                 # Critic gradient: grad w.r.t. (critic_head, trunk)
@@ -4774,21 +4657,15 @@ def create_iqlearn(
                     sac.alpha,
                     key_critic,
                     _mc_head_for_disc,
-                    _mc_trunk_for_disc,
-                )
-
-                # Accumulate trunk grads from actor + critic losses
-                total_trunk_grad = jax.tree.map(
-                    lambda a, c: a + c, grads_trunk_a, grads_trunk_c
                 )
 
                 if approximate_mc:
-                    (grads_mc_head, grads_mc_trunk), (metrics_mc_critic, refresh_mc) = jax.grad(
+                    # MC critic gradient: grad w.r.t. (mc_critic_head, trunk)
+                    (grads_mc_head, grads_trunk_mc), (metrics_mc_critic, refresh_mc) = jax.grad(
                         loss_mc_critic_sac_trunk, argnums=(0, 1), has_aux=True
                     )(
                         sac.mc_critic_head,
-                        sac.mc_trunk,
-                        sac.mc_trunk_target,
+                        sac.trunk,
                         sac.trunk_target,
                         sac.actor_head_target,
                         sac.online_buffer,
@@ -4797,12 +4674,23 @@ def create_iqlearn(
                         key_mc_critic,
                         sac.critic_head_target,
                     )
+                    # Three-way trunk grad accumulation: actor + critic + mc_critic
+                    total_trunk_grad = jax.tree.map(
+                        lambda a, c, m: a + c + m,
+                        grads_trunk_a, grads_trunk_c, grads_trunk_mc
+                    )
                 else:
+                    # Two-way trunk grad accumulation: actor + critic
+                    total_trunk_grad = jax.tree.map(
+                        lambda a, c: a + c, grads_trunk_a, grads_trunk_c
+                    )
                     refresh_mc = {}
 
                 # Store for diagnostics
                 grads_actor = grads_actor_head  # for diagnostics compat
                 grads_critic = grads_critic_head
+                if approximate_mc:
+                    grads_mc_critic = grads_mc_head
 
             else:
                 # ----------------------------------------------------------
@@ -4941,14 +4829,6 @@ def create_iqlearn(
             new_critic_head = optax.apply_updates(sac.critic_head, updates)
 
             if approximate_mc:
-                updates, new_mc_trunk_opt = _mc_trunk_optimizer.update(
-                    grads_mc_trunk, sac.mc_trunk_optimizer_state
-                )
-                if params.diagnostics:
-                    metrics["debug/grad_norm_mc_trunk"] = optax.global_norm(grads_mc_trunk)
-                    metrics["debug/update_norm_mc_trunk"] = optax.global_norm(updates)
-                new_mc_trunk = optax.apply_updates(sac.mc_trunk, updates)
-
                 updates, new_mc_head_opt = _mc_critic_head_optimizer.update(
                     grads_mc_head, sac.mc_critic_head_optimizer_state
                 )
@@ -4965,19 +4845,17 @@ def create_iqlearn(
                 )
                 new_log_alpha = optax.apply_updates(sac.log_alpha, updates)
                 new_alpha = jnp.exp(new_log_alpha)
+                metrics.update({"train/alpha": new_alpha})
             else:
-                metrics.update({"train/alpha": sac.alpha})
                 new_alpha_opt = sac.alpha_optimizer_state
                 new_log_alpha = sac.log_alpha
                 new_alpha = sac.alpha
-            metrics.update({"train/alpha": new_alpha})
 
             # EMA targets
             new_trunk_target = _ema(sac.trunk_target, new_trunk)
             new_actor_head_target = _ema(sac.actor_head_target, new_actor_head)
             new_critic_head_target = _ema(sac.critic_head_target, new_critic_head)
             if approximate_mc:
-                new_mc_trunk_target = _ema(sac.mc_trunk_target, new_mc_trunk)
                 new_mc_critic_head_target = _ema(sac.mc_critic_head_target, new_mc_critic_head)
 
             if params.diagnostics:
@@ -5008,11 +4886,9 @@ def create_iqlearn(
                     sac.critic_q2_online_carry,
                     sac.mc_critic_q1_online_carry,
                     sac.mc_critic_q2_online_carry,
-                    # New trunk fields
+                    # Trunk fields
                     trunk=new_trunk,
                     trunk_target=new_trunk_target,
-                    mc_trunk=new_mc_trunk if approximate_mc else sac.mc_trunk,
-                    mc_trunk_target=new_mc_trunk_target if approximate_mc else sac.mc_trunk_target,
                     actor_head=new_actor_head,
                     actor_head_target=new_actor_head_target,
                     critic_head=new_critic_head,
@@ -5020,7 +4896,6 @@ def create_iqlearn(
                     mc_critic_head=new_mc_critic_head if approximate_mc else sac.mc_critic_head,
                     mc_critic_head_target=new_mc_critic_head_target if approximate_mc else sac.mc_critic_head_target,
                     trunk_optimizer_state=new_trunk_opt,
-                    mc_trunk_optimizer_state=new_mc_trunk_opt if approximate_mc else sac.mc_trunk_optimizer_state,
                     actor_head_optimizer_state=new_actor_head_opt,
                     critic_head_optimizer_state=new_critic_head_opt,
                     mc_critic_head_optimizer_state=new_mc_head_opt if approximate_mc else sac.mc_critic_head_optimizer_state,
@@ -5058,12 +4933,11 @@ def create_iqlearn(
                 )
                 new_log_alpha = optax.apply_updates(sac.log_alpha, updates)  # type: ignore
                 new_alpha = jnp.exp(new_log_alpha)  # type: ignore
+                metrics.update({"train/alpha": new_alpha})
             else:
-                metrics.update({"train/alpha": sac.alpha})
                 new_alpha_opt = sac.alpha_optimizer_state
                 new_log_alpha = sac.log_alpha
                 new_alpha = sac.alpha
-            metrics.update({"train/alpha": new_alpha})
 
             new_actor_target = _ema(sac.actor_target, new_actor)
             new_critic_target = _ema(sac.critic_target, new_critic)
@@ -5099,8 +4973,6 @@ def create_iqlearn(
                     # Trunk fields pass through unchanged (None in non-trunk mode)
                     trunk=sac.trunk,
                     trunk_target=sac.trunk_target,
-                    mc_trunk=sac.mc_trunk,
-                    mc_trunk_target=sac.mc_trunk_target,
                     actor_head=sac.actor_head,
                     actor_head_target=sac.actor_head_target,
                     critic_head=sac.critic_head,
@@ -5108,7 +4980,6 @@ def create_iqlearn(
                     mc_critic_head=sac.mc_critic_head,
                     mc_critic_head_target=sac.mc_critic_head_target,
                     trunk_optimizer_state=sac.trunk_optimizer_state,
-                    mc_trunk_optimizer_state=sac.mc_trunk_optimizer_state,
                     actor_head_optimizer_state=sac.actor_head_optimizer_state,
                     critic_head_optimizer_state=sac.critic_head_optimizer_state,
                     mc_critic_head_optimizer_state=sac.mc_critic_head_optimizer_state,
@@ -5241,8 +5112,6 @@ def create_iqlearn(
                 # Trunk fields pass through unchanged
                 trunk=iqlearn.trunk,
                 trunk_target=iqlearn.trunk_target,
-                mc_trunk=iqlearn.mc_trunk,
-                mc_trunk_target=iqlearn.mc_trunk_target,
                 actor_head=iqlearn.actor_head,
                 actor_head_target=iqlearn.actor_head_target,
                 critic_head=iqlearn.critic_head,
@@ -5250,7 +5119,6 @@ def create_iqlearn(
                 mc_critic_head=iqlearn.mc_critic_head,
                 mc_critic_head_target=iqlearn.mc_critic_head_target,
                 trunk_optimizer_state=iqlearn.trunk_optimizer_state,
-                mc_trunk_optimizer_state=iqlearn.mc_trunk_optimizer_state,
                 actor_head_optimizer_state=iqlearn.actor_head_optimizer_state,
                 critic_head_optimizer_state=iqlearn.critic_head_optimizer_state,
                 mc_critic_head_optimizer_state=iqlearn.mc_critic_head_optimizer_state,
