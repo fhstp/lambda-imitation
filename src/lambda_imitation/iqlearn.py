@@ -657,6 +657,11 @@ class Hyperparameters(NamedTuple):
     # from the carry stored in the buffer at the start of the sampled window
     # instead of zero.  Requires sequence_length > 1 or burn_in_length > 0.
     burn_in_from_stored_carry: bool = False
+    # TBPTT chunk size for the online SAC critic in loss_critic_sac.
+    # Gradient flows freely within each chunk; carry is stop_gradient'd between
+    # chunks (R2D2-style truncation).  K=1 matches actor/MC-critic depth.
+    # K<=0 or K>=sequence_length+1 disables chunking (full BPTT).
+    tbptt_chunk_size: int = 1
     # n-step bootstrapping (1 = standard 1-step TD)
     n_step: int = 1
     # Invertible value rescaling (Pohlen 2018 / R2D2 §2.3)
@@ -2690,37 +2695,64 @@ def create_iqlearn(
             )
             v = jnp.swapaxes(v_T, 0, 1)  # (B, SL)
 
-        # Pass 2: online Q at each timestep with online critic carries.
-        # Refactored to one batched ``run_critic_scan`` (with optional
-        # per-step input-carry capture for the buffer refresh feature).
+        # Pass 2: online Q with TBPTT chunking.  Run run_critic_scan in chunks
+        # of tbptt_chunk_size; carry is stop_gradient'd between chunks so
+        # gradient depth matches the actor/MC-critic (R2D2 truncation).
+        # K<=0 or K>=T → single call (full BPTT, pre-refactor behaviour).
         _refresh = params.refresh_stored_carries
-        if is_discrete:
-            if _refresh:
-                _, _, q_twin_T, cq1_input_T, cq2_input_T = run_critic_scan(
-                    critic, obs, False, burn_cq1, burn_cq2,
-                    return_input_carries=True,
+        K = params.tbptt_chunk_size
+        T_total = SL_static
+
+        def _chunk_scan(start, end, cq1, cq2):
+            if is_discrete:
+                if _refresh:
+                    return run_critic_scan(
+                        critic, obs[:, start:end], False, cq1, cq2,
+                        return_input_carries=True,
+                    )
+                fc1, fc2, qs = run_critic_scan(
+                    critic, obs[:, start:end], False, cq1, cq2,
                 )
+                return fc1, fc2, qs, None, None
             else:
-                _, _, q_twin_T = run_critic_scan(
-                    critic, obs, False, burn_cq1, burn_cq2,
+                if _refresh:
+                    return run_critic_scan(
+                        critic, obs[:, start:end], act[:, start:end], False, cq1, cq2,
+                        return_input_carries=True,
+                    )
+                fc1, fc2, qs = run_critic_scan(
+                    critic, obs[:, start:end], act[:, start:end], False, cq1, cq2,
                 )
-                cq1_input_T = cq2_input_T = None
+                return fc1, fc2, qs, None, None
+
+        if K <= 0 or K >= T_total:
+            _, _, q_twin_T, cq1_input_T, cq2_input_T = _chunk_scan(
+                0, T_total, burn_cq1, burn_cq2,
+            )
+        else:
+            n_chunks = (T_total + K - 1) // K
+            cq1, cq2 = burn_cq1, burn_cq2
+            all_qs, all_ic1, all_ic2 = [], [], []
+            for i in range(n_chunks):
+                start, end = i * K, min((i + 1) * K, T_total)
+                fc1, fc2, qs_c, ic1_c, ic2_c = _chunk_scan(start, end, cq1, cq2)
+                all_qs.append(qs_c)
+                if _refresh:
+                    all_ic1.append(ic1_c)
+                    all_ic2.append(ic2_c)
+                cq1 = jax.lax.stop_gradient(fc1)
+                cq2 = jax.lax.stop_gradient(fc2)
+            q_twin_T = jnp.concatenate(all_qs, axis=1)
+            cq1_input_T = jnp.concatenate(all_ic1, axis=1) if _refresh else None
+            cq2_input_T = jnp.concatenate(all_ic2, axis=1) if _refresh else None
+
+        if is_discrete:
             ai = jnp.round(act.reshape(_bs, SL_static)).astype(jnp.int32)  # (B, SL)
             bi = jnp.arange(_bs)[:, None]
             ti = jnp.arange(SL_static)[None, :]
             q1 = q_twin_T[bi, ti, ai, 0]  # (B, SL)
             q2 = q_twin_T[bi, ti, ai, 1]
         else:
-            if _refresh:
-                _, _, q_twin_T, cq1_input_T, cq2_input_T = run_critic_scan(
-                    critic, obs, act, False, burn_cq1, burn_cq2,
-                    return_input_carries=True,
-                )
-            else:
-                _, _, q_twin_T = run_critic_scan(
-                    critic, obs, act, False, burn_cq1, burn_cq2,
-                )
-                cq1_input_T = cq2_input_T = None
             q1 = q_twin_T[..., 0]
             q2 = q_twin_T[..., 1]
 

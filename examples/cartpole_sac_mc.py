@@ -198,7 +198,7 @@ expert_data = {
 # ── build agent ───────────────────────────────────────────────────────────────
 
 hp = Hyperparameters(
-    online_batch_size=256,
+    online_batch_size=32,
     online_buffer_size=10_000,
     target_entropy=0.2,  # float(0.98 * math.log(spec.action_dim)),
     actor_lr=1e-4,
@@ -213,7 +213,7 @@ hp = Hyperparameters(
     tau=args.tau,
     lam=0.5,
     lambda_truncation=17,
-    sequence_length=50,
+    sequence_length=20,
     burn_in_length=20,
     n_step=1,
     burn_in_from_stored_carry=args.burn_in_from_stored_carry,
