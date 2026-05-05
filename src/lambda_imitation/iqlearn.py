@@ -3790,7 +3790,9 @@ def create_iqlearn(
                 )
 
             _bs = obs.shape[0]
-            init_mc_q_carry = _make_trunk_carry(_bs)
+            # MC q-carry starts from the target trunk's burn-in carry to match
+            # the latent state used for q_sac (also from target trunk in disc).
+            init_mc_q_carry = jax.lax.stop_gradient(sample.burn_trunk_tgt)
 
             _, (losses, metrics, actor_input_carries_T) = jax.lax.scan(
                 scan_fun,
@@ -4219,7 +4221,11 @@ def create_iqlearn(
                 )
 
             _bs = obs.shape[0]
-            init_sac_tgt_carry = _make_trunk_carry(_bs)
+            # SAC-target carry must start from the same latent state as the
+            # MC-target carry (both run through trunk_target). Using the
+            # target trunk's burn-in carry keeps q_sac and q_mc in disc loss
+            # computed at the same effective state.
+            init_sac_tgt_carry = jax.lax.stop_gradient(burn_trunk_tgt)
 
             _, (
                 losses,
