@@ -2837,7 +2837,7 @@ def create_iqlearn(
         )  # (batch, N)
         rn = rn + gammas[1:][None, :] * done_mask[:, 1:] * v[:, 1:]
 
-        td = (1.0 - params.lam) * jnp.sum(lambdas[None, :] * rn, axis=1)
+        td = (1.0 - params.lam) * jnp.sum(lambdas[None, :] * rn, axis=1) + lambdas[-1] * rn[:, -1]
         return td, p_k, final_a, final_q1, final_q2
 
     def calculate_td_lambda_trunk(
@@ -2971,7 +2971,7 @@ def create_iqlearn(
         )
         rn = rn + gammas[1:][None, :] * done_mask[:, 1:] * v[:, 1:]
 
-        td = (1.0 - params.lam) * jnp.sum(lambdas[None, :] * rn, axis=1)
+        td = (1.0 - params.lam) * jnp.sum(lambdas[None, :] * rn, axis=1) + lambdas[-1] * rn[:, -1]
         return td, p_k, final_trunk_carry
 
     def loss_alpha(log_alpha: jax.Array, log_pi: jax.Array) -> jax.Array:
