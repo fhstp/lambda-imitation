@@ -4676,13 +4676,13 @@ def create_iqlearn(
                     )
                     # Three-way trunk grad accumulation: actor + critic + mc_critic
                     total_trunk_grad = jax.tree.map(
-                        lambda a, c, m: a + c + m,
+                        lambda a, c, m: 1/3*(a + c + m),
                         grads_trunk_a, grads_trunk_c, grads_trunk_mc
                     )
                 else:
                     # Two-way trunk grad accumulation: actor + critic
                     total_trunk_grad = jax.tree.map(
-                        lambda a, c: a + c, grads_trunk_a, grads_trunk_c
+                        lambda a, c: 1/2*(a + c), grads_trunk_a, grads_trunk_c
                     )
                     refresh_mc = {}
 
