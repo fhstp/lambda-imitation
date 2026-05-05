@@ -3442,11 +3442,7 @@ def create_iqlearn(
                     log_std_at_T + 1
                 )
                 std_at_T = jnp.exp(log_std_at_T)
-                # Same (B, action_dim) noise at every t — matches buggy
-                # original behaviour.  Re-introducing per-step keys here
-                # would change numerics.
-                noise = jax.random.normal(key_v, (_bs, action_dim))
-                noise_T = jnp.broadcast_to(noise[:, None, :], mean_at_T.shape)
+                noise_T = jax.random.normal(key_v, (_bs, SL_static, action_dim))
                 u_T = noise_T * std_at_T + mean_at_T
                 y_T = jnp.tanh(u_T)
                 log_prob_T = (
@@ -3665,12 +3661,11 @@ def create_iqlearn(
             )
 
         _bs = obs.shape[0]
-        if use_disc:
-            init_sac_q1c = _make_critic_q1_carry(_bs)
-            init_sac_q2c = _make_critic_q2_carry(_bs)
-        else:
-            init_sac_q1c = burn_cq1
-            init_sac_q2c = burn_cq2
+        # Mirrors the trunk path: start SAC-target carry from its burned-in state so
+        # q_sac and q_mc in the discrepancy term are evaluated at the same recurrent
+        # context (instead of cold-zero vs warm MC carry).
+        init_sac_q1c = jax.lax.stop_gradient(sample.burn_cq1_tgt)
+        init_sac_q2c = jax.lax.stop_gradient(sample.burn_cq2_tgt)
         _, (
             losses,
             disc_losses,
@@ -4089,8 +4084,7 @@ def create_iqlearn(
                     log_std_h = jnp.tanh(dist_T_h[..., action_dim:])
                     log_std_h = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std_h + 1)
                     std_h = jnp.exp(log_std_h)
-                    noise = jax.random.normal(key_v, (_bs, action_dim))
-                    noise_T = jnp.broadcast_to(noise[:, None, :], mean_h.shape)
+                    noise_T = jax.random.normal(key_v, (_bs, SL_static, action_dim))
                     u_T = noise_T * std_h + mean_h
                     y_T = jnp.tanh(u_T)
                     log_prob_T = (

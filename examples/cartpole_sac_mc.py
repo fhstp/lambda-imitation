@@ -91,13 +91,13 @@ parser.add_argument(
 )
 parser.add_argument(
     "--burn-in-from-stored-carry",
-    action="store",
+    action="store_true",
     default=False,
     help="set stored carry for burn-in (default: False)",
 )
 parser.add_argument(
     "--refresh-stored-carries",
-    action="store",
+    action="store_true",
     default=False,
     help="refresh stored carries each round (default: False)",
 )
