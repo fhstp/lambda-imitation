@@ -3804,12 +3804,6 @@ def create_iqlearn(
             burn_trunk = sample.burn_trunk
             seq_idx = sample.seq_idx
 
-            use_disc_loss = (
-                mc_critic_head_target is not None
-                and trunk_target is not None
-                and params.lambda_discrepancy_coef > 0.0
-            )
-
             critic_head_sg = jax.tree.map(jax.lax.stop_gradient, critic_head)
 
             xs = (
@@ -3874,43 +3868,7 @@ def create_iqlearn(
 
                 step_loss = -(v * jnp.reshape(mask_t, -1)).mean()
 
-                if use_disc_loss:
-                    # Lambda-discrepancy: pull (Q_sac + α·H) toward Q_mc
-                    if is_discrete:
-                        q_sac = jnp.minimum(qs_t[..., 0], qs_t[..., 1])
-                        ai = jnp.round(act_t.reshape(-1)).astype(jnp.int32)
-                        q_sac_act = q_sac[jnp.arange(obs_t.shape[0]), ai]
-                        _, mc_qs_t = run_trunk_critic(
-                            jax.tree.map(jax.lax.stop_gradient, trunk_target),
-                            jax.tree.map(jax.lax.stop_gradient, mc_critic_head_target),
-                            obs_t, carry=mc_q_carry, use_mc=True
-                        )
-                        q_mc_act = jnp.minimum(mc_qs_t[..., 0], mc_qs_t[..., 1])[
-                            jnp.arange(obs_t.shape[0]), ai
-                        ]
-                        new_mc_q_carry = mc_q_carry  # identity-like update for carry
-                    else:
-                        q_sac_act = jnp.minimum(qs_t[:, 0], qs_t[:, 1])
-                        _, mc_qs_t = run_trunk_critic(
-                            jax.tree.map(jax.lax.stop_gradient, trunk_target),
-                            jax.tree.map(jax.lax.stop_gradient, mc_critic_head_target),
-                            obs_t, a, carry=mc_q_carry, use_mc=True
-                        )
-                        q_mc_act = jnp.minimum(mc_qs_t[:, 0], mc_qs_t[:, 1])
-                        new_mc_q_carry = mc_q_carry
-
-                    H = entropy
-                    delta = (
-                        jax.lax.stop_gradient(q_sac_act)
-                        + alpha * H
-                        - jax.lax.stop_gradient(q_mc_act)
-                    )
-                    disc = optax.losses.huber_loss(delta, delta=params.lambda_discrepancy_delta)
-                    disc_loss = (disc * jnp.reshape(mask_t, -1)).mean()
-                    step_loss = step_loss + params.lambda_discrepancy_coef * disc_loss
-                    metrics_step["disc/loss"] = disc_loss
-                else:
-                    new_mc_q_carry = mc_q_carry
+                new_mc_q_carry = mc_q_carry
 
                 return (new_actor_carry, new_mc_q_carry), (
                     step_loss,
