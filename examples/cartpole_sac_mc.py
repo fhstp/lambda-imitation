@@ -352,12 +352,38 @@ for rnd in tqdm(range(1, args.rounds + 1)):
     )
     cmp_obs = state.online_buffer.info["observations"][cmp_idx]
     cmp_actions = state.online_buffer.info["actions"][cmp_idx]
-    entropy = debug_fns.get_entropy(state.actor, cmp_obs, entropy_key)
-    q_sac = (
-        debug_fns.get_q(state.critic_target, cmp_obs, cmp_actions, False)
-        + state.alpha * entropy
-    )
-    q_mc = debug_fns.get_q(state.mc_critic_target, cmp_obs, cmp_actions, True)
+    if args.trunk:
+        # In trunk mode the legacy state.actor / state.critic_target /
+        # state.mc_critic_target objects are frozen at init and never updated;
+        # the learned weights live in the trunk + head pytrees. Use the
+        # trunk-aware debug helpers so the printed Qs reflect actual learning.
+        entropy = debug_fns.get_entropy_trunk(
+            state.trunk, state.actor_head, cmp_obs, entropy_key
+        )
+        q_sac = (
+            debug_fns.get_q_trunk(
+                state.trunk_target,
+                state.critic_head_target,
+                cmp_obs,
+                cmp_actions,
+                False,
+            )
+            + state.alpha * entropy
+        )
+        q_mc = debug_fns.get_q_trunk(
+            state.trunk_target,
+            state.mc_critic_head_target,
+            cmp_obs,
+            cmp_actions,
+            True,
+        )
+    else:
+        entropy = debug_fns.get_entropy(state.actor, cmp_obs, entropy_key)
+        q_sac = (
+            debug_fns.get_q(state.critic_target, cmp_obs, cmp_actions, False)
+            + state.alpha * entropy
+        )
+        q_mc = debug_fns.get_q(state.mc_critic_target, cmp_obs, cmp_actions, True)
 
     disc_loss = float(metrics.get("disc/loss", 0.0))
     q_delta_abs = jnp.abs(q_sac - q_mc)

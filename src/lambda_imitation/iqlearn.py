@@ -653,6 +653,13 @@ class DebugFunctions(NamedTuple):
     get_entropy: Callable
     run_actor_scan: Callable
     run_critic_scan: Callable
+    # Trunk-mode helpers — only populated when use_shared_trunk=True.
+    # ``get_q_trunk(trunk, critic_head, obs, actions, use_mc)`` evaluates
+    # min-Q via the shared trunk path. ``get_entropy_trunk(trunk, actor_head,
+    # obs, key)`` evaluates policy entropy. Both build a zero trunk carry
+    # and call the trunk forward once. ``None`` in non-trunk mode.
+    get_q_trunk: Callable | None = None
+    get_entropy_trunk: Callable | None = None
 
 
 class SequenceSample(NamedTuple):
@@ -3879,43 +3886,11 @@ def create_iqlearn(
 
                 step_loss = -(v * jnp.reshape(mask_t, -1)).mean()
 
-                if use_disc_loss:
-                    # Lambda-discrepancy: pull (Q_sac + α·H) toward Q_mc
-                    if is_discrete:
-                        q_sac = jnp.minimum(qs_t[..., 0], qs_t[..., 1])
-                        ai = jnp.round(act_t.reshape(-1)).astype(jnp.int32)
-                        q_sac_act = q_sac[jnp.arange(obs_t.shape[0]), ai]
-                        _, mc_qs_t = run_trunk_critic(
-                            jax.tree.map(jax.lax.stop_gradient, trunk_target),
-                            jax.tree.map(jax.lax.stop_gradient, mc_critic_head_target),
-                            obs_t, carry=mc_q_carry, use_mc=True
-                        )
-                        q_mc_act = jnp.minimum(mc_qs_t[..., 0], mc_qs_t[..., 1])[
-                            jnp.arange(obs_t.shape[0]), ai
-                        ]
-                        new_mc_q_carry = mc_q_carry  # identity-like update for carry
-                    else:
-                        q_sac_act = jnp.minimum(qs_t[:, 0], qs_t[:, 1])
-                        _, mc_qs_t = run_trunk_critic(
-                            jax.tree.map(jax.lax.stop_gradient, trunk_target),
-                            jax.tree.map(jax.lax.stop_gradient, mc_critic_head_target),
-                            obs_t, a, carry=mc_q_carry, use_mc=True
-                        )
-                        q_mc_act = jnp.minimum(mc_qs_t[:, 0], mc_qs_t[:, 1])
-                        new_mc_q_carry = mc_q_carry
-
-                    H = entropy
-                    delta = (
-                        jax.lax.stop_gradient(q_sac_act)
-                        + alpha * H
-                        - jax.lax.stop_gradient(q_mc_act)
-                    )
-                    disc = optax.losses.huber_loss(delta, delta=params.lambda_discrepancy_delta)
-                    disc_loss = (disc * jnp.reshape(mask_t, -1)).mean()
-                    step_loss = step_loss + params.lambda_discrepancy_coef * disc_loss
-                    metrics_step["disc/loss"] = disc_loss
-                else:
-                    new_mc_q_carry = mc_q_carry
+                # Following Allen et al. 2024, the λ-discrepancy auxiliary
+                # loss is critic-only; the actor uses its standard SAC
+                # objective with no disc gradient. Keep mc_q_carry for the
+                # scan signature.
+                new_mc_q_carry = mc_q_carry
 
                 return (new_actor_carry, new_mc_q_carry), (
                     step_loss,
@@ -4060,7 +4035,13 @@ def create_iqlearn(
                 "debug/sac_q_twin_gap_mean": jnp.abs(q1[:, :-1] - q2[:, :-1]).mean(),
             }
 
-            # Lambda-discrepancy (trunk critic)
+            # Lambda-discrepancy (trunk critic) — V-MSE form following
+            # Allen et al. 2024 (NeurIPS): compares state-value V_sac(s) vs
+            # V_mc(s), both computed under the target policy. The α·H entropy
+            # adjustment cancels (same on both sides), leaving:
+            #   delta = E_π_target[Q_sac(s,a)] − E_π_target[Q_mc(s,a)]
+            # where Q_sac uses the *online* SAC critic (gradient flows) and
+            # Q_mc uses the target MC critic (sg).
             if mc_critic_head_target is not None and params.lambda_discrepancy_coef > 0.0:
                 mc_hd_sg = jax.tree.map(jax.lax.stop_gradient, mc_critic_head_target)
                 _, q_mc_twin_T = run_trunk_critic_scan(
@@ -4068,31 +4049,57 @@ def create_iqlearn(
                     use_mc=True,
                     initial_carry=burn_trunk_tgt_sg,
                 )
-                if is_discrete:
-                    q_mc = jnp.minimum(
-                        q_mc_twin_T[bi, ti, ai, 0], q_mc_twin_T[bi, ti, ai, 1]
-                    )
-                else:
-                    q_mc = jnp.minimum(q_mc_twin_T[..., 0], q_mc_twin_T[..., 1])
 
-                # Entropy H using actor_head_target + trunk_target
+                # Target-actor distribution params, sg.
                 _, dist_T_h = run_trunk_actor_scan(
                     trunk_target_sg, actor_head_target_sg, obs,
                     burn_trunk_tgt_sg
                 )
+                dist_T_h_sg = jax.lax.stop_gradient(dist_T_h)
+
                 if is_discrete:
-                    probs_h = jax.nn.softmax(dist_T_h, axis=-1)
-                    log_probs_h = jax.nn.log_softmax(dist_T_h, axis=-1)
+                    # Per-action min-Q under online SAC critic (gradient flows)
+                    # and target MC critic (sg). Take expectation under target π.
+                    q_sac_full = jnp.minimum(q_twin_T[..., 0], q_twin_T[..., 1])  # (B, SL, A)
+                    q_mc_full = jax.lax.stop_gradient(
+                        jnp.minimum(q_mc_twin_T[..., 0], q_mc_twin_T[..., 1])
+                    )
+                    probs_h = jax.nn.softmax(dist_T_h_sg, axis=-1)
+                    V_sac = (probs_h * q_sac_full).sum(-1)  # (B, SL)
+                    V_mc = (probs_h * q_mc_full).sum(-1)
+                    delta = V_sac - V_mc
+                    # Diagnostic-only entropy.
+                    log_probs_h = jax.nn.log_softmax(dist_T_h_sg, axis=-1)
                     H = -(probs_h * log_probs_h).sum(-1)
                 else:
-                    mean_h = dist_T_h[..., :action_dim]
-                    log_std_h = jnp.tanh(dist_T_h[..., action_dim:])
+                    # Continuous: sample one action from target π, evaluate
+                    # both critics at that sample. Online SAC critic carries
+                    # gradient; target MC critic is sg. αH cancels.
+                    mean_h = dist_T_h_sg[..., :action_dim]
+                    log_std_h = jnp.tanh(dist_T_h_sg[..., action_dim:])
                     log_std_h = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std_h + 1)
                     std_h = jnp.exp(log_std_h)
-                    noise = jax.random.normal(key_v, (_bs, action_dim))
-                    noise_T = jnp.broadcast_to(noise[:, None, :], mean_h.shape)
-                    u_T = noise_T * std_h + mean_h
+                    noise = jax.random.normal(key_v, mean_h.shape)
+                    u_T = noise * std_h + mean_h
                     y_T = jnp.tanh(u_T)
+                    a_sampled = y_T * action_scale + action_bias  # (B, SL, action_dim)
+
+                    # Online SAC critic at sampled action — gradient flows.
+                    _, q_sac_twin_samp = run_trunk_critic_scan(
+                        trunk, critic_head, obs, a_sampled,
+                        initial_carry=burn_trunk,
+                    )
+                    V_sac = jnp.minimum(q_sac_twin_samp[..., 0], q_sac_twin_samp[..., 1])
+
+                    # Target MC critic at sampled action — sg.
+                    _, q_mc_twin_samp = run_trunk_critic_scan(
+                        trunk_target_sg, mc_hd_sg, obs, a_sampled,
+                        use_mc=True, initial_carry=burn_trunk_tgt_sg,
+                    )
+                    V_mc = jax.lax.stop_gradient(
+                        jnp.minimum(q_mc_twin_samp[..., 0], q_mc_twin_samp[..., 1])
+                    )
+                    delta = V_sac - V_mc
                     log_prob_T = (
                         -((u_T - mean_h) ** 2) / (2 * std_h**2)
                         - 0.5 * jnp.log(2 * jnp.pi)
@@ -4101,12 +4108,6 @@ def create_iqlearn(
                     ).sum(-1)
                     H = -log_prob_T
 
-                q_sac = jnp.minimum(q1, q2)
-                delta = (
-                    q_sac
-                    + alpha * jax.lax.stop_gradient(H)
-                    - jax.lax.stop_gradient(q_mc)
-                )
                 disc = optax.losses.huber_loss(delta, delta=params.lambda_discrepancy_delta)
                 disc_loss = (disc * mask).sum() / jnp.maximum(mask.sum(), 1.0)
                 loss = loss + params.lambda_discrepancy_coef * disc_loss
@@ -4115,8 +4116,8 @@ def create_iqlearn(
                 m_denom = jnp.maximum(mask.sum(), 1.0)
                 metrics["disc/delta_abs_mean"] = (jnp.abs(delta) * mask).sum() / m_denom
                 metrics["disc/delta_abs_max"] = jnp.abs(delta).max()
-                metrics["disc/q_sac_mean"] = (q_sac * mask).sum() / m_denom
-                metrics["disc/q_mc_mean"] = (q_mc * mask).sum() / m_denom
+                metrics["disc/v_sac_mean"] = (V_sac * mask).sum() / m_denom
+                metrics["disc/v_mc_mean"] = (V_mc * mask).sum() / m_denom
                 metrics["disc/entropy_mean"] = (H * mask).sum() / m_denom
 
             if params.refresh_stored_carries:
@@ -4262,48 +4263,100 @@ def create_iqlearn(
 
                 disc_step = jnp.float32(0.0)
                 if use_disc:
-                    _, qs_sac_tgt = run_trunk_critic(
-                        trunk_target_sg,
-                        critic_head_target_sg,
-                        obs_t,
-                        act_t if not is_discrete else None,
-                        carry=sac_tgt_carry_sg,
-                    )
-                    new_sac_tgt_carry, _ = run_trunk_critic(
-                        trunk_target_sg,
-                        critic_head_target_sg,
-                        obs_t,
-                        act_t if not is_discrete else None,
-                        carry=sac_tgt_carry_sg,
-                    )
-                    new_sac_tgt_carry = new_sac_tgt_carry
-                    if is_discrete:
-                        ai_t2 = jnp.round(act_t.reshape(-1)).astype(jnp.int32)
-                        q_sac_act = jnp.minimum(
-                            qs_sac_tgt[jnp.arange(obs_t.shape[0]), ai_t2, 0],
-                            qs_sac_tgt[jnp.arange(obs_t.shape[0]), ai_t2, 1]
-                        )
-                    else:
-                        q_sac_act = jnp.minimum(qs_sac_tgt[:, 0], qs_sac_tgt[:, 1])
+                    # V-MSE form (Allen et al. 2024): compare V_sac(s) vs V_mc(s)
+                    # under target policy. Online MC critic carries gradient;
+                    # target SAC critic is sg. αH cancels (same on both sides).
                     _, logits_act = run_trunk_actor(
                         trunk_target_sg, actor_head_target_sg, obs_t, actor_carry_sg
                     )
+                    logits_act_sg = jax.lax.stop_gradient(logits_act)
+
                     if is_discrete:
-                        probs_a = jax.nn.softmax(logits_act)
-                        lp_a = jax.nn.log_softmax(logits_act)
+                        # Per-action min-Q for both critics. Online MC: gradient
+                        # flows. Target SAC: sg. Take expectation under target π.
+                        _, qs_sac_tgt = run_trunk_critic(
+                            trunk_target_sg,
+                            critic_head_target_sg,
+                            obs_t,
+                            None,
+                            carry=sac_tgt_carry_sg,
+                        )
+                        new_sac_tgt_carry = run_trunk_critic(
+                            trunk_target_sg,
+                            critic_head_target_sg,
+                            obs_t,
+                            None,
+                            carry=sac_tgt_carry_sg,
+                        )[0]
+
+                        q_mc_full = jnp.minimum(qs_online[..., 0], qs_online[..., 1])  # (B, A) — gradient
+                        q_sac_full = jax.lax.stop_gradient(
+                            jnp.minimum(qs_sac_tgt[..., 0], qs_sac_tgt[..., 1])
+                        )
+                        probs_a = jax.nn.softmax(logits_act_sg)
+                        V_mc_step = (probs_a * q_mc_full).sum(-1)
+                        V_sac_step = (probs_a * q_sac_full).sum(-1)
+                        delta = jax.lax.stop_gradient(V_sac_step) - V_mc_step
+                        # Diagnostic-only entropy.
+                        lp_a = jax.nn.log_softmax(logits_act_sg)
                         H_t = -(probs_a * lp_a).sum(-1)
                     else:
-                        std_a = jnp.exp(LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (jnp.tanh(logits_act[:, action_dim:]) + 1))
-                        u_a = jax.random.normal(k_step, logits_act[:, :action_dim].shape) * std_a + logits_act[:, :action_dim]
+                        # Continuous: sample action from target actor, eval both
+                        # critics at sample. Online MC carries gradient; target
+                        # SAC is sg.
+                        std_a = jnp.exp(
+                            LOG_STD_MIN
+                            + 0.5
+                            * (LOG_STD_MAX - LOG_STD_MIN)
+                            * (jnp.tanh(logits_act_sg[:, action_dim:]) + 1)
+                        )
+                        u_a = (
+                            jax.random.normal(k_step, logits_act_sg[:, :action_dim].shape)
+                            * std_a
+                            + logits_act_sg[:, :action_dim]
+                        )
                         y_a = jnp.tanh(u_a)
+                        a_sampled = y_a * action_scale + action_bias
+
+                        # Online MC critic at sampled action — gradient flows.
+                        new_mc_q_carry_disc, qs_mc_samp = run_trunk_critic(
+                            trunk,
+                            mc_critic_head,
+                            obs_t,
+                            a_sampled,
+                            use_mc=True,
+                            carry=mc_q_carry_sg,
+                        )
+                        V_mc_step = jnp.minimum(qs_mc_samp[:, 0], qs_mc_samp[:, 1])
+
+                        # Target SAC critic at sampled action — sg.
+                        _, qs_sac_samp = run_trunk_critic(
+                            trunk_target_sg,
+                            critic_head_target_sg,
+                            obs_t,
+                            a_sampled,
+                            carry=sac_tgt_carry_sg,
+                        )
+                        V_sac_step = jax.lax.stop_gradient(
+                            jnp.minimum(qs_sac_samp[:, 0], qs_sac_samp[:, 1])
+                        )
+
+                        new_sac_tgt_carry, _ = run_trunk_critic(
+                            trunk_target_sg,
+                            critic_head_target_sg,
+                            obs_t,
+                            a_sampled,
+                            carry=sac_tgt_carry_sg,
+                        )
+
+                        delta = V_sac_step - V_mc_step
                         H_t = -(
-                            -((u_a - logits_act[:, :action_dim]) ** 2) / (2 * std_a**2)
+                            -((u_a - logits_act_sg[:, :action_dim]) ** 2) / (2 * std_a**2)
                             - 0.5 * jnp.log(2 * jnp.pi)
                             - jnp.log(std_a)
                             - jnp.log(action_scale * (1 - y_a**2) + 1e-6)
                         ).sum(-1)
-                    q_mc_min = jnp.minimum(q1, q2)
-                    delta = jax.lax.stop_gradient(q_sac_act + alpha * H_t) - q_mc_min
+
                     disc = optax.losses.huber_loss(delta, delta=params.lambda_discrepancy_delta)
                     disc_step = (disc * coefs * mask_t).mean()
                     loss_step = loss_step + params.lambda_discrepancy_coef * disc_step
@@ -5541,6 +5594,60 @@ def create_iqlearn(
             batch = obs.shape[0]
             return get_entropy(actor, obs, _make_actor_carry(batch), key)
 
+        # Trunk-mode debug helpers — close over run_trunk_actor /
+        # run_trunk_critic / _make_trunk_carry which only exist in trunk mode.
+        if use_shared_trunk:
+            def _debug_get_q_trunk(trunk, critic_head, obs, actions, use_mc=False):
+                batch = obs.shape[0]
+                trunk_carry = _make_trunk_carry(batch)
+                _, qs = run_trunk_critic(
+                    trunk,
+                    critic_head,
+                    obs,
+                    actions if not is_discrete else None,
+                    use_mc=use_mc,
+                    carry=trunk_carry,
+                )
+                if is_discrete:
+                    ai = jnp.round(actions.reshape(-1)).astype(jnp.int32)
+                    bi = jnp.arange(batch)
+                    q1 = qs[bi, ai, 0]
+                    q2 = qs[bi, ai, 1]
+                else:
+                    q1 = qs[:, 0]
+                    q2 = qs[:, 1]
+                return jnp.minimum(q1, q2)
+
+            def _debug_get_entropy_trunk(trunk, actor_head, obs, key):
+                batch = obs.shape[0]
+                trunk_carry = _make_trunk_carry(batch)
+                _, logits_or_params = run_trunk_actor(
+                    trunk, actor_head, obs, trunk_carry
+                )
+                if is_discrete:
+                    probs = jax.nn.softmax(logits_or_params)
+                    log_probs = jax.nn.log_softmax(logits_or_params)
+                    return -(probs * log_probs).sum(-1)
+                else:
+                    mean = logits_or_params[..., :action_dim]
+                    log_std = jnp.tanh(logits_or_params[..., action_dim:])
+                    log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (
+                        log_std + 1
+                    )
+                    std = jnp.exp(log_std)
+                    u = jax.random.normal(key, mean.shape) * std + mean
+                    y = jnp.tanh(u)
+                    log_prob = (
+                        -((u - mean) ** 2) / (2 * std**2)
+                        - 0.5 * jnp.log(2 * jnp.pi)
+                        - jnp.log(std)
+                        - jnp.log(action_scale * (1 - y**2) + 1e-6)
+                    ).sum(-1)
+                    return -log_prob
+        else:
+            _debug_get_q_trunk = None
+            _debug_get_entropy_trunk = None
+
         return (
             iqlearn,
             fns,
@@ -5551,6 +5658,8 @@ def create_iqlearn(
                 _debug_get_entropy,
                 run_actor_scan,
                 run_critic_scan,
+                get_q_trunk=_debug_get_q_trunk,
+                get_entropy_trunk=_debug_get_entropy_trunk,
             ),
         )
     return (iqlearn, fns, graphs)
