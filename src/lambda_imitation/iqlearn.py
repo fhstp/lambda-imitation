@@ -2840,6 +2840,140 @@ def create_iqlearn(
         td = (1.0 - params.lam) * jnp.sum(lambdas[None, :] * rn, axis=1)
         return td, p_k, final_a, final_q1, final_q2
 
+    def calculate_td_lambda_trunk(
+        trunk: "TrunkState",
+        actor_head: "HeadState",
+        mc_critic_head: "TwinHeadState",
+        alpha: jax.Array,
+        key: jax.Array,
+        obs_seq: jax.Array,
+        action_seq: jax.Array,
+        behaviour_seq: jax.Array,
+        reward_seq: jax.Array,
+        done_seq: jax.Array,
+        trunk_carry,
+    ):
+        """Trunk-mode counterpart to :func:`calculate_td_lambda`.
+
+        Mirrors the V-trace TD(λ) computation but feeds observations through
+        a single shared trunk that drives both the actor head and the MC
+        critic head.  The returned ``td`` is the same TD(λ) cumulant; the
+        only difference is that there is one trunk carry rather than three
+        independent (actor / Q1 / Q2) carries.
+
+        Args mirror the non-trunk version, except ``actor`` / ``critic`` are
+        replaced by ``trunk`` + ``actor_head`` + ``mc_critic_head`` and the
+        three input carries by the single ``trunk_carry``.
+
+        Returns ``(td, p_k, final_trunk_carry)``.
+        """
+        N1 = params.lambda_truncation + 1
+        batch = obs_seq.shape[0]
+
+        obs_T = jnp.swapaxes(obs_seq, 0, 1)
+        act_T = jnp.swapaxes(action_seq, 0, 1)
+        beh_T = jnp.swapaxes(behaviour_seq, 0, 1)
+        done_T = jnp.swapaxes(done_seq, 0, 1)
+
+        def reset_on_done(c, done_t):
+            d = done_t.reshape((-1,) + (1,) * (c.ndim - 1))
+            return jnp.where(d, jnp.zeros_like(c), c)
+
+        def step(carries, xs):
+            t_carry, key_c = carries
+            obs_t, act_t, beh_t, done_t = xs
+            key_c, k_ent, k_v = jax.random.split(key_c, 3)
+
+            # One trunk forward feeds both actor head and MC critic head.
+            new_trunk_carry, logits = run_trunk_actor(
+                trunk, actor_head, obs_t, t_carry
+            )
+            _, qs = run_trunk_critic(
+                trunk,
+                mc_critic_head,
+                obs_t,
+                act_t if not is_discrete else None,
+                use_mc=True,
+                carry=t_carry,
+            )
+
+            if is_discrete:
+                probs = jax.nn.softmax(logits)
+                log_probs = jax.nn.log_softmax(logits)
+                q_min = jnp.minimum(qs[..., 0], qs[..., 1])  # (B, A)
+                ent_t = -(probs * log_probs).sum(-1)
+                v_t = (probs * q_min).sum(-1) + alpha * ent_t
+                idx = act_t.reshape(-1).astype(jnp.int32)
+                pi_a = probs[jnp.arange(idx.shape[0]), idx]
+                c_t = pi_a / beh_t
+            else:
+                mean = logits[..., :action_dim]
+                log_std = jnp.tanh(logits[..., action_dim:])
+                log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (
+                    log_std + 1
+                )
+                std = jnp.exp(log_std)
+                # Sample action for V (matches per-step sampling in non-trunk).
+                u = jax.random.normal(k_v, mean.shape) * std + mean
+                y = jnp.tanh(u)
+                a = y * action_scale + action_bias
+                log_prob_sampled = (
+                    -((u - mean) ** 2) / (2 * std**2)
+                    - 0.5 * jnp.log(2 * jnp.pi)
+                    - jnp.log(std)
+                    - jnp.log(action_scale * (1 - y**2) + 1e-6)
+                ).sum(-1)
+                # V uses sampled action — re-query critic with that action.
+                _, qs_sampled = run_trunk_critic(
+                    trunk, mc_critic_head, obs_t, a, use_mc=True, carry=t_carry
+                )
+                q_v = jnp.minimum(qs_sampled[:, 0], qs_sampled[:, 1])
+                v_t = q_v - alpha * log_prob_sampled
+                ent_t = -log_prob_sampled
+                # Importance ratio uses the *stored* unsquashed action.
+                u_stored = act_t  # pre-tanh, behaviour sample
+                y_stored = jnp.tanh(u_stored)
+                log_prob_stored = (
+                    -((u_stored - mean) ** 2) / (2 * std**2)
+                    - 0.5 * jnp.log(2 * jnp.pi)
+                    - jnp.log(std)
+                    - jnp.log(action_scale * (1 - y_stored**2) + 1e-6)
+                ).sum(-1)
+                c_t = jnp.exp(log_prob_stored) / beh_t
+
+            new_trunk_carry = reset_on_done(new_trunk_carry, done_t)
+            return (new_trunk_carry, key_c), (c_t, ent_t, v_t)
+
+        (final_trunk_carry, _), (c_k_T, ent_T, v_T) = jax.lax.scan(
+            step,
+            (trunk_carry, key),
+            (obs_T, act_T, beh_T, done_T),
+        )
+
+        c_k = jnp.swapaxes(c_k_T, 0, 1)  # (batch, N+1)
+        ent = jnp.swapaxes(ent_T, 0, 1)
+        v = jnp.swapaxes(v_T, 0, 1)
+
+        p_k = jnp.clip(jnp.prod(c_k, axis=1), max=1.0)
+
+        gammas = params.gamma ** jnp.arange(N1)
+        lambdas = params.lam ** jnp.arange(params.lambda_truncation)
+
+        cum_term = jnp.maximum.accumulate(
+            done_seq[:, :-1].astype(jnp.float32), axis=1
+        )
+        leading = jnp.zeros((batch, 1), dtype=jnp.float32)
+        done_mask = 1.0 - jnp.concatenate([leading, cum_term], axis=1)
+
+        rewards_adj = reward_seq[:, :-1] + alpha * ent[:, :-1]
+        rn = jnp.cumsum(
+            gammas[:-1][None, :] * rewards_adj * done_mask[:, :-1], axis=1
+        )
+        rn = rn + gammas[1:][None, :] * done_mask[:, 1:] * v[:, 1:]
+
+        td = (1.0 - params.lam) * jnp.sum(lambdas[None, :] * rn, axis=1)
+        return td, p_k, final_trunk_carry
+
     def loss_alpha(log_alpha: jax.Array, log_pi: jax.Array) -> jax.Array:
         """Entropy temperature loss.
 
@@ -4068,54 +4202,25 @@ def create_iqlearn(
                 write_head = online_buf.pos % buf_size
                 td_done = jnp.where(td_idx == write_head, 1.0, td_done)
 
-                # Use standard calculate_td_lambda with trunk-based carries
-                # We need actor + mc_critic_target carries for calculate_td_lambda.
-                # The function uses sac.actor (NetworkState) — but in trunk mode we
-                # proxy: we'll use the existing calculate_td_lambda which expects
-                # NetworkState args. We can't easily patch that, so for trunk mode
-                # we use a simplified 1-step TD bootstrap instead when the trunk
-                # is active and calculate_td_lambda is not directly usable.
-                # As a pragmatic choice: call get_v via trunk-based helper.
-
-                # Bootstrap V at start of look-ahead window
-                # V(s_t) using trunk_target + mc_critic_head_target
-                _, qs_boot = run_trunk_critic(
+                # Multi-step V-trace TD(λ) target via the trunk-aware helper.
+                # Uses target trunk + actor_head_target + mc_critic_head_target
+                # so the bootstrap and IS ratios are computed under the EMA
+                # target networks. The target carry threads from mc_tgt_carry.
+                td, p_k, _ = calculate_td_lambda_trunk(
                     trunk_target_sg,
+                    actor_head_target_sg,
                     mc_critic_head_target_sg,
-                    td_obs[:, 0],
-                    td_act[:, 0] if not is_discrete else None,
-                    use_mc=True,
-                    carry=mc_tgt_carry_sg,
+                    alpha,
+                    k_td,
+                    td_obs,
+                    td_act,
+                    td_beh,
+                    td_rew,
+                    td_done,
+                    mc_tgt_carry_sg,
                 )
-                new_actor_carry_td, logits_boot = run_trunk_actor(
-                    trunk_target_sg, actor_head_target_sg, td_obs[:, 0], actor_carry_sg
-                )
-                if is_discrete:
-                    probs_b = jax.nn.softmax(logits_boot)
-                    lp_b = jax.nn.log_softmax(logits_boot)
-                    v_boot = (probs_b * jnp.minimum(qs_boot[..., 0], qs_boot[..., 1])).sum(-1) + alpha * -(probs_b * lp_b).sum(-1)
-                else:
-                    u_b = jax.random.normal(k_td, logits_boot[:, :action_dim].shape) * jnp.exp(
-                        LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (jnp.tanh(logits_boot[:, action_dim:]) + 1)
-                    ) + logits_boot[:, :action_dim]
-                    y_b = jnp.tanh(u_b)
-                    a_b = y_b * action_scale + action_bias
-                    q_b = jnp.minimum(qs_boot[:, 0], qs_boot[:, 1])
-                    log_prob_b = (
-                        -((u_b - logits_boot[:, :action_dim]) ** 2) / (2 * jnp.exp(logits_boot[:, action_dim:]) ** 2)
-                        - 0.5 * jnp.log(2 * jnp.pi)
-                        - logits_boot[:, action_dim:]
-                        - jnp.log(action_scale * (1 - y_b**2) + 1e-6)
-                    ).sum(-1)
-                    v_boot = q_b - alpha * log_prob_b
-
-                # Simple 1-step target: r + γ(1-done)·V(s_next)
-                # (degraded to 1-step bootstrap for trunk mode — full TD-λ
-                # would require threaded trunk carries through calculate_td_lambda)
-                target_q = jax.lax.stop_gradient(
-                    td_rew[:, 0] + params.gamma * (1.0 - td_done[:, 0]) * v_boot
-                )
-                p_k = jnp.ones(obs_t.shape[0])  # IS weight = 1 (no V-trace in trunk mode)
+                target_q = jax.lax.stop_gradient(td)
+                p_k = jax.lax.stop_gradient(p_k)
 
                 # Online MC critic Q (gradient flows through mc_critic_head + trunk)
                 new_mc_q_carry, qs_online = run_trunk_critic(
@@ -4148,9 +4253,11 @@ def create_iqlearn(
                 new_mc_q_carry = reset_on_done(new_mc_q_carry, done_t)
                 new_mc_tgt_carry = reset_on_done(new_mc_tgt_carry, done_t)
 
+                # V-trace IS clipping coefficient — matches non-trunk path.
+                coefs = jax.lax.stop_gradient(p_k)
                 loss_step = 0.5 * (
-                    jnp.mean(mask_t * (q1 - target_q) ** 2)
-                    + jnp.mean(mask_t * (q2 - target_q) ** 2)
+                    jnp.mean(mask_t * coefs * (q1 - target_q) ** 2)
+                    + jnp.mean(mask_t * coefs * (q2 - target_q) ** 2)
                 )
 
                 disc_step = jnp.float32(0.0)
@@ -4198,7 +4305,7 @@ def create_iqlearn(
                     q_mc_min = jnp.minimum(q1, q2)
                     delta = jax.lax.stop_gradient(q_sac_act + alpha * H_t) - q_mc_min
                     disc = optax.losses.huber_loss(delta, delta=params.lambda_discrepancy_delta)
-                    disc_step = (disc * mask_t).mean()
+                    disc_step = (disc * coefs * mask_t).mean()
                     loss_step = loss_step + params.lambda_discrepancy_coef * disc_step
                     new_sac_tgt_carry = reset_on_done(new_sac_tgt_carry, done_t)
                 else:
