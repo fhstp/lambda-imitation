@@ -3976,6 +3976,12 @@ def create_iqlearn(
                 loss = loss + params.lambda_discrepancy_coef * disc_loss
                 metrics["disc/loss"] = disc_loss
                 metrics["train/critic_loss"] = loss
+                m_denom = jnp.maximum(mask.sum(), 1.0)
+                metrics["disc/delta_abs_mean"] = (jnp.abs(delta) * mask).sum() / m_denom
+                metrics["disc/delta_abs_max"] = jnp.abs(delta).max()
+                metrics["disc/q_sac_mean"] = (q_sac * mask).sum() / m_denom
+                metrics["disc/q_mc_mean"] = (q_mc * mask).sum() / m_denom
+                metrics["disc/entropy_mean"] = (H * mask).sum() / m_denom
 
             if params.refresh_stored_carries:
                 B = params.burn_in_length
@@ -3993,6 +3999,7 @@ def create_iqlearn(
             trunk: TrunkState,
             trunk_target: TrunkState,
             actor_head_target: HeadState,
+            mc_critic_head_target: TwinHeadState,
             online_buf: Buffer,
             sample: SequenceSample,
             alpha: jax.Array,
@@ -4022,6 +4029,9 @@ def create_iqlearn(
 
             trunk_target_sg = jax.tree.map(jax.lax.stop_gradient, trunk_target)
             actor_head_target_sg = jax.tree.map(jax.lax.stop_gradient, actor_head_target)
+            mc_critic_head_target_sg = jax.tree.map(
+                jax.lax.stop_gradient, mc_critic_head_target
+            )
 
             use_disc = (
                 critic_head_target is not None and params.lambda_discrepancy_coef > 0.0
@@ -4066,10 +4076,10 @@ def create_iqlearn(
                 # As a pragmatic choice: call get_v via trunk-based helper.
 
                 # Bootstrap V at start of look-ahead window
-                # V(s_t) using trunk_target + mc_critic_head
+                # V(s_t) using trunk_target + mc_critic_head_target
                 _, qs_boot = run_trunk_critic(
                     trunk_target_sg,
-                    jax.tree.map(jax.lax.stop_gradient, mc_critic_head),
+                    mc_critic_head_target_sg,
                     td_obs[:, 0],
                     td_act[:, 0] if not is_discrete else None,
                     use_mc=True,
@@ -4126,7 +4136,7 @@ def create_iqlearn(
                 # Advance mc_target carry by 1 step
                 new_mc_tgt_carry, _ = run_trunk_critic(
                     trunk_target_sg,
-                    jax.tree.map(jax.lax.stop_gradient, mc_critic_head),
+                    mc_critic_head_target_sg,
                     obs_t,
                     act_t if not is_discrete else None,
                     use_mc=True, carry=mc_tgt_carry_sg,
@@ -4668,6 +4678,7 @@ def create_iqlearn(
                         sac.trunk,
                         sac.trunk_target,
                         sac.actor_head_target,
+                        sac.mc_critic_head_target,
                         sac.online_buffer,
                         shared_sample,
                         sac.alpha,
