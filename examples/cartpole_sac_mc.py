@@ -214,7 +214,7 @@ hp = Hyperparameters(
     lambda1=0.05,
     lambda2=0.8,
     lambda_truncation=30,
-    lambda_coef = args.lambda_coef,
+    lambda_coef=args.lambda_coef,
 )
 
 projection_dim = args.projection_dim if args.projection_dim > 0 else None
@@ -322,6 +322,7 @@ if args.wandb:
                 "rounds": args.rounds,
                 "train_steps": args.train_steps,
                 "seed": args.seed,
+                **hp._asdict(),
             },
         )
 
