@@ -29,6 +29,8 @@ Usage
 import argparse
 import sys
 
+from tqdm.rich import tqdm
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 parser = argparse.ArgumentParser(
@@ -38,16 +40,16 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "--rounds",
     type=int,
-    default=10,
+    default=100,
     metavar="N",
-    help="number of training rounds (default: 10)",
+    help="number of training rounds (default: 100)",
 )
 parser.add_argument(
     "--train-steps",
     type=int,
-    default=500,
+    default=1000,
     metavar="N",
-    help="env steps and gradient updates per round (default: 500)",
+    help="env steps and gradient updates per round (default: 1000)",
 )
 parser.add_argument(
     "--seed",
@@ -88,6 +90,19 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--approximate-lambda",
+    dest="approximate_lambda",
+    action="store_true",
+    help="enable the twin λ-critic branches (default)",
+)
+parser.add_argument(
+    "--no-approximate-lambda",
+    dest="approximate_lambda",
+    action="store_false",
+    help="disable the λ-critic branches and run pure SAC",
+)
+parser.set_defaults(approximate_lambda=True)
+parser.add_argument(
     "--wandb",
     action="store_true",
     help="enable Weights & Biases logging",
@@ -120,8 +135,7 @@ except ImportError:
     )
 
 from lambda_imitation.iqlearn import Hyperparameters
-from lambda_imitation.utils import (create_iqlearn_from_env,
-                                    env_spec_from_gymnax)
+from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
 # ── partial observability wrapper ─────────────────────────────────────────────
 
@@ -173,7 +187,7 @@ if args.partial:
 # ── placeholder expert buffer (never sampled — SAC only) ──────────────────────
 #
 # create_iqlearn_from_env requires a structurally valid expert buffer even when
-# only fns.train_sac() is used.  A single all-zeros transition with the minimum
+# only fns.train() is used.  A single all-zeros transition with the minimum
 # buffer_size=1 and batch_size=1 satisfies the structural constraint without
 # allocating significant memory.
 
@@ -186,10 +200,13 @@ expert_data = {
 
 hp = Hyperparameters(
     batch_size=1,  # expert buffer sampling size; never used
-    online_batch_size=256,
+    alpha=0.05,
+    online_batch_size=32,
     online_buffer_size=10_000,
-    # Christodoulou 2019 discrete target entropy: 0.98 * log(num_actions)
-    target_entropy=0.5,  # float(0.98 * math.log(spec.action_dim)),
+    sequence_length=20,
+    lambda1=0.05,
+    lambda2=0.8,
+    lambda_truncation=30,
 )
 
 projection_dim = args.projection_dim if args.projection_dim > 0 else None
@@ -211,7 +228,7 @@ state, fns, debug_fns = create_iqlearn_from_env(
     lambda1_critic_dims=(64,),
     lambda2_critic_dims=(64,),
     train_steps=args.train_steps,
-    approximate_lambda=True,
+    approximate_lambda=args.approximate_lambda,
     debug=True,
 )
 
@@ -286,18 +303,18 @@ if args.wandb:
             project=args.wandb_project,
             name=args.wandb_run_name,
             config={
-                    "env": "CartPole-v1",
-                    "algo": "SAC+lambda",
-                    "action_space": "discrete",
-                    "approximate_lambda": True,
-                    "memory_type": args.memory_type,
-                    "memory_hidden_dim": args.memory_hidden_dim,
-                    "projection_dim": projection_dim,
-                    "partial_obs": args.partial,
-                    "rounds": args.rounds,
-                    "train_steps": args.train_steps,
-                    "seed": args.seed,
-                },
+                "env": "CartPole-v1",
+                "algo": "SAC+lambda" if args.approximate_lambda else "SAC",
+                "action_space": "discrete",
+                "approximate_lambda": args.approximate_lambda,
+                "memory_type": args.memory_type,
+                "memory_hidden_dim": args.memory_hidden_dim,
+                "projection_dim": projection_dim,
+                "partial_obs": args.partial,
+                "rounds": args.rounds,
+                "train_steps": args.train_steps,
+                "seed": args.seed,
+            },
         )
 
 # ── training loop ─────────────────────────────────────────────────────────────
@@ -308,11 +325,9 @@ print(
     f"= {total_steps} total env steps."
 )
 
-for rnd in range(1, args.rounds + 1):
+for rnd in tqdm(range(1, args.rounds + 1)):
     key, train_key = jax.random.split(key)
-    state, env_state, metrics = fns.train_sac(
-        state, env, env_params, env_state, train_key
-    )
+    state, env_state, metrics = fns.train(state, env, env_params, env_state, train_key)
 
     key, eval_key = jax.random.split(key)
     mean_return = evaluate(state, eval_key, n_episodes=10)

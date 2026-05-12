@@ -1,48 +1,39 @@
-"""IQ-Learn (Inverse Q-Learning) imitation learning.
+"""SAC actor-critic with optional λ-discrepancy V-trace critics.
 
-Implements a SAC-style actor-critic whose reward signal is recovered from
-expert demonstrations via the IQ-Learn objective (Garg et al., 2021).
-Networks are split into a user-supplied *feature extractor* and an
-internally-managed *head*, so the observation-processing backbone can be
-swapped freely (MLP, CNN, transformer, …) without touching any IQ-Learn logic.
+Implements a SAC-style actor-critic agent.  When ``approximate_lambda=True``,
+two additional V-trace λ-return critics (one per λ value) are trained
+alongside the standard SAC critic; their Huber discrepancy is added to the
+joint loss as a regulariser (the "λ-discrepancy" line of work).
 
-Both **continuous** and **discrete** action spaces are supported.  Pass
-``is_discrete=True`` to :func:`create_iqlearn` to activate the discrete path,
-which uses categorical distributions and an all-actions critic (no action
-input to the critic; V(s) is computed as the exact inner product
-``Σ_a π(a|s)·Q(s,a)`` rather than via Monte-Carlo sampling).
+Networks share a single *recurrent feature extractor* (FE) — a projection
+plus optional memory cell (RNN / GRU / LSTM / identity) — and a per-role
+*head*.  The FE carry is threaded across env steps and reset on episode
+boundaries; an R2D2-style burn-in warms the carry before BPTT begins.  Both
+continuous (squashed Gaussian) and discrete (categorical, all-actions
+critic) action spaces are supported via ``is_discrete``.
 
-The twin-Q critic is implemented as two fully independent
-``(FeatureExtractor, Head)`` pairs — one per Q-branch — grouped in a
-:class:`TwinCriticState` NamedTuple.  Because ``TwinCriticState`` is a JAX
-pytree, a single optimizer operates on both branches transparently.
+The twin-Q critic is implemented as two independent ``Head`` pairs grouped
+in a :class:`TwinCriticState` NamedTuple, so a single optimizer operates on
+both branches.
 
-All state is held in immutable NamedTuples and the functional design
-(``create_iqlearn`` factory + pure ``train``/``predict`` closures) keeps the
-implementation compatible with ``jax.jit`` and ``jax.lax.scan``.
+All state is immutable NamedTuples; the functional design
+(``create_iqlearn`` factory + pure closures) keeps the loop compatible with
+``jax.jit`` and ``jax.lax.scan``.  A single ``loss_combined`` forward pass
+computes actor / critic / λ-critic / λ-discrepancy losses on one shared
+unroll; ``jax.grad(..., argnums=[0,1,2,3,4])`` distributes gradients to FE
+/ actor / critic / λ1 / λ2.
 
-Typical usage (continuous)::
+Typical usage::
 
-    rngs = nnx.Rngs(0)
-    actor_fe   = MLPFeatureExtractor(obs_dim, (256, 256), rngs=rngs)
-    critic_q1_fe = MLPFeatureExtractor(obs_dim, (256, 256), rngs=rngs)
-    critic_q2_fe = MLPFeatureExtractor(obs_dim, (256, 256), rngs=rngs)
-
-    state, fns, graphs = create_iqlearn(
-        Hyperparameters(), buffer, action_dim,
-        actor_fe, critic_q1_fe, critic_q2_fe,
+    fe = RecurrentFeatureExtractor(obs_dim, projection_dim=128,
+                                   memory_type="gru", memory_hidden_dim=128,
+                                   rngs=nnx.Rngs(0))
+    state, fns = create_iqlearn(
+        Hyperparameters(), buffer, action_dim, fe,
+        is_discrete=True, approximate_lambda=True,
     )
-    state, metrics = fns.train(state, jax.random.key(0))
-    action = fns.predict(state, obs, deterministic=True)
-
-Typical usage (discrete)::
-
-    state, fns, graphs = create_iqlearn(
-        Hyperparameters(), buffer, num_actions,
-        actor_fe, critic_q1_fe, critic_q2_fe,
-        is_discrete=True,
-    )
-    action = fns.predict(state, obs, deterministic=True)  # float32 scalar index
+    state, env_state, metrics = fns.train(state, env, env_params, env_state, key)
+    action, carry = fns.predict(state, obs, carry, deterministic=True)
 """
 
 from functools import partial
@@ -52,16 +43,8 @@ import jax
 import jax.numpy as jnp
 import optax
 from flax import nnx
-from jax.tree_util import Partial
 
-from .buffer import (
-    Buffer,
-    BufferFunctions,
-    BufferSample,
-    create_buffer,
-    create_sample,
-    create_sequence_sample,
-)
+from .buffer import Buffer, create_buffer, create_sequence_sample
 
 # Bounds for the squashed log-standard-deviation of the policy distribution.
 # The raw output is tanh-squashed and then rescaled into this range to keep
@@ -135,15 +118,16 @@ class Head(nnx.Module):
 
 
 class ExtractorState(NamedTuple):
-    """Flax NNX graph states for a feature-extractor + head pair.
+    """Flax NNX graph states for a recurrent feature extractor.
 
     Both fields are ``nnx.GraphState`` objects produced by ``nnx.split``.
     Together they form a JAX pytree, so optimizer updates and EMA target
     updates work on them transparently via ``jax.tree.map``.
 
     Attributes:
-        fe: Graph state of the feature extractor module.
-        head: Graph state of the task-specific head module.
+        fe: Graph state of the projection / feature-extraction module.
+        memory: Graph state of the recurrent memory cell (identity / RNN /
+            GRU / LSTM).
     """
 
     fe: nnx.GraphState
@@ -167,15 +151,15 @@ class TwinCriticState(NamedTuple):
 
 
 class NetworkGraphs(NamedTuple):
-    """Flax NNX graph definitions for a feature-extractor + head pair.
+    """Flax NNX graph definitions for a recurrent feature extractor.
 
-    These are the static (non-parameter) graph descriptions produced by
-    ``nnx.split`` and consumed by ``nnx.merge`` to reconstruct live modules
-    during forward passes.
+    Static (non-parameter) graph descriptions produced by ``nnx.split`` and
+    consumed by ``nnx.merge`` to reconstruct live modules during forward
+    passes.
 
     Attributes:
-        fe: Graph definition of the feature extractor.
-        head: Graph definition of the head.
+        fe: Graph definition of the projection / feature-extraction module.
+        memory: Graph definition of the recurrent memory cell.
     """
 
     fe: nnx.GraphDef
@@ -183,15 +167,11 @@ class NetworkGraphs(NamedTuple):
 
 
 class TwinCriticGraph(NamedTuple):
-    """Flax NNX graph definitions for a feature-extractor + head pair.
-
-    These are the static (non-parameter) graph descriptions produced by
-    ``nnx.split`` and consumed by ``nnx.merge`` to reconstruct live modules
-    during forward passes.
+    """Flax NNX graph definitions for both Q-branches of a twin critic.
 
     Attributes:
-        fe: Graph definition of the feature extractor.
-        head: Graph definition of the head.
+        q1: Graph definition of the first Q-branch head.
+        q2: Graph definition of the second Q-branch head.
     """
 
     q1: nnx.GraphDef
@@ -199,25 +179,36 @@ class TwinCriticGraph(NamedTuple):
 
 
 class SACState(NamedTuple):
-    """Complete, serialisable state of one IQ-Learn agent.
+    """Complete, serialisable state of one SAC (+ optional λ-critic) agent.
 
     All fields are JAX pytrees, so the entire state can be checkpointed,
     passed through ``jax.jit``, or stacked for vectorised environments.
+    The λ-critic fields (``lambda{1,2}_critic*``) are ``None`` when the
+    agent was constructed with ``approximate_lambda=False``.
 
     Attributes:
-        actor: Online actor network state (feature extractor + head).
+        feature_extractor: Online recurrent FE state (projection + memory).
+        actor: Online actor head state.
         critic: Online twin-critic state (two independent Q-branches).
-        actor_target: EMA-smoothed copy of the actor, used as a stable target
-            during critic updates.
-        critic_target: EMA-smoothed copy of the critic, used for bootstrapping
-            next-state values.
+        lambda1_critic: Online twin-critic trained with V-trace λ-return for
+            ``params.lambda1``.  ``None`` when ``approximate_lambda=False``.
+        lambda2_critic: Same, for ``params.lambda2``.
+        feature_extractor_target: EMA copy of the FE.
+        actor_target: EMA copy of the actor.
+        critic_target: EMA copy of the critic.
+        lambda1_critic_target: EMA copy of ``lambda1_critic``.
+        lambda2_critic_target: EMA copy of ``lambda2_critic``.
+        fe_optimizer_state: Optax state for the FE Adam optimiser.
         actor_optimizer_state: Optax state for the actor Adam optimiser.
         critic_optimizer_state: Optax state for the critic Adam optimiser;
             operates on the full :class:`TwinCriticState` pytree.
-        alpha_optimizer_state: Optax state for the entropy temperature optimiser.
+        lambda1_critic_optimizer_state: Optax state for the λ1-critic.
+        lambda2_critic_optimizer_state: Optax state for the λ2-critic.
+        alpha_optimizer_state: Optax state for the entropy temperature.
         alpha: Current entropy temperature (``exp(log_alpha)``).
         log_alpha: Log-space entropy temperature; directly optimised to avoid
             a positivity constraint.
+        online_buffer: Circular replay buffer of online transitions.
     """
 
     feature_extractor: ExtractorState
@@ -245,38 +236,40 @@ class SACFunctions(NamedTuple):
     """Pure functions returned by :func:`create_iqlearn`.
 
     Attributes:
-        predict: ``(state, obs, key, deterministic) -> action`` -- sample or
-            compute a deterministic action for a single observation.
-        train: ``(state, key) -> (state, metrics)`` -- run ``train_steps``
-            IQ-Learn update iterations via ``jax.lax.scan`` and return
-            averaged metrics.
-        train_sac: ``(state, env, env_params, env_state, key) ->
-            (state, env_state, metrics)`` -- collect online transitions from a
-            gymnax-compatible environment and run ``train_steps`` SAC gradient
-            updates.  ``env`` is a static (non-traced) Python object;
-            ``env_params`` and ``env_state`` are JAX pytrees.  Returns the
-            updated agent state, the new gymnax environment state (including
-            auto-resets on episode termination), and averaged metrics.
-        get_importance_ratios: ``(actor, obs, actions, behaviour_probs) ->
+        predict: ``(state, obs, carry, key, deterministic, ...) ->
+            (action, new_carry[, extra])`` -- sample or compute a
+            deterministic action for a single observation while threading
+            the recurrent FE carry.  Discrete: returns a ``float32`` action
+            index; ``return_prob=True`` additionally returns ``π(a|s)``.
+            Continuous: returns a ``(action_dim,)`` action; ``return_unsquashed
+            =True`` additionally returns the pre-tanh action.
+        train: ``(state, env, env_params, env_state, key) ->
+            (state, env_state, metrics)`` -- collect online transitions from
+            a gymnax-compatible environment and run ``train_steps`` SAC
+            gradient updates via ``jax.lax.scan``.  ``env`` is a static
+            (non-traced) Python object; ``env_params`` / ``env_state`` are
+            JAX pytrees.  If the online buffer is cold, :attr:`prefill_buffer`
+            is invoked automatically before the JIT-compiled loop runs.
+        get_importance_ratios: ``(actor, x, actions, behaviour_probs) ->
             ratios`` -- compute per-transition importance ratios
-            ``π(a|s) / b(a|s)`` for a batch of ``(obs, action)`` pairs
-            collected under a behaviour policy ``b``.  For discrete spaces,
-            ``actions`` are float32 integer indices.  For continuous spaces,
-            ``actions`` are the **unsquashed** (pre-tanh) values stored under
-            ``unsquashed_action_key`` in the online buffer.
-            ``behaviour_probs`` are probabilities (discrete) or probability
-            densities (continuous) under ``b``, shape ``(batch,)``.
+            ``π(a|s) / b(a|s)`` for a batch of ``(features, action)`` pairs
+            collected under a behaviour policy ``b``.  ``x`` is **post-FE
+            features**, not raw observations.  Discrete: ``actions`` are
+            float32 indices.  Continuous: ``actions`` are the **unsquashed**
+            (pre-tanh) values stored under ``unsquashed_action_key`` in the
+            online buffer.  ``behaviour_probs`` are probabilities (discrete)
+            or probability densities (continuous) under ``b``.
         prefill_buffer: ``(state, env, env_params, env_state, n_steps, key) ->
             (state, env_state)`` -- collect ``n_steps`` transitions using a
             uniform random policy and write them into the online buffer.
-            Discrete: action drawn uniformly from ``{0, …, action_dim-1}``,
-            ``behaviour_key = 1/action_dim``.  Continuous: ``u ~ N(0, I)``,
-            action squashed through tanh, ``behaviour_key = exp(log_prob)``
-            using the same change-of-variables as ``get_importance_ratios``.
-            The last step is force-terminated so that all ``n_steps`` written
-            slots are immediately sampleable.  Called automatically by
-            ``train_sac`` when the online buffer has fewer than
-            ``params.online_batch_size`` sampleable transitions.
+            Discrete: action ~ Uniform{0,…,action_dim-1}, ``behaviour_key =
+            1/action_dim``.  Continuous: ``u ~ N(0, I)``, action squashed
+            through tanh, ``behaviour_key = exp(log_prob)`` with the same
+            change-of-variables as :attr:`get_importance_ratios`.  The last
+            step is force-terminated so that all ``n_steps`` slots are
+            immediately sampleable.  Called automatically by :attr:`train`
+            when the online buffer has fewer than ``params.online_batch_size``
+            sampleable transitions.
     """
 
     predict: Callable
@@ -290,88 +283,85 @@ class DebugFunctions(NamedTuple):
 
     These functions expose internal computations that are useful for
     introspection and unit testing but are not required for normal training.
+    All accept **post-FE features** (latents), not raw observations — callers
+    must first run the FE to produce ``x``.
 
     Attributes:
-        calculate_td_lambda: ``(actor, mc_critic_target, online_buffer, indices) ->
-            td_returns`` -- compute a V-trace TD(λ) return estimate for each
-            index in ``indices`` (vmapped).  ``actor`` is the current
-            :class:`NetworkState` from :class:`SACState`.
-            ``mc_critic_target`` is the EMA target for the MC critic
-            (i.e. ``state.mc_critic_target``); the function uses it to
-            bootstrap Q-values.  ``online_buffer`` is the online replay
-            buffer (e.g. ``state.online_buffer``); it must contain at least
-            ``params.lambda_truncation + 1`` filled slots starting from the
-            smallest index requested.  ``indices`` is a 1-D integer array of
-            buffer start positions.  Returns a float32 array of shape
-            ``(len(indices),)``.
-        get_q: ``(critic, obs, actions, use_mc) -> q_values`` -- evaluate the
-            conservative (min over twin) Q-values for a batch of
-            ``(obs, actions)`` pairs.  Pass ``state.critic_target`` with
-            ``use_mc=False`` for the regular SAC critic; pass
-            ``state.mc_critic_target`` with ``use_mc=True`` for the MC
-            critic.  ``obs`` has shape ``(batch, *obs_shape)``; ``actions``
-            has shape ``(batch, action_dim)`` for continuous spaces or
-            ``(batch, 1)`` (float32 action indices) for discrete spaces.
-            Returns a float32 array of shape ``(batch,)``.
+        get_q: ``(critic, graph, x, actions) -> q_values`` -- evaluate the
+            conservative (min-over-twin) Q-values for a batch of
+            ``(features, action)`` pairs.  ``graph`` is the matching
+            ``TwinCriticGraph``.  ``x`` has shape ``(batch, feature_dim)``;
+            ``actions`` has shape ``(batch, action_dim)`` for continuous or
+            ``(batch, 1)`` (float32 indices) for discrete.  Returns a float32
+            array of shape ``(batch,)``.
+        get_entropy: ``(actor, x, key) -> entropy`` -- per-state policy
+            entropy under the current actor.  Returns a float32 array of
+            shape ``(batch,)``.
     """
 
-    calculate_td_lambda: Callable
     get_q: Callable
     get_entropy: Callable
 
 
 class Hyperparameters(NamedTuple):
-    """Training hyperparameters for IQ-Learn.
+    """Training hyperparameters.
 
     All fields have sensible defaults so callers only need to override what
-    differs from the standard SAC/IQ-Learn setup.
+    differs from the standard SAC setup.  λ-discrepancy fields
+    (``lambda{1,2}``, ``lambda_critic_lr``, ``c_bar``, ``rho_bar``,
+    ``lambda_truncation``, ``lambda_coef``, ``fake_onpolicy_loss``) are
+    ignored unless ``approximate_lambda=True``.
 
     Attributes:
+        fe_lr: Learning rate for the feature-extractor Adam optimiser.
         actor_lr: Learning rate for the actor Adam optimiser.
         critic_lr: Learning rate for the critic Adam optimiser.
+        lambda_critic_lr: Learning rate for each λ-critic Adam optimiser.
         alpha_lr: Learning rate for the entropy temperature Adam optimiser.
-        alpha: Initial entropy temperature.  Ignored when ``autotune_alpha``
-            is True after the first update.
+        alpha: Initial entropy temperature.  When ``autotune_alpha=True``
+            this is only the starting value.
         autotune_alpha: If True, alpha is continuously adjusted to match
-            ``target_entropy``.  If False, alpha is held fixed at its initial
-            value throughout training.
-        batch_size: Number of transitions sampled per gradient step.
+            ``target_entropy``.  If False, alpha is held fixed.
+        batch_size: Number of expert transitions sampled per gradient step
+            (reserved for the IQ-Learn objective; currently unused by the
+            SAC-only loss).
         gamma: Discount factor for future rewards.
-        regularizer_coef: Weight of the IQ-Learn soft-regularisation term
-            (``1/40`` in the original paper).
         target_entropy: Desired policy entropy used by the alpha loss.  For
             continuous spaces a common heuristic is ``-action_dim``; for
             discrete spaces ``0.98 * log(num_actions)`` (Christodoulou 2019).
-        online_buffer_size: Capacity of the circular online replay buffer used
-            by :func:`train_sac`.  Older transitions are overwritten once the
-            buffer is full.
-        online_batch_size: Number of transitions sampled per SAC gradient step.
-            :func:`create_iqlearn` pre-fills the online buffer with this many
-            random transitions so that :func:`train_sac` can update from the
-            very first call.
-        tau: Soft update coefficient for EMA target networks.  A value of
-            ``0.005`` means targets lag significantly behind online weights.
-        lam: TD(λ) mixing coefficient for the Monte-Carlo critic target.
-            ``lam=0`` collapses to a single one-step bootstrap; ``lam→1``
-            approaches a full Monte-Carlo return.  (Named ``lam`` because
-            ``lambda`` is a Python keyword.)
-        lambda_truncation: Number of look-ahead steps used when computing the
-            TD(λ) return in :func:`calculate_td_lambda`.  The function reads
-            ``lambda_truncation + 1`` consecutive slots from the online buffer
-            per target estimate, so the online buffer must hold at least that
-            many transitions.
+        online_buffer_size: Capacity of the circular online replay buffer.
+        online_batch_size: Number of sequences sampled per gradient step.
+            :func:`train` automatically pre-fills the buffer with at least
+            this many random transitions on the first call.
+        tau: Soft update coefficient for EMA target networks.
+        lambda1: First V-trace λ value (typically near 0 — short horizon).
+        lambda2: Second V-trace λ value (typically near 1 — long horizon).
+        c_bar: Truncation cap for the V-trace ``c`` correction term.
+        rho_bar: Truncation cap for the V-trace ``ρ`` TD-error weight.
+        burn_in_length: Number of leading time-steps in each sampled sequence
+            used to warm the recurrent FE carry; gradients are blocked at
+            the burn-in / unroll boundary via ``stop_gradient``.
+        sequence_length: Number of BPTT time-steps per sampled sequence
+            (post burn-in, pre λ-truncation tail).
+        lambda_truncation: Number of trailing time-steps dropped from the
+            V-trace loss to avoid biasing the λ-return by missing bootstrap
+            mass at the end of the unroll.  Each sampled sequence has total
+            length ``burn_in_length + sequence_length + lambda_truncation``.
+        lambda_coef: Multiplier on the Huber λ-discrepancy regulariser
+            ``‖Q_λ1 − Q_λ2‖`` added to the joint loss.
+        fake_onpolicy_loss: If True, set every V-trace importance ratio to
+            1.0 (i.e. assume on-policy data).  Used as an ablation.
     """
 
-    fe_lr: float = 1e-3
-    actor_lr: float = 1e-3
-    critic_lr: float = 1e-3
-    lambda_critic_lr: float = 1e-2
-    alpha_lr: float = 1e-3
-    alpha: float = 1.0
-    autotune_alpha: bool = True
+    fe_lr: float = 1e-4
+    actor_lr: float = 1e-4
+    critic_lr: float = 1e-4
+    lambda_critic_lr: float = 1e-4
+    alpha_lr: float = 1e-4
+    alpha: float = 0.2
+    autotune_alpha: bool = False
     batch_size: int = 256
     gamma: float = 0.99
-    regularizer_coef: float = 1 / 40
     target_entropy: float = -1
     online_buffer_size: int = 10_000
     online_batch_size: int = 256
@@ -382,7 +372,9 @@ class Hyperparameters(NamedTuple):
     rho_bar: float = 1.0
     burn_in_length: int = 20
     sequence_length: int = 80
-    lambda_truncation: int = 15
+    lambda_truncation: int = 30
+    lambda_coef: float = 0.2
+    fake_onpolicy_loss: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -414,9 +406,7 @@ def extract_buffer_shapes(buffer: Buffer) -> dict[str, tuple[int, ...]]:
 unsquashed_action_key = "unsquashed_actions"
 reward_key = "rewards"
 terminated_key = "terminated"
-return_key = "returns"
 behaviour_key = "behaviour_weight"
-carry_key = "carry"
 
 
 def create_iqlearn(
@@ -437,110 +427,74 @@ def create_iqlearn(
     approximate_lambda: bool = False,
     debug: bool = False,
 ) -> (
-    "Tuple[SACState, SACFunctions, IQLearnGraphs] | "
-    "Tuple[SACState, SACFunctions, IQLearnGraphs, DebugFunctions]"
+    "Tuple[SACState, SACFunctions] | "
+    "Tuple[SACState, SACFunctions, DebugFunctions]"
 ):
-    """Construct an IQ-Learn agent from a pre-filled buffer and user-supplied FEs.
+    """Construct a SAC (+ optional λ-discrepancy) agent.
 
-    The feature extractors are taken as-is (already initialised by the caller),
-    split into graph definition + parameter state via ``nnx.split``, and frozen
-    inside the returned closures.  Actor and critic heads are created internally
-    from ``actor_head_dims``/``critic_head_dims``; their input dimension is
-    inferred automatically by running a dummy forward pass through each feature
-    extractor.
+    The recurrent feature extractor is taken as-is (already initialised by
+    the caller), split into graph definition + parameter state via
+    ``nnx.split``, and frozen inside the returned closures.  Actor / critic
+    / (optional) λ-critic heads are created internally; their input
+    dimension is inferred from a dummy forward pass through the FE.  The
+    same FE is shared by all heads; each twin-Q critic still has two
+    independent heads.
 
-    The twin-Q critic is implemented as two fully independent
-    ``(FeatureExtractor, Head)`` pairs.  Pass separate, independently-seeded
-    feature extractors as ``critic_q1_feature_extractor`` and
-    ``critic_q2_feature_extractor`` so that the two Q-branches diverge from
-    the very first gradient step.
-
-    The returned ``train`` function runs ``train_steps`` gradient steps per call
-    using ``jax.lax.scan``, keeping the whole loop JIT-compiled after the first
-    invocation.
+    The returned ``train`` function runs ``train_steps`` env-step + gradient
+    iterations per call inside a single ``jax.lax.scan``, keeping the whole
+    loop JIT-compiled after the first invocation.
 
     Args:
-        params: Hyperparameters controlling learning rates, discount, alpha, etc.
-        buffer: Filled (or partially filled) replay buffer.  Must contain at
-            least ``params.batch_size`` sampleable slots before ``train`` is
-            called.
+        params: Hyperparameters controlling learning rates, discount, alpha,
+            burn-in length, λ values, etc.
+        buffer: Reference replay buffer.  Used only to extract the obs /
+            action shapes for the internal online buffer schema; its
+            contents are not consumed.
         action_dim: Number of continuous action dimensions, or number of
             discrete actions when ``is_discrete=True``.
-        actor_feature_extractor: Initialised ``nnx.Module`` that maps
-            ``(batch, *obs_shape) -> (batch, actor_feature_dim)``.  Ownership
-            is transferred; the module is split and should not be used directly
-            afterwards.
-        critic_q1_feature_extractor: Same contract as ``actor_feature_extractor``.
-            Used exclusively by the first Q-branch.
-        critic_q2_feature_extractor: Same contract as ``actor_feature_extractor``.
-            Used exclusively by the second Q-branch.  Should be initialised with
-            a different seed from ``critic_q1_feature_extractor`` to ensure the
-            two branches start with different weights.
-        obs_key: Key in ``buffer.info`` that holds observations.
-        action_key: Key in ``buffer.info`` that holds actions.
-        reward_key: Key used to store per-step scalar rewards in the online
-            buffer populated by :func:`train_sac`.  Must not clash with any
-            key already in ``buffer.info``.
-        terminated_key: Key used to store per-step episode-termination flags
-            (``float32`` 0/1) in the online buffer.  Must not clash with any
-            key already in ``buffer.info``.
+        feature_extractor: Initialised ``nnx.Module`` exposing the
+            ``feature_extractor(carry, obs) -> (new_carry, y)`` calling
+            convention and an ``initialize_carry(batch_size)`` helper (see
+            ``utils.RecurrentFeatureExtractor``).  Ownership is transferred;
+            do not use the module directly after this call.
+        obs_key: Key in the online buffer that holds observations.
+        action_key: Key in the online buffer that holds actions.
         action_scale: Per-dimension scale applied after the tanh squashing
             (continuous only).  Scalar or array of shape ``(action_dim,)``.
         action_bias: Per-dimension offset applied after the tanh squashing
             (continuous only).  Scalar or array of shape ``(action_dim,)``.
-        train_steps: Number of gradient steps executed per ``train`` call.
-        actor_head_dims: Hidden layer widths for the actor head.  Defaults to
-            ``()`` (direct linear projection from features to outputs).
-        critic_head_dims: Hidden layer widths for each critic head.  Defaults to
-            ``(256, 256)``.  Applied identically to both Q-branches.
-        is_discrete: If True, use a categorical actor and an all-actions critic.
-            The soft value V(s) is computed as the exact closed-form inner
-            product ``Σ_a π(a|s)·(Q(s,a) − α·log π(a|s))`` without sampling.
-            ``predict`` returns the action index as a ``float32`` scalar.
-            If False (default), use a squashed-Gaussian actor and a continuous
-            critic that takes actions as additional input.
-        debug: If True, return a 4-tuple whose fourth element is a
-            :class:`DebugFunctions` named tuple exposing internal computations
-            (currently: ``calculate_td_lambda`` and ``get_q``).  If False
-            (default), return the usual 3-tuple and the debug helpers are not
-            constructed.
+        train_steps: Number of (env-step + gradient) iterations per ``train``
+            call.
+        actor_dims: Hidden layer widths for the actor head.  Defaults to
+            ``()`` (direct linear projection).
+        critic_dims: Hidden layer widths for each SAC critic head.
+        lambda1_critic_dims: Hidden layer widths for each λ1-critic head.
+            Ignored when ``approximate_lambda=False``.
+        lambda2_critic_dims: Same, for the λ2-critic head.
+        is_discrete: If True, use a categorical actor and an all-actions
+            critic; the soft value is computed exactly as
+            ``Σ_a π(a|s)·(Q(s,a) − α·log π(a|s))``.  If False, use a
+            squashed-Gaussian actor and a continuous critic that takes
+            actions as additional input.
+        approximate_lambda: If True, additionally train two V-trace
+            λ-return critics (one per ``lambda{1,2}``) and add their Huber
+            discrepancy to the joint loss as a regulariser.
+        debug: If True, additionally return a :class:`DebugFunctions` named
+            tuple exposing internal helpers (``get_q``, ``get_entropy``).
 
     Returns:
-        When ``debug=False`` (default): a
-        ``(SACState, SACFunctions, IQLearnGraphs)`` triple.
-
-        When ``debug=True``: a
-        ``(SACState, SACFunctions, IQLearnGraphs, DebugFunctions)``
-        4-tuple.
-
-        - ``SACState``: initial agent state with online and target networks
-          set to the same weights.
-        - ``SACFunctions``: named tuple of ``predict`` and ``train`` closures.
-        - ``IQLearnGraphs``: static NNX graph definitions for all network modules,
-          useful for inspection or custom inference.
-        - ``DebugFunctions`` *(only when debug=True)*: named tuple of internal
-          helper functions, including ``calculate_td_lambda`` and ``get_q``.
+        When ``debug=False`` (default): a ``(SACState, SACFunctions)`` pair.
+        When ``debug=True``: a ``(SACState, SACFunctions, DebugFunctions)``
+        triple.  ``SACState`` is the initial agent state with online and
+        target networks set to the same weights; ``SACFunctions`` bundles
+        ``predict`` / ``train`` / ``get_importance_ratios`` / ``prefill_buffer``.
     """
-    assert (
-        not approximate_lambda or mc_critic_q1_feature_extractor is not None
-    ), "If approximate_lambda is set, feature extractors have to be set as well"
-    assert (
-        not approximate_lambda or mc_critic_q2_feature_extractor is not None
-    ), "If approximate_lambda is set, feature extractors have to be set as well"
-    this_keys = [obs_key, action_key]
-    next_keys = [obs_key]
-    buffer_sample = create_sample(
-        buffer.size,
-        params.batch_size,
-        this_keys=this_keys,
-        next_keys=next_keys,
-    )
-    # Online buffer: same obs/action shapes as the expert buffer, plus scalar
-    # reward and terminated fields written by run_env_step / train_sac.
+    # Online buffer: same obs/action shapes as the reference buffer, plus
+    # scalar reward / terminated / (optionally) behaviour-prob fields written
+    # by run_env_step.
     online_shapes = {
         **extract_buffer_shapes(buffer),
         reward_key: (),
-        return_key: (),
         terminated_key: (),
         behaviour_key: (),
     }
@@ -555,33 +509,38 @@ def create_iqlearn(
         online_this_keys,
         online_next_keys,
     )
-    online_buffer_sample = online_buffer_functions.sample
-    if approximate_lambda:
-        online_mc_this_keys = [obs_key, action_key, return_key, behaviour_key]
-        online_mc_next_keys = []
-        online_buffer_lambda_sample = create_sequence_sample(
-            online_buffer.size,
-            params.online_batch_size,
-            params.burn_in_length + params.sequence_length + params.lambda_truncation,
-            online_mc_this_keys,
-        )
-        # Pre-initialise every behaviour_key slot to 1.0 so that slots which
-        # have never been written by run_env_step (pre-fill and as-yet-unwritten
-        # slots) contribute an IS denominator of 1.0 rather than 0.0.
-        # Division by zero would otherwise produce NaN in calculate_td_lambda.
-        # Real transitions overwrite their slot with the true policy probability.
-        online_buffer = online_buffer._replace(
-            info={
-                **online_buffer.info,
-                behaviour_key: jnp.ones_like(online_buffer.info[behaviour_key]),
-            }
-        )
+    online_mc_this_keys = [
+        obs_key,
+        action_key,
+        reward_key,
+        terminated_key,
+        behaviour_key,
+    ]
+    online_buffer_lambda_sample = create_sequence_sample(
+        online_buffer.size,
+        params.online_batch_size,
+        params.burn_in_length + params.sequence_length + params.lambda_truncation,
+        online_mc_this_keys,
+    )
+    # Pre-initialise every behaviour_key slot to 1.0 so that slots which
+    # have never been written by run_env_step (pre-fill and as-yet-unwritten
+    # slots) contribute an IS denominator of 1.0 rather than 0.0.
+    # Division by zero would otherwise produce NaN in the V-trace loss.
+    # Real transitions overwrite their slot with the true policy probability.
+    online_buffer = online_buffer._replace(
+        info={
+            **online_buffer.info,
+            behaviour_key: jnp.ones_like(online_buffer.info[behaviour_key]),
+        }
+    )
 
-    # Infer feature dims via dummy forward pass (before split)
+    # Infer feature dims via dummy forward pass (before split).
+    # FE call returns (new_carry, y); we only need y's last dim.
     dummy_obs = jnp.zeros((1,) + buffer.info[obs_key].shape[1:])
-    feature_dim = feature_extractor(
+    _, dummy_y = feature_extractor(
         feature_extractor.initialize_carry(1), dummy_obs
-    ).shape[-1]
+    )
+    feature_dim = dummy_y.shape[-1]
 
     # Create heads — discrete and continuous differ only in output_dim and
     # whether actions are concatenated to features before the head.
@@ -606,7 +565,7 @@ def create_iqlearn(
             rngs=rngs,
         )
         if approximate_lambda:
-            lamda1_q1_critic_model = Head(
+            lambda1_q1_critic_model = Head(
                 feature_dim,
                 lambda1_critic_dims,
                 action_dim,
@@ -678,7 +637,7 @@ def create_iqlearn(
             )
 
     # Split all six modules into (graph_def, state)
-    feature_extractor_graph, feature_extractor_state = nnx.split(actor_model)
+    feature_extractor_graph, feature_extractor_state = nnx.split(feature_extractor)
     actor_graph, actor_state = nnx.split(actor_model)
     critic_q1_graph, critic_q1_state = nnx.split(critic_q1_model)
     critic_q2_graph, critic_q2_state = nnx.split(critic_q2_model)
@@ -712,7 +671,7 @@ def create_iqlearn(
             lambda2_q1_critic_graph, lambda2_q2_critic_graph
         )
 
-    # Optimizers: actor operates on NetworkState; critic on TwinCriticState.
+    # Optimizers: actor operates on its nnx.GraphState; critic on TwinCriticState.
     fe_optimizer = optax.adam(params.fe_lr)
     actor_optimizer = optax.adam(params.actor_lr)
     critic_optimizer = optax.adam(params.critic_lr)
@@ -776,8 +735,8 @@ def create_iqlearn(
     # ------------------------------------------------------------------
 
     def run_actor(actor: nnx.GraphState, x: jax.Array) -> jax.Array:
-        """Reconstruct and run the actor (FE then head) on observation batch x."""
-        head = nnx.merge(actor_graph, actor.head)
+        """Reconstruct and run the actor head on pre-extracted features x."""
+        head = nnx.merge(actor_graph, actor)
         return head(x)
 
     # ------------------------------------------------------------------
@@ -807,13 +766,14 @@ def create_iqlearn(
             x: jax.Array,
             actions: jax.Array,
         ) -> Tuple[jax.Array, jax.Array]:
-            """Per-branch Q-values for the taken action in each expert transition.
+            """Per-branch Q-values for the taken action in each transition.
 
             Args:
                 critic: Twin-critic network state.
-                x: Observation batch.
-                expert_actions: Float32 array of shape ``(batch, 1)`` holding
-                    action indices stored as floats (e.g. 0.0, 1.0, 2.0).
+                graph: Matching twin-critic graph definition.
+                x: Feature batch of shape ``(batch, feature_dim)``.
+                actions: Float32 array of action indices, shape
+                    ``(batch,)`` or ``(batch, 1)`` (e.g. 0.0, 1.0, 2.0).
 
             Returns:
                 ``(q1, q2)`` each of shape ``(batch,)``.
@@ -832,13 +792,14 @@ def create_iqlearn(
             x: jax.Array,
             actions: jax.Array,
         ) -> jax.Array:
-            """Conservative (min over twin) Q-value for each expert transition.
+            """Conservative (min over twin) Q-value for each transition.
 
             Args:
                 critic: Twin-critic network state.
-                x: Observation batch.
-                expert_actions: Float32 array of shape ``(batch, 1)`` holding
-                    action indices stored as floats (e.g. 0.0, 1.0, 2.0).
+                graph: Matching twin-critic graph definition.
+                x: Feature batch of shape ``(batch, feature_dim)``.
+                actions: Float32 array of action indices, shape
+                    ``(batch,)`` or ``(batch, 1)``.
 
             Returns:
                 Per-transition Q-value of shape ``(batch,)``.
@@ -847,7 +808,7 @@ def create_iqlearn(
             return jnp.minimum(q1, q2)
 
         def get_v(
-            actor: NetworkState,
+            actor: nnx.GraphState,
             critic: TwinCriticState,
             graph: TwinCriticGraph,
             alpha: jax.Array,
@@ -915,19 +876,25 @@ def create_iqlearn(
 
             Args:
                 iqlearn: Current agent state.
-                obs: Single observation of shape ``(*obs_shape,)`` (no batch dim).
+                obs: Single observation of shape ``(*obs_shape,)`` (no batch
+                    dim).
+                carry: Recurrent FE carry of shape ``(carry_dim,)`` from the
+                    previous step (zero at episode start).
                 key: JAX PRNG key, used only when ``deterministic=False``.
                 deterministic: If True, return the greedy (argmax) action.
                     If False, sample from the categorical policy.
+                return_prob: If True, also return ``π(a|s)`` for the selected
+                    action.
 
             Returns:
-                Action index as a ``float32`` scalar.
+                ``(action, new_carry)``, or ``(action, new_carry, prob)`` when
+                ``return_prob=True``.  ``action`` is a ``float32`` index.
             """
             obs_batch = jnp.expand_dims(obs, 0)
             carry_batch = jnp.expand_dims(carry, 0)
-            new_carry, x = nnx.merge(feature_extractor_graph, feature_extractor_state)(
-                obs_batch, carry_batch
-            )
+            new_carry, x = nnx.merge(
+                feature_extractor_graph, iqlearn.feature_extractor
+            )(carry_batch, obs_batch)
             logits = run_actor(iqlearn.actor, x)[0]  # (num_actions,)
             if deterministic:
                 action = jnp.argmax(logits)
@@ -936,12 +903,12 @@ def create_iqlearn(
             if return_prob:
                 return (
                     action.astype(jnp.float32),
-                    new_carry,
+                    new_carry[0],
                     jax.nn.softmax(logits)[action],
                 )
             return (
                 action.astype(jnp.float32),
-                new_carry,
+                new_carry[0],
             )
 
         @jax.jit
@@ -1164,25 +1131,33 @@ def create_iqlearn(
             deterministic: bool = False,
             return_unsquashed: bool = False,
         ) -> jax.Array | Tuple[jax.Array, jax.Array]:
-            """Compute an action for a single observation.
+            """Compute a continuous action for a single observation.
 
             Args:
                 iqlearn: Current agent state.
-                obs: Single observation of shape ``(*obs_shape,)`` (no batch dim).
+                obs: Single observation of shape ``(*obs_shape,)`` (no batch
+                    dim).
+                carry: Recurrent FE carry of shape ``(carry_dim,)`` from the
+                    previous step (zero at episode start).
                 key: JAX PRNG key, used only when ``deterministic=False``.
                 deterministic: If True, return the tanh-squashed policy mean
                     (no sampling noise).  If False, sample from the full
                     Gaussian policy.
+                return_unsquashed: If True, also return the pre-tanh action
+                    (needed for stored behaviour probabilities).
 
             Returns:
-                Action array of shape ``(action_dim,)``, scaled and shifted by
-                ``action_scale`` and ``action_bias``.
+                ``(action, new_carry)``, or
+                ``(action, new_carry, unsquashed_action)`` when
+                ``return_unsquashed=True``.  ``action`` has shape
+                ``(action_dim,)`` and is scaled / shifted by ``action_scale``
+                and ``action_bias``.
             """
             obs = jnp.expand_dims(obs, 0)
             carry = jnp.expand_dims(carry, 0)
             new_carry, x = nnx.merge(
                 feature_extractor_graph, iqlearn.feature_extractor
-            )(obs, carry)
+            )(carry, obs)
             mean, std = get_dist_params(iqlearn.actor, x)
             if deterministic:
                 unsquashed_action = mean
@@ -1191,8 +1166,8 @@ def create_iqlearn(
             y_t = jnp.tanh(unsquashed_action)
             action = y_t * action_scale + action_bias
             if return_unsquashed:
-                return action[0], new_carry, unsquashed_action[0]
-            return action[0], new_carry
+                return action[0], new_carry[0], unsquashed_action[0]
+            return action[0], new_carry[0]
 
     # ------------------------------------------------------------------
     # Loss functions and other helpers which are structurally identical
@@ -1227,12 +1202,21 @@ def create_iqlearn(
     ) -> Tuple[jax.Array, dict]:
         """Actor loss: maximise the soft state value V(s) = Q(s,a) - α log π(a|s).
 
-        Samples a fresh batch from the buffer and computes the negative mean
-        soft value (to be minimised via gradient descent).
+        Receives pre-computed latents (post-FE features); the caller is
+        responsible for wrapping the online critic in
+        ``jax.lax.stop_gradient`` so the actor gradient does not train the
+        critic head (gradient still flows into the shared FE via ``latents``).
+
+        Args:
+            actor: Actor head state.
+            critic: (Stop-gradient'd) online twin-critic state.
+            latents: Features of shape ``(batch, feature_dim)``.
+            alpha: Current entropy temperature.
+            key: JAX PRNG key (used only on the continuous path).
 
         Returns:
             ``(scalar_loss, metrics)`` where metrics contains ``"q"``,
-            ``"entropy"``, and ``"v"``.
+            ``"entropy"`` and ``"v"``.
         """
         key_v = key
         v, metrics = get_v(
@@ -1249,7 +1233,7 @@ def create_iqlearn(
         return -v.mean(), metrics
 
     def loss_critic(
-        actor_target: NetworkState,
+        actor_target: nnx.GraphState,
         critic: TwinCriticState,
         critic_target: TwinCriticState,
         latents: jax.Array,
@@ -1264,7 +1248,7 @@ def create_iqlearn(
 
         Computes independent TD errors for both Q-branches against the shared
         target ``r + γ(1−done)·V(s')``.  ``V(s')`` is computed under the
-        target actor and critic; for discrete spaces this is the exact
+        target actor and target critic; for discrete spaces this is the exact
         closed-form inner product, for continuous spaces it uses a sampled
         action.
 
@@ -1272,9 +1256,15 @@ def create_iqlearn(
             actor_target: EMA-smoothed actor used to compute ``V(s')``.
             critic: Online twin-critic being optimised.
             critic_target: EMA-smoothed critic used inside ``V(s')``.
-            online_buf: The online replay buffer.
+            latents: Features of state ``s``, shape ``(batch, feature_dim)``.
+            target_latents: Target-FE features of state ``s'``, shape
+                ``(batch, feature_dim)``.
+            actions: Action taken at ``s`` — float32 indices ``(batch, 1)``
+                for discrete or ``(batch, action_dim)`` for continuous.
+            rewards: Per-step rewards, shape ``(batch,)``.
+            terminated: Per-step done flags (float32 0/1), shape ``(batch,)``.
             alpha: Current entropy temperature.
-            key: JAX PRNG key.
+            key: JAX PRNG key (used only on the continuous path).
 
         Returns:
             ``(scalar_loss, metrics)`` where metrics contains
@@ -1299,45 +1289,83 @@ def create_iqlearn(
         loss = 0.5 * (jnp.mean((q1 - target_q) ** 2) + jnp.mean((q2 - target_q) ** 2))
         return loss, {"critic_loss": loss, "target_q": target_q.mean()}
 
+    def loss_ld(
+        lambda1_critic: TwinCriticState,
+        lambda2_critic: TwinCriticState,
+        lambda1_graph: TwinCriticGraph,
+        lambda2_graph: TwinCriticGraph,
+        latents: jax.Array,
+        actions: jax.Array,
+    ) -> Tuple[jax.Array, dict]:
+        """λ-discrepancy regulariser pulling the two λ-critics together.
+
+        Computes the Huber loss between the conservative (min-over-twin)
+        Q-values of the short-horizon (``params.lambda1``) and long-horizon
+        (``params.lambda2``) V-trace critics evaluated at the same
+        ``(s, a)``.  Added to the joint loss with weight
+        ``params.lambda_coef``.
+
+        Args:
+            lambda1_critic: Online λ1 twin-critic state.
+            lambda2_critic: Online λ2 twin-critic state.
+            lambda1_graph: Graph for ``lambda1_critic``.
+            lambda2_graph: Graph for ``lambda2_critic``.
+            latents: Features of shape ``(batch, feature_dim)``.
+            actions: Action taken at each state.
+
+        Returns:
+            ``(scalar_loss, {"ld_loss": loss})``.
+        """
+
+        q1 = get_q(lambda1_critic, lambda1_graph, latents, actions)
+        q2 = get_q(lambda2_critic, lambda2_graph, latents, actions)
+        loss = optax.losses.huber_loss(q1, q2).mean()
+        return loss, {"ld_loss": loss}
+
     # ------------------------------------------------------------------
     # Online helpers: environment interaction and SAC update
     # ------------------------------------------------------------------
 
-    def run_env_step(sac: SACState, env, env_params, env_state, key: jax.Array):
+    def run_env_step(
+        sac: SACState, env, env_params, env_state, env_carry, key: jax.Array
+    ):
         """Collect one transition from a gymnax environment into the online buffer.
 
-        Calls ``env.get_obs`` to read the current observation, queries the
-        actor policy for an action, steps the environment, and writes the
-        ``(obs, action, reward, terminated)`` transition into
-        ``sac.online_buffer``.  Gymnax's base ``step()`` already performs an
-        automatic reset when the episode ends, so the returned state is always
-        ready for the next step without any additional handling.
+        Threads the recurrent FE carry across env steps: the carry from the
+        previous call is fed back into ``predict`` so the policy sees the full
+        rollout history.  On episode termination the carry is reset to zero
+        (matching the per-episode reset performed during sequence training).
 
         Args:
             sac: Current agent state.  Only ``sac.online_buffer`` is mutated.
             env: Gymnax environment object (static — not traced by JAX).
             env_params: Gymnax environment parameters pytree.
             env_state: Current gymnax environment state pytree.
+            env_carry: FE carry of shape ``(carry_dim,)`` from the previous
+                step (zero on the first step of an episode).
             key: JAX PRNG key; split internally for action sampling and env step.
 
         Returns:
-            ``(new_sac, new_env_state)`` where ``new_sac`` has an updated
-            ``online_buffer`` and ``new_env_state`` is the post-step gymnax
-            state (already reset if the episode ended).
+            ``(new_sac, new_env_state, new_carry)`` where ``new_carry`` is the
+            post-step FE carry (reset to zero on episode termination).
         """
         key_act, key_step = jax.random.split(key, 2)
         obs = env.get_obs(env_state, env_params)
         if is_discrete:
-            action, prob = predict(sac, obs, key_act, return_prob=True)
+            action, new_carry, prob = predict(
+                sac, obs, env_carry, key_act, return_prob=True
+            )
             env_action = jnp.round(action).astype(jnp.int32)
         else:
             if approximate_lambda:
-                action, unsquashed_action, logprob = sample_action_logprob(
-                    sac.actor, obs, key_act
+                action, new_carry, unsquashed_action = predict(
+                    sac, obs, env_carry, key_act, return_unsquashed=True
                 )
+                # behaviour probability density under the squashed Gaussian
+                _, logprob = sample_action_logprob(sac.actor, obs, key_act)[1:3]
                 prob = jnp.exp(logprob)
             else:
-                action = predict(sac, obs, key_act)
+                action, new_carry = predict(sac, obs, env_carry, key_act)
             env_action = action
         _next_obs, new_env_state, reward, done, _ = env.step(
             key_step, env_state, env_action, env_params
@@ -1355,7 +1383,12 @@ def create_iqlearn(
         new_online_buffer = online_buffer_functions.add(
             sac.online_buffer, transition, terminated=done
         )
-        return sac._replace(online_buffer=new_online_buffer), new_env_state
+        new_carry = jax.lax.select(done, jnp.zeros_like(new_carry), new_carry)
+        return (
+            sac._replace(online_buffer=new_online_buffer),
+            new_env_state,
+            new_carry,
+        )
 
     def calculate_latent(
         feature_extractor_state: nnx.GraphState,
@@ -1364,6 +1397,28 @@ def create_iqlearn(
         dones: jax.Array,
         init_carries: jax.Array,
     ):
+        """Roll the online and target FEs over a sampled sequence.
+
+        Performs an R2D2-style burn-in over the first ``params.burn_in_length``
+        steps to warm the recurrent carry (gradients stopped at the burn-in
+        boundary) and then unrolls the remainder to produce per-step latents.
+        The carry is reset to zeros at any step where ``dones=True``.
+
+        Online and target FEs share the same scan so they see the same carry
+        reset pattern; both carries are initialised from ``init_carries``.
+
+        Args:
+            feature_extractor_state: Online FE state (FE + memory).
+            target_feature_extractor_state: Target FE state.
+            observations: Batch-major observations of shape ``(B, T, *obs)``.
+            dones: Per-step termination flags, shape ``(B, T)``.
+            init_carries: Initial carries of shape ``(B, carry_dim)`` (zero
+                for the start of each train() call).
+
+        Returns:
+            ``(latent, target_latent)``, both time-major with shape
+            ``(T - burn_in_length, B, feature_dim)``.
+        """
         feature_extractor = nnx.merge(feature_extractor_graph, feature_extractor_state)
         target_feature_extractor = nnx.merge(
             feature_extractor_graph, target_feature_extractor_state
@@ -1382,6 +1437,7 @@ def create_iqlearn(
         def scan_carries(scan_carry, x):
             carry, target_carry = scan_carry
             obs, done_step = x
+            done_step = done_step.astype(jnp.bool_)
             new_carry, y = feature_extractor(carry, obs)
             new_target_carry, y_target = target_feature_extractor(target_carry, obs)
             new_carry = carry_reset(done_step, new_carry)
@@ -1389,9 +1445,10 @@ def create_iqlearn(
 
             return (new_carry, new_target_carry), (y, y_target)
 
+        # Pair online + target carries; both start from the same zero tensor.
         burnt_in_carries, _ = jax.lax.scan(
             scan_carries,
-            init_carries,
+            (init_carries, init_carries),
             (observations[:_BL], dones[:_BL]),
         )
         burnt_in_carries = jax.lax.stop_gradient(burnt_in_carries)
@@ -1418,6 +1475,45 @@ def create_iqlearn(
         target_latents: jax.Array,
         key: jax.Array,
     ):
+        """V-trace λ-return Huber loss for one λ-critic over a time-major sequence.
+
+        Inputs are time-major (``T - burn_in_length`` along axis 0).  Per-step
+        importance ratios ``π_target(a|s) / b(a|s)`` are recomputed inline
+        from the rolled features (no separate raw-obs IS pass).  When
+        ``params.fake_onpolicy_loss`` is set the ratios are clamped to 1.
+
+        The V-trace recursion uses ``(1 - done)`` to mask both the
+        ``δ_V = r + γ(1-done) V_{s+1} - V_s`` term and the correction
+        ``(1-done) γ c (v_{s+1} - V_{s+1})``.  The last
+        ``params.lambda_truncation`` time-steps are dropped from the loss to
+        avoid biasing the λ-return by missing bootstrap mass at the unroll
+        tail.
+
+        Currently asserts ``is_discrete=True``; continuous V-trace would
+        require unsquashed (pre-tanh) actions plumbed through, which is not
+        done yet.
+
+        Args:
+            target_actor_state: EMA actor used to compute ``V(s)`` and IS
+                numerators.
+            q_state: Online λ-critic being optimised.
+            q_target_state: EMA λ-critic used inside ``V(s)``.
+            q_graph: Graph for the λ-critic.
+            lam: λ value (``params.lambda1`` or ``params.lambda2``); used as
+                the ``c`` truncation factor and as a metric tag.
+            actions: Time-major actions, shape ``(T', B, ...)``.
+            rewards: Time-major rewards, shape ``(T', B)``.
+            dones: Time-major termination flags, shape ``(T', B)``.
+            behaviour_probs: Time-major behaviour-policy probabilities
+                (or densities), shape ``(T', B)``.
+            latents: Online-FE features, shape ``(T', B, feature_dim)``.
+            target_latents: Target-FE features, shape ``(T', B, feature_dim)``.
+            key: JAX PRNG key, threaded through the inner scan for sampled
+                ``V(s)`` (unused on the discrete path).
+
+        Returns:
+            ``(scalar_loss, metrics)``.
+        """
         assert is_discrete, (
             "loss_vtrace_lambda_sequence does not yet support continuous action "
             "spaces: importance ratios would require unsquashed (pre-tanh) actions, "
@@ -1439,9 +1535,12 @@ def create_iqlearn(
                 False,
             )
             q = get_q(q_state, q_graph, x, action)
-            ratio = get_importance_ratios(
-                target_actor_state, target_x, action, beh_prob
-            )
+            if params.fake_onpolicy_loss:
+                ratio = jnp.ones_like(beh_prob)
+            else:
+                ratio = get_importance_ratios(
+                    target_actor_state, target_x, action, beh_prob
+                )
             new_scan_carry = key_next
 
             return new_scan_carry, (v, q, ratio)
@@ -1469,7 +1568,7 @@ def create_iqlearn(
 
         _carry, targets = jax.lax.scan(
             scan_target,
-            (jnp.array(0.0), jnp.array(0.0)),
+            (jnp.zeros_like(v[0]), jnp.zeros_like(v[0])),
             (v, dones, rewards, ratios),
             reverse=True,
         )
@@ -1501,19 +1600,43 @@ def create_iqlearn(
         buffer: Buffer,
         key: jax.Array,
     ):
+        """Joint R2D2-style sequence loss: actor + critic + (optionally) λ-critics.
+
+        Samples one batch of contiguous sequences from the online buffer,
+        runs the recurrent FE (with burn-in) over each sequence under both
+        the online and target weights, and computes:
+
+        - **Actor loss** on flattened ``(t, b)`` features, with the online
+          critic wrapped in ``stop_gradient`` so the actor gradient does not
+          train the critic head (gradient still flows into the shared FE).
+        - **Critic loss** with the off-by-one bootstrap pair
+          ``latent[t] → target_latent[t+1]``, action/reward/terminated at
+          index ``t``.
+        - **λ-critic V-trace losses** (when ``approximate_lambda=True``), one
+          per λ value, plus a Huber λ-discrepancy term ``loss_ld`` scaled by
+          ``params.lambda_coef``.
+
+        ``jax.grad(loss_combined, argnums=[0,1,2,3,4])`` distributes
+        gradients to the FE / actor / critic / λ1-critic / λ2-critic
+        respectively; target nets are passed positionally outside ``argnums``
+        so JAX treats them as constants (no leakage).
+
+        Returns:
+            ``(scalar_loss, metrics_dict)``.
+        """
         _BL = params.burn_in_length
 
         key_sample, key_actor, key_critic, key_lambda_critic1, key_lambda_critic2 = (
             jax.random.split(key, 5)
         )
         sample, indices = online_buffer_lambda_sample(buffer, key_sample)
-        init_carries = feature_extractor.initialize_carry(params.batch_size)
+        init_carries = feature_extractor.initialize_carry(params.online_batch_size)
 
-        observations = sample[obs_key]
-        actions = sample[action_key]
-        rewards = sample[reward_key]
-        terminated = sample[terminated_key]
-        behaviour = sample[behaviour_key]
+        observations = sample.this_info[obs_key]
+        actions = sample.this_info[action_key]
+        rewards = sample.this_info[reward_key]
+        terminated = sample.this_info[terminated_key]
+        behaviour = sample.this_info[behaviour_key]
 
         latent, target_latent = calculate_latent(
             feature_extractor_state,
@@ -1595,29 +1718,42 @@ def create_iqlearn(
                 key_lambda_critic2,
             )
             metrics.update(metrics_lambda2_critic)
-            loss += l_lambda1 + l_lambda2
+
+            l_ld, metrics_ld = loss_ld(
+                lambda1_critic_state,
+                lambda2_critic_state,
+                lambda1_critic_graph,
+                lambda2_critic_graph,
+                _flat(latent[:-1]),
+                _flat(actions_tm[:-1]),
+            )
+            metrics.update(metrics_ld)
+            loss += l_lambda1 + l_lambda2 + params.lambda_coef* l_ld
 
         return loss, metrics
 
     def update_step(sac: SACState, key: jax.Array) -> Tuple[SACState, dict]:
-        """Execute one SAC update step using the online replay buffer.
+        """Execute one joint gradient step against :func:`loss_combined`.
 
-        Uses the standard SAC Bellman MSE objective for the critic (with real
-        environment rewards) and the same soft-value actor objective as
-        IQ-Learn.  The online buffer must already hold at least
-        ``params.online_batch_size`` sampleable transitions before this
-        function is called (guaranteed by :func:`prefill_buffer`, which
-        :func:`train_sac` calls automatically when the buffer is cold).
+        Computes a single ``jax.grad(loss_combined, argnums=[0,1,2,3,4])``
+        and distributes the resulting gradients to the FE / actor / critic /
+        λ1-critic / λ2-critic optimizers.  Also runs the optional alpha
+        update (when ``params.autotune_alpha``) and the EMA target updates
+        for all networks.  The online buffer must already hold at least
+        ``params.online_batch_size`` sampleable transitions (guaranteed by
+        :func:`prefill_buffer`, which :func:`train` calls automatically when
+        the buffer is cold).
 
         Args:
             sac: Current agent state.
-            key: JAX PRNG key; split internally for actor/critic updates and
-                optional alpha update.
+            key: JAX PRNG key; split internally inside ``loss_combined`` for
+                sequence sampling and the actor / critic / λ-critic losses.
 
         Returns:
-            ``(new_state, metrics)`` where metrics contains ``"q"``,
+            ``(new_state, metrics)`` where metrics includes ``"q"``,
             ``"entropy"``, ``"v"``, ``"critic_loss"``, ``"target_q"``,
-            and ``"alpha"`` (when ``params.autotune_alpha`` is True).
+            (when ``approximate_lambda``) ``"ld_loss"`` and the V-trace
+            per-λ tags, and ``"alpha"`` (when ``params.autotune_alpha``).
         """
 
         (
@@ -1745,28 +1881,34 @@ def create_iqlearn(
             metrics,
         )
 
+    # Single-row (unbatched) zero carry for the env-rollout policy queries.
+    _env_zero_carry = feature_extractor.initialize_carry(1)[0]
+
     @partial(jax.jit, static_argnames=["env"])
     def _train_jit(
         sac: SACState,
         env,
         env_params,
         env_state,
+        env_carry,
         key: jax.Array,
-    ) -> Tuple[SACState, any, dict]:
+    ) -> Tuple[SACState, any, any, dict]:
         print("compiling...")
 
         def scan_fun(carry, _):
-            sac, env_state, key = carry
+            sac, env_state, env_carry, key = carry
             key, next_key, env_key, update_key = jax.random.split(key, 4)
-            sac, env_state = run_env_step(sac, env, env_params, env_state, env_key)
+            sac, env_state, env_carry = run_env_step(
+                sac, env, env_params, env_state, env_carry, env_key
+            )
             sac, metrics = update_step(sac, update_key)
-            return (sac, env_state, next_key), metrics
+            return (sac, env_state, env_carry, next_key), metrics
 
-        (sac, env_state, _), metrics = jax.lax.scan(
-            scan_fun, (sac, env_state, key), length=train_steps
+        (sac, env_state, env_carry, _), metrics = jax.lax.scan(
+            scan_fun, (sac, env_state, env_carry, key), length=train_steps
         )
         metrics = jax.tree.map(lambda x: x.mean(), metrics)
-        return sac, env_state, metrics
+        return sac, env_state, env_carry, metrics
 
     def train(
         sac: SACState,
@@ -1785,10 +1927,10 @@ def create_iqlearn(
            ``(obs, action, reward, terminated)`` into ``sac.online_buffer``.
            Gymnax's base ``step()`` automatically resets the environment state
            when the episode terminates, so no separate reset call is needed.
-        4. Runs one SAC gradient update via :func:`update_step_sac`.
+        4. Runs one joint gradient update via :func:`update_step`.
 
         The entire loop is compiled as a single XLA program after the first
-        invocation (via the ``_train_sac_jit`` inner function).
+        invocation (via the ``_train_jit`` inner function).
 
         A Python-level check is performed on every call to ensure the online
         buffer is warm (at least ``params.online_batch_size`` sampleable
@@ -1815,9 +1957,16 @@ def create_iqlearn(
         if n_ok < params.online_batch_size:
             key, prefill_key = jax.random.split(key)
             sac, env_state = prefill_buffer(
-                sac, env, env_params, env_state, params.online_batch_size, prefill_key
+                sac, env, env_params, env_state, params.online_batch_size*(params.lambda_truncation+params.sequence_length+params.burn_in_length), prefill_key
             )
-        return _train_jit(sac, env, env_params, env_state, key)
+        # Start each train() call from a fresh zero carry.  Inside the scan the
+        # carry is reset again on every episode boundary, so the only state lost
+        # here is in-flight memory of an ongoing episode — acceptable until we
+        # plumb carry persistence across train() invocations.
+        sac, env_state, _new_carry, metrics = _train_jit(
+            sac, env, env_params, env_state, _env_zero_carry, key
+        )
+        return sac, env_state, metrics
 
     def prefill_buffer(
         sac: SACState,
@@ -1832,7 +1981,7 @@ def create_iqlearn(
         Runs ``n_steps`` steps using a uniform random policy and writes the
         resulting transitions into ``sac.online_buffer``.  The last step is
         force-terminated so that all ``n_steps`` written slots are immediately
-        sampleable by :func:`update_step_sac`.
+        sampleable by :func:`update_step`.
 
         For discrete action spaces the action is drawn uniformly from
         ``{0, …, action_dim-1}`` and ``behaviour_key`` is set to
@@ -1902,6 +2051,6 @@ def create_iqlearn(
         return (
             iqlearn,
             fns,
-            DebugFunctions(calculate_td_lambda, get_q, get_entropy),
+            DebugFunctions(get_q, get_entropy),
         )
     return (iqlearn, fns)
