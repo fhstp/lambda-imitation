@@ -54,7 +54,14 @@ import optax
 from flax import nnx
 from jax.tree_util import Partial
 
-from .buffer import Buffer, BufferFunctions, BufferSample, create_buffer, create_sample
+from .buffer import (
+    Buffer,
+    BufferFunctions,
+    BufferSample,
+    create_buffer,
+    create_sample,
+    create_sequence_sample,
+)
 
 # Bounds for the squashed log-standard-deviation of the policy distribution.
 # The raw output is tanh-squashed and then rescaled into this range to keep
@@ -66,49 +73,6 @@ LOG_STD_MAX = 2
 # ---------------------------------------------------------------------------
 # Network building blocks
 # ---------------------------------------------------------------------------
-
-
-class MLPFeatureExtractor(nnx.Module):
-    """Configurable MLP observation encoder.
-
-    Flattens the input (to handle arbitrary observation shapes) and passes it
-    through a sequence of linear layers with ReLU activations.  The output
-    dimension equals ``hidden_dims[-1]``.
-
-    Args:
-        input_dim: Flat size of one observation (product of all spatial dims).
-        hidden_dims: Width of each hidden layer.  Defaults to ``(256, 256)``.
-            An empty tuple would make this a no-op identity, which is only
-            meaningful if the downstream head is large enough.
-        rngs: Flax NNX RNG container used to initialise parameters.
-    """
-
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dims: tuple[int, ...] = (256, 256),
-        *,
-        rngs: nnx.Rngs,
-    ):
-        dims = [input_dim] + list(hidden_dims)
-        self.layers = nnx.List(
-            [nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)]
-        )
-
-    def __call__(self, x: jax.Array) -> jax.Array:
-        """Encode a batch of observations.
-
-        Args:
-            x: Observation batch of shape ``(batch, *obs_shape)``.  Any shape
-                beyond the batch dimension is flattened automatically.
-
-        Returns:
-            Feature tensor of shape ``(batch, hidden_dims[-1])``.
-        """
-        x = x.reshape(x.shape[0], -1)
-        for layer in self.layers:
-            x = nnx.relu(layer(x))
-        return x
 
 
 class Head(nnx.Module):
@@ -147,7 +111,7 @@ class Head(nnx.Module):
         rngs: nnx.Rngs,
     ):
         dims = [feature_dim] + list(hidden_dims) + [output_dim]
-        self.layers = nnx.List(
+        self.layers = nnx.data(
             [nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)]
         )
 
@@ -266,6 +230,7 @@ class SACState(NamedTuple):
     critic_target: TwinCriticState
     lambda1_critic_target: TwinCriticState
     lambda2_critic_target: TwinCriticState
+    fe_optimizer_state: optax.OptState
     actor_optimizer_state: optax.OptState
     critic_optimizer_state: optax.OptState
     lambda1_critic_optimizer_state: optax.OptState
@@ -397,6 +362,7 @@ class Hyperparameters(NamedTuple):
             many transitions.
     """
 
+    fe_lr: float = 1e-3
     actor_lr: float = 1e-3
     critic_lr: float = 1e-3
     lambda_critic_lr: float = 1e-2
@@ -412,8 +378,11 @@ class Hyperparameters(NamedTuple):
     tau: float = 0.005
     lambda1: float = 0.1
     lambda2: float = 0.9
-    lambda1_truncation: int = 15
-    lambda2_truncation: int = 15
+    c_bar: float = 1.0
+    rho_bar: float = 1.0
+    burn_in_length: int = 20
+    sequence_length: int = 80
+    lambda_truncation: int = 15
 
 
 # ---------------------------------------------------------------------------
@@ -590,11 +559,11 @@ def create_iqlearn(
     if approximate_lambda:
         online_mc_this_keys = [obs_key, action_key, return_key, behaviour_key]
         online_mc_next_keys = []
-        online_buffer_mc_sample = create_sequence_sample(
+        online_buffer_lambda_sample = create_sequence_sample(
             online_buffer.size,
             params.online_batch_size,
+            params.burn_in_length + params.sequence_length + params.lambda_truncation,
             online_mc_this_keys,
-            online_mc_next_keys,
         )
         # Pre-initialise every behaviour_key slot to 1.0 so that slots which
         # have never been written by run_env_step (pre-fill and as-yet-unwritten
@@ -610,7 +579,9 @@ def create_iqlearn(
 
     # Infer feature dims via dummy forward pass (before split)
     dummy_obs = jnp.zeros((1,) + buffer.info[obs_key].shape[1:])
-    feature_dim = feature_extractor(dummy_obs).shape[-1]
+    feature_dim = feature_extractor(
+        feature_extractor.initialize_carry(1), dummy_obs
+    ).shape[-1]
 
     # Create heads — discrete and continuous differ only in output_dim and
     # whether actions are concatenated to features before the head.
@@ -742,6 +713,7 @@ def create_iqlearn(
         )
 
     # Optimizers: actor operates on NetworkState; critic on TwinCriticState.
+    fe_optimizer = optax.adam(params.fe_lr)
     actor_optimizer = optax.adam(params.actor_lr)
     critic_optimizer = optax.adam(params.critic_lr)
     if approximate_lambda:
@@ -750,6 +722,7 @@ def create_iqlearn(
     alpha_optimizer = optax.adam(params.alpha_lr)
 
     log_alpha = jnp.array(jnp.log(params.alpha))
+    fe_optimizer_state = fe_optimizer.init(feature_extractor_state)
     actor_optimizer_state = actor_optimizer.init(actor_state)
     critic_optimizer_state = critic_optimizer.init(critic_state)
     if approximate_lambda:
@@ -779,6 +752,7 @@ def create_iqlearn(
         remove_weak_types(critic_state),
         remove_weak_types(lambda1_critic_state) if approximate_lambda else None,
         remove_weak_types(lambda2_critic_state) if approximate_lambda else None,
+        remove_weak_types(fe_optimizer_state),
         remove_weak_types(actor_optimizer_state),
         remove_weak_types(critic_optimizer_state),
         (
@@ -979,21 +953,24 @@ def create_iqlearn(
         ) -> jax.Array:
             """Compute importance ratios ``π(a|s) / b(a|s)`` for a batch.
 
+            Supports any leading batch dims (e.g. ``(B,)`` or ``(B, T)``);
+            shapes are inferred from the actor output.
+
             Args:
                 actor: Current actor network state.
-                obs: Observation batch of shape ``(batch, *obs_shape)``.
+                x: Feature batch of shape ``(*batch_dims, feature_dim)``.
                 actions: Integer action indices stored as float32, shape
-                    ``(batch,)`` or ``(batch, 1)``.
-                behaviour_probs: Per-transition probabilities under the
-                    behaviour policy, shape ``(batch,)``.
+                    ``(*batch_dims,)`` or ``(*batch_dims, 1)``.
+                behaviour_probs: Behaviour-policy probabilities, shape
+                    broadcastable to ``(*batch_dims,)``.
 
             Returns:
-                Importance ratios of shape ``(batch,)``.
+                Importance ratios of shape ``(*batch_dims,)``.
             """
-            logits = run_actor(actor, x)  # (batch, num_actions)
-            probs = jax.nn.softmax(logits)  # (batch, num_actions)
-            idx = actions.reshape(-1).astype(jnp.int32)  # (batch,)
-            pi_a = probs[jnp.arange(idx.shape[0]), idx]  # (batch,)
+            logits = run_actor(actor, x)  # (*batch_dims, num_actions)
+            probs = jax.nn.softmax(logits)
+            idx = jnp.round(actions).astype(jnp.int32).reshape(probs.shape[:-1] + (1,))
+            pi_a = jnp.take_along_axis(probs, idx, axis=-1).squeeze(-1)
             return pi_a / behaviour_probs
 
     else:
@@ -1106,19 +1083,21 @@ def create_iqlearn(
         ) -> jax.Array:
             """Compute importance ratios ``π(a|s) / b(a|s)`` for a batch.
 
+            Supports any leading batch dims (e.g. ``(B,)`` or ``(B, T)``);
+            log-prob sums over the trailing ``action_dim`` axis only.
+
             Args:
                 actor: Current actor network state.
-                obs: Observation batch of shape ``(batch, *obs_shape)``.
-                actions: **Unsquashed** (pre-tanh) action values as stored
-                    under ``unsquashed_action_key`` in the online buffer,
-                    shape ``(batch, action_dim)``.
-                behaviour_probs: Per-transition probability densities under
-                    the behaviour policy, shape ``(batch,)``.
+                x: Feature batch of shape ``(*batch_dims, feature_dim)``.
+                actions: **Unsquashed** (pre-tanh) action values, shape
+                    ``(*batch_dims, action_dim)``.
+                behaviour_probs: Behaviour-policy densities, shape
+                    broadcastable to ``(*batch_dims,)``.
 
             Returns:
-                Importance ratios of shape ``(batch,)``.
+                Importance ratios of shape ``(*batch_dims,)``.
             """
-            mean, std = get_dist_params(actor, x)  # (batch, action_dim)
+            mean, std = get_dist_params(actor, x)  # (*batch_dims, action_dim)
             u = actions  # pre-tanh, no inversion needed
             y_t = jnp.tanh(u)
             log_prob = (
@@ -1128,7 +1107,7 @@ def create_iqlearn(
                 - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
             ).sum(
                 axis=-1
-            )  # (batch,)
+            )  # (*batch_dims,)
             return jnp.exp(log_prob) / behaviour_probs
 
         def get_v(
@@ -1221,95 +1200,6 @@ def create_iqlearn(
     # action-space-specific helpers above.
     # ------------------------------------------------------------------
 
-    @Partial(jax.vmap, in_axes=[None, None, None, None, None, 0])
-    def calculate_td_lambda(
-        actor, critic, alpha, key, online_buffer: Buffer, index: int
-    ):
-        """Compute a V-trace TD(λ) return estimate starting at buffer position ``index``.
-
-        This function is vmapped over ``index`` via ``@Partial(jax.vmap, ...)``;
-        it operates on a single start index and produces a single scalar return.
-
-        **Algorithm overview**
-
-        1. Collect ``lambda_truncation + 1`` consecutive buffer slots:
-           ``indices = index + jnp.arange(lambda_truncation + 1)``.
-
-        2. Compute per-step importance ratios
-           ``c_k = π(a_k|s_k) / b(a_k|s_k)`` via :func:`get_importance_ratios`.
-
-        3. Compute V-trace truncated cumulative IS weights:
-           ``p_k = clip(∏_{j≤k} c_j, max=1.0)``.
-           Clipping to 1 prevents variance explosion from large off-policy
-           corrections (V-trace truncation level ``ρ̄ = 1``).
-
-        4. Compute the done mask: ``done_mask[k] = 1`` if any step
-           ``j < k`` was terminal, else 0 (first step is always 0).
-           Rewards at and after a terminal are zeroed out by this mask.
-
-        5. Accumulate partial n-step returns:
-           ``rn[n] = Σ_{k=0}^{n-1} γ^k p_k r_k (1−done_mask[k])
-                    + γ^{n} p_{n} Q(s_n, a_n)``.
-
-        6. Mix with geometric weights:
-           ``TD(λ) = (1 − λ) Σ_{n=0}^{lambda_truncation-1} λ^n rn[n]``.
-
-        Args:
-            actor: Current actor network state (:class:`NetworkState`).
-            critic: MC critic target state (:class:`TwinCriticState`), i.e.
-                ``state.mc_critic_target``.  The function calls ``get_q``
-                with ``use_mc=True``, which selects the MC critic graph
-                definitions for reconstruction.
-            online_buffer: Online replay buffer containing at least
-                ``lambda_truncation + 1`` filled transitions from the start
-                index onward.  Must include keys ``obs_key``, ``action_key``,
-                ``behaviour_key``, ``reward_key``, and ``terminated_key``.
-            index: Scalar integer start position in the buffer (before vmap).
-
-        Returns:
-            Scalar ``float32`` TD(λ) return estimate for the transition at
-            ``index``.
-        """
-        # Equivalent to the original ``index + jnp.arange(index, index + n + 1)``
-        # (which produces ``index + [0, 1, ..., n]``), but uses a concrete
-        # length so the expression is valid under jax.vmap.
-        indices = index + jnp.arange(params.lambda_truncation + 1)
-        key_ent, key_v = jax.random.split(key)
-
-        c_k = get_importance_ratios(
-            actor,
-            online_buffer.info[obs_key][indices],
-            online_buffer.info[action_key][indices],
-            online_buffer.info[behaviour_key][indices],
-        )
-        p_k = jnp.clip(jnp.prod(c_k), max=1.0)
-        gammas = params.gamma ** jnp.arange(params.lambda_truncation + 1)
-        lambdas = params.lam ** jnp.arange(params.lambda_truncation)
-        done_mask = 1 - jnp.concatenate(
-            (
-                jnp.array([0]),
-                jnp.maximum.accumulate(
-                    online_buffer.info[terminated_key][indices[:-1]]
-                ),
-            ),
-            dtype=jnp.float32,
-        )
-        entropies = get_entropy(actor, online_buffer.info[obs_key][indices], key_ent)
-        rn = jnp.cumsum(
-            gammas[:-1]
-            * (online_buffer.info[reward_key][indices[:-1]] + alpha * entropies[:-1])
-            * done_mask[:-1]
-        )
-        rn = rn + gammas[1:] * done_mask[1:] * get_v(  # type: ignore
-            actor,
-            critic,
-            alpha,
-            online_buffer.info[obs_key][indices][1:],
-            key_v,
-            include_entropy=True,
-        )
-        return (1 - params.lam) * jnp.sum(lambdas * rn), p_k
-
     def loss_alpha(log_alpha: jax.Array, log_pi: jax.Array) -> jax.Array:
         """Entropy temperature loss.
 
@@ -1329,10 +1219,9 @@ def create_iqlearn(
         return alpha_loss
 
     def loss_actor(
-        actor: NetworkState,
+        actor: nnx.GraphState,
         critic: TwinCriticState,
-        buffer: Buffer,
-        buffer_sample: Callable[[Buffer, jax.Array], Tuple[BufferSample, Tuple[int]]],
+        latents: jax.Array,
         alpha: jax.Array,
         key: jax.Array,
     ) -> Tuple[jax.Array, dict]:
@@ -1345,13 +1234,13 @@ def create_iqlearn(
             ``(scalar_loss, metrics)`` where metrics contains ``"q"``,
             ``"entropy"``, and ``"v"``.
         """
-        key_sample, key_v = jax.random.split(key, 2)
-        sample, _ = buffer_sample(buffer, key_sample)
+        key_v = key
         v, metrics = get_v(
             actor,
             critic,
+            critic_graph,
             alpha,
-            sample.this_info[obs_key],
+            latents,
             key_v,
             include_entropy=True,
             include_log=True,
@@ -1363,7 +1252,11 @@ def create_iqlearn(
         actor_target: NetworkState,
         critic: TwinCriticState,
         critic_target: TwinCriticState,
-        online_buf: Buffer,
+        latents: jax.Array,
+        target_latents: jax.Array,
+        actions: jax.Array,
+        rewards: jax.Array,
+        terminated: jax.Array,
         alpha: jax.Array,
         key: jax.Array,
     ) -> Tuple[jax.Array, dict]:
@@ -1387,18 +1280,14 @@ def create_iqlearn(
             ``(scalar_loss, metrics)`` where metrics contains
             ``"critic_loss"`` and ``"target_q"``.
         """
-        key_sample, key_v = jax.random.split(key, 2)
-        sample, _ = online_buffer_sample(online_buf, key_sample)
-        obs = sample.this_info[obs_key]
-        actions = sample.this_info[action_key]
-        rewards = sample.this_info[reward_key].reshape(-1)
-        terminated = sample.this_info[terminated_key].reshape(-1)
+        key_v = key
 
         next_v = get_v(
             actor_target,
             critic_target,
+            critic_graph,
             alpha,
-            sample.next_info[obs_key],
+            target_latents,
             key_v,
             include_entropy=True,
         )
@@ -1406,33 +1295,9 @@ def create_iqlearn(
             rewards + params.gamma * (1.0 - terminated) * next_v
         )
 
-        q1, q2 = get_q_both(critic, obs, actions)
+        q1, q2 = get_q_both(critic, critic_graph, latents, actions)
         loss = 0.5 * (jnp.mean((q1 - target_q) ** 2) + jnp.mean((q2 - target_q) ** 2))
         return loss, {"critic_loss": loss, "target_q": target_q.mean()}
-
-    def loss_mc_critic_sac(
-        actor: NetworkState,
-        mc_critic: TwinCriticState,
-        critic_target: TwinCriticState,
-        online_buf: Buffer,
-        alpha: jax.Array,
-        key: jax.Array,
-    ) -> Tuple[jax.Array, dict]:
-        key_sample, key_td_lambda = jax.random.split(key, 2)
-        sample, indices = online_buffer_sample(online_buf, key_sample)
-        obs = sample.this_info[obs_key]
-        actions = sample.this_info[action_key]
-
-        target_q, coefs = jax.lax.stop_gradient(
-            calculate_td_lambda(actor, critic_target, alpha, key_td_lambda, online_buf, indices)  # type: ignore
-        )
-
-        q1, q2 = get_q_both(mc_critic, obs, actions, use_mc=True)
-        loss = 0.5 * (
-            jnp.mean(coefs * (q1 - target_q) ** 2)
-            + jnp.mean(coefs * (q2 - target_q) ** 2)
-        )
-        return loss, {"mc_critic_loss": loss, "target_q": target_q.mean()}
 
     # ------------------------------------------------------------------
     # Online helpers: environment interaction and SAC update
@@ -1492,6 +1357,248 @@ def create_iqlearn(
         )
         return sac._replace(online_buffer=new_online_buffer), new_env_state
 
+    def calculate_latent(
+        feature_extractor_state: nnx.GraphState,
+        target_feature_extractor_state: nnx.GraphState,
+        observations: jax.Array,
+        dones: jax.Array,
+        init_carries: jax.Array,
+    ):
+        feature_extractor = nnx.merge(feature_extractor_graph, feature_extractor_state)
+        target_feature_extractor = nnx.merge(
+            feature_extractor_graph, target_feature_extractor_state
+        )
+        _BL = params.burn_in_length
+
+        # Sample layout is (B, T, ...); lax.scan iterates leading axis, so move
+        # the time axis to the front for the per-step inputs.
+        observations = jnp.swapaxes(observations, 0, 1)
+        dones = jnp.swapaxes(dones, 0, 1)
+
+        carry_reset = jax.vmap(
+            lambda done, carry: jax.lax.select(done, jnp.zeros_like(carry), carry)
+        )
+
+        def scan_carries(scan_carry, x):
+            carry, target_carry = scan_carry
+            obs, done_step = x
+            new_carry, y = feature_extractor(carry, obs)
+            new_target_carry, y_target = target_feature_extractor(target_carry, obs)
+            new_carry = carry_reset(done_step, new_carry)
+            new_target_carry = carry_reset(done_step, new_target_carry)
+
+            return (new_carry, new_target_carry), (y, y_target)
+
+        burnt_in_carries, _ = jax.lax.scan(
+            scan_carries,
+            init_carries,
+            (observations[:_BL], dones[:_BL]),
+        )
+        burnt_in_carries = jax.lax.stop_gradient(burnt_in_carries)
+
+        _, latent = jax.lax.scan(
+            scan_carries,
+            burnt_in_carries,
+            (observations[_BL:], dones[_BL:]),
+        )
+
+        return latent
+
+    def loss_vtrace_lambda_sequence(
+        target_actor_state: nnx.GraphState,
+        q_state: TwinCriticState,
+        q_target_state: TwinCriticState,
+        q_graph: TwinCriticGraph,
+        lam: float,
+        actions: jax.Array,
+        rewards: jax.Array,
+        dones: jax.Array,
+        behaviour_probs: jax.Array,
+        latents: jax.Array,
+        target_latents: jax.Array,
+        key: jax.Array,
+    ):
+        assert is_discrete, (
+            "loss_vtrace_lambda_sequence does not yet support continuous action "
+            "spaces: importance ratios would require unsquashed (pre-tanh) actions, "
+            "which are not currently wired through."
+        )
+
+        def scan_v_q(scan_carry, x):
+            key = scan_carry
+            key, key_next = jax.random.split(key)
+            x, target_x, action, beh_prob = x
+            v = get_v(
+                target_actor_state,
+                q_target_state,
+                q_graph,
+                jnp.array(0.0),
+                target_x,
+                key,
+                False,
+                False,
+            )
+            q = get_q(q_state, q_graph, x, action)
+            ratio = get_importance_ratios(
+                target_actor_state, target_x, action, beh_prob
+            )
+            new_scan_carry = key_next
+
+            return new_scan_carry, (v, q, ratio)
+
+        # other way round for recursive definition of V-trace targets
+        def scan_target(scan_carry, x):
+            v_sp1, V_sp1 = scan_carry
+            V_s, done, reward, ratio = x
+            rho = jnp.minimum(params.rho_bar, ratio)
+            c = lam * jnp.minimum(params.c_bar, ratio)
+            delta_V = reward + (1 - done) * params.gamma * V_sp1 - V_s
+            v_s = V_s + rho * delta_V + (1 - done) * params.gamma * c * (v_sp1 - V_sp1)
+            return (v_s, V_s), v_s
+
+        _carry, (v, q, ratios) = jax.lax.scan(
+            scan_v_q,
+            key,
+            (
+                latents,
+                target_latents,
+                actions,
+                behaviour_probs,
+            ),
+        )
+
+        _carry, targets = jax.lax.scan(
+            scan_target,
+            (jnp.array(0.0), jnp.array(0.0)),
+            (v, dones, rewards, ratios),
+            reverse=True,
+        )
+
+        loss = optax.losses.huber_loss(
+            q[: -params.lambda_truncation],
+            jax.lax.stop_gradient(targets)[: -params.lambda_truncation],
+        ).mean()
+        metrics = {
+            "loss": loss,
+            f"lambda{lam}_critic:": q[: -params.lambda_truncation].mean(),
+            f"lambda{lam}_target:": targets[: -params.lambda_truncation].mean(),
+        }
+
+        return loss, metrics
+
+    def loss_combined(
+        feature_extractor_state,
+        actor_state,
+        critic_state,
+        lambda1_critic_state,
+        lambda2_critic_state,
+        target_feature_extractor_state,
+        actor_target_state,
+        critic_target_state,
+        lambda1_critic_target_state,
+        lambda2_critic_target_state,
+        alpha,
+        buffer: Buffer,
+        key: jax.Array,
+    ):
+        _BL = params.burn_in_length
+
+        key_sample, key_actor, key_critic, key_lambda_critic1, key_lambda_critic2 = (
+            jax.random.split(key, 5)
+        )
+        sample, indices = online_buffer_lambda_sample(buffer, key_sample)
+        init_carries = feature_extractor.initialize_carry(params.batch_size)
+
+        observations = sample[obs_key]
+        actions = sample[action_key]
+        rewards = sample[reward_key]
+        terminated = sample[terminated_key]
+        behaviour = sample[behaviour_key]
+
+        latent, target_latent = calculate_latent(
+            feature_extractor_state,
+            target_feature_extractor_state,
+            observations,
+            terminated,
+            init_carries,
+        )
+        # latent / target_latent shapes: (T - _BL, B, feat) -- time-major.
+
+        # Sample fields are (B, T, ...); convert to time-major and slice down to
+        # the BPTT (post-burn-in) window so they align with the latents.
+        actions_tm = jnp.swapaxes(actions, 0, 1)[_BL:]
+        rewards_tm = jnp.swapaxes(rewards, 0, 1)[_BL:]
+        terminated_tm = jnp.swapaxes(terminated, 0, 1)[_BL:]
+        behaviour_tm = jnp.swapaxes(behaviour, 0, 1)[_BL:]
+
+        def _flat(x):
+            # (T', B, ...) -> (T' * B, ...)
+            return x.reshape((-1, *x.shape[2:]))
+
+        # Actor: per-state objective, treat (t, b) as an independent batch.
+        # Use the *online* critic but freeze its params via stop_gradient so
+        # the actor loss does not train the critic. Gradient still flows into
+        # the FE via the latent input, which is intended for the shared encoder.
+        l_actor, metrics = loss_actor(
+            actor_state,
+            jax.lax.stop_gradient(critic_state),
+            _flat(latent),
+            alpha,
+            key_actor,
+        )
+
+        # Critic: pair (latent[t], target_latent[t+1]) so V(s') is computed at
+        # the next state. Action / reward / terminated at index t.
+        l_critic, metrics_critic = loss_critic(
+            actor_target_state,
+            critic_state,
+            critic_target_state,
+            _flat(latent[:-1]),
+            _flat(target_latent[1:]),
+            _flat(actions_tm[:-1]),
+            rewards_tm[:-1].reshape(-1),
+            terminated_tm[:-1].reshape(-1),
+            alpha,
+            key_critic,
+        )
+        metrics.update(metrics_critic)
+
+        loss = l_actor + l_critic
+        if approximate_lambda:
+            l_lambda1, metrics_lambda1_critic = loss_vtrace_lambda_sequence(
+                actor_target_state,
+                lambda1_critic_state,
+                lambda1_critic_target_state,
+                lambda1_critic_graph,
+                params.lambda1,
+                actions_tm,
+                rewards_tm,
+                terminated_tm,
+                behaviour_tm,
+                latent,
+                target_latent,
+                key_lambda_critic1,
+            )
+            metrics.update(metrics_lambda1_critic)
+            l_lambda2, metrics_lambda2_critic = loss_vtrace_lambda_sequence(
+                actor_target_state,
+                lambda2_critic_state,
+                lambda2_critic_target_state,
+                lambda2_critic_graph,
+                params.lambda2,
+                actions_tm,
+                rewards_tm,
+                terminated_tm,
+                behaviour_tm,
+                latent,
+                target_latent,
+                key_lambda_critic2,
+            )
+            metrics.update(metrics_lambda2_critic)
+            loss += l_lambda1 + l_lambda2
+
+        return loss, metrics
+
     def update_step(sac: SACState, key: jax.Array) -> Tuple[SACState, dict]:
         """Execute one SAC update step using the online replay buffer.
 
@@ -1512,40 +1619,31 @@ def create_iqlearn(
             ``"entropy"``, ``"v"``, ``"critic_loss"``, ``"target_q"``,
             and ``"alpha"`` (when ``params.autotune_alpha`` is True).
         """
-        key_actor, key_critic, key_mc_critic = jax.random.split(key, 3)
 
-        # Actor gradient: maximise soft value V(s) = Q(s,a) - α log π(a|s)
-        grads_actor, metrics = jax.grad(loss_actor, has_aux=True)(
+        (
+            grads_fe,
+            grads_actor,
+            grads_critic,
+            grads_lambda1_critic,
+            grads_lambda2_critic,
+        ), metrics = jax.grad(loss_combined, argnums=[0, 1, 2, 3, 4], has_aux=True)(
+            sac.feature_extractor,
             sac.actor,
-            sac.critic_target,
-            sac.online_buffer,
-            online_buffer_sample,
-            sac.alpha,
-            key_actor,
-        )
-        # Critic gradient: minimise SAC Bellman MSE
-        grads_critic, metrics_critic = jax.grad(loss_critic, argnums=1, has_aux=True)(
-            sac.actor_target,
             sac.critic,
+            sac.lambda1_critic,
+            sac.lambda2_critic,
+            sac.feature_extractor_target,
+            sac.actor_target,
             sac.critic_target,
-            sac.online_buffer,
+            sac.lambda1_critic_target,
+            sac.lambda2_critic_target,
             sac.alpha,
-            key_critic,
+            sac.online_buffer,
+            key,
         )
-        metrics.update(metrics_critic)
 
-        if approximate_lambda:
-            grads_mc_critic, metrics_mc_critic = jax.grad(
-                loss_mc_critic_sac, argnums=1, has_aux=True
-            )(
-                sac.actor,
-                sac.mc_critic,
-                sac.critic_target,
-                sac.online_buffer,
-                sac.alpha,
-                key_mc_critic,
-            )
-            metrics.update(metrics_mc_critic)
+        updates, new_fe_opt = fe_optimizer.update(grads_fe, sac.fe_optimizer_state)
+        new_fe = optax.apply_updates(sac.feature_extractor, updates)  # type: ignore
 
         updates, new_actor_opt = actor_optimizer.update(
             grads_actor, sac.actor_optimizer_state
@@ -1558,10 +1656,14 @@ def create_iqlearn(
         new_critic = optax.apply_updates(sac.critic, updates)  # type: ignore
 
         if approximate_lambda:
-            updates, new_mc_critic_opt = mc_critic_optimizer.update(
-                grads_mc_critic, sac.mc_critic_optimizer_state
+            updates, new_lambda1_critic_opt = lambda1_critic_optimizer.update(
+                grads_lambda1_critic, sac.lambda1_critic_optimizer_state
             )
-            new_mc_critic = optax.apply_updates(sac.mc_critic, updates)  # type: ignore
+            new_lambda1_critic = optax.apply_updates(sac.lambda1_critic, updates)  # type: ignore
+            updates, new_lambda2_critic_opt = lambda2_critic_optimizer.update(
+                grads_lambda2_critic, sac.lambda2_critic_optimizer_state
+            )
+            new_lambda2_critic = optax.apply_updates(sac.lambda2_critic, updates)  # type: ignore
 
         if params.autotune_alpha:
             grads_alpha = jax.grad(loss_alpha)(sac.log_alpha, -metrics["entropy"])
@@ -1576,6 +1678,11 @@ def create_iqlearn(
             new_log_alpha = sac.log_alpha
             new_alpha = sac.alpha
 
+        new_fe_target = jax.tree.map(
+            lambda x, y: (1 - params.tau) * x + params.tau * y,
+            sac.feature_extractor_target,
+            new_fe,
+        )
         new_actor_target = jax.tree.map(
             lambda x, y: (1 - params.tau) * x + params.tau * y,
             sac.actor_target,
@@ -1587,22 +1694,49 @@ def create_iqlearn(
             new_critic,
         )
         if approximate_lambda:
-            new_mc_critic_target = jax.tree.map(
+            new_lambda1_critic_target = jax.tree.map(
                 lambda x, y: (1 - params.tau) * x + params.tau * y,
-                sac.mc_critic_target,
-                new_mc_critic,
+                sac.lambda1_critic_target,
+                new_lambda1_critic,
+            )
+            new_lambda2_critic_target = jax.tree.map(
+                lambda x, y: (1 - params.tau) * x + params.tau * y,
+                sac.lambda2_critic_target,
+                new_lambda2_critic,
             )
         return (
             SACState(
+                new_fe,
                 new_actor,  # type: ignore
                 new_critic,  # type: ignore
-                new_mc_critic if approximate_lambda else None,
+                new_lambda1_critic if approximate_lambda else sac.lambda1_critic,
+                new_lambda2_critic if approximate_lambda else sac.lambda2_critic,
+                new_fe_target,
                 new_actor_target,
                 new_critic_target,
-                new_mc_critic_target if approximate_lambda else None,
+                (
+                    new_lambda1_critic_target
+                    if approximate_lambda
+                    else sac.lambda1_critic_target
+                ),
+                (
+                    new_lambda2_critic_target
+                    if approximate_lambda
+                    else sac.lambda2_critic_target
+                ),
+                new_fe_opt,
                 new_actor_opt,
                 new_critic_opt,
-                new_mc_critic_opt if approximate_lambda else None,
+                (
+                    new_lambda1_critic_opt
+                    if approximate_lambda
+                    else sac.lambda1_critic_optimizer_state
+                ),
+                (
+                    new_lambda2_critic_opt
+                    if approximate_lambda
+                    else sac.lambda2_critic_optimizer_state
+                ),
                 new_alpha_opt,  # type: ignore
                 new_alpha,
                 new_log_alpha,  # type: ignore
@@ -1625,7 +1759,7 @@ def create_iqlearn(
             sac, env_state, key = carry
             key, next_key, env_key, update_key = jax.random.split(key, 4)
             sac, env_state = run_env_step(sac, env, env_params, env_state, env_key)
-            sac, metrics = update_step_sac(sac, update_key)
+            sac, metrics = update_step(sac, update_key)
             return (sac, env_state, next_key), metrics
 
         (sac, env_state, _), metrics = jax.lax.scan(
