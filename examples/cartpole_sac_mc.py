@@ -1,8 +1,13 @@
-"""SAC online training demo: CartPole-v1 (discrete action space, gymnax).
+"""SAC + λ-discrepancy online training demo: CartPole-v1 (gymnax, discrete).
 
-Pure online reinforcement learning with SAC — no expert data or imitation
-learning is used.  The placeholder expert buffer required by
-``create_iqlearn_from_env`` is never sampled (``fns.train()`` is never called).
+Pure online reinforcement learning with SAC and twin λ-critic branches — no
+expert data or imitation learning is used.  The placeholder expert buffer
+required by ``create_iqlearn_from_env`` is never sampled
+(``fns.train()`` is never called).
+
+The feature extractor is configurable via ``--memory-type`` (identity, rnn,
+gru, lstm), ``--memory-hidden-dim`` and ``--projection-dim``; layout is
+``obs -> Linear(projection_dim) -> memory cell``.
 
 After training the script opens a gymnasium render window so you can watch the
 trained agent.  Press Enter in the terminal after each episode; Ctrl-C to quit.
@@ -14,15 +19,14 @@ Requirements
 
 Usage
 -----
-    python cartpole_sac.py                        # default 100 rounds × 50 steps
-    python cartpole_sac.py --rounds 200           # more training
-    python cartpole_sac.py --train-steps 100      # longer rounds
-    python cartpole_sac.py --seed 42              # different random seed
-    python cartpole_sac.py --help                 # full option list
+    python cartpole_sac_mc.py                                # defaults
+    python cartpole_sac_mc.py --memory-type gru              # GRU memory
+    python cartpole_sac_mc.py --memory-type lstm --memory-hidden-dim 64
+    python cartpole_sac_mc.py --partial --memory-type lstm   # POMDP setting
+    python cartpole_sac_mc.py --help                         # full option list
 """
 
 import argparse
-import math
 import sys
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -58,6 +62,29 @@ parser.add_argument(
     help=(
         "make the environment partially observable: hide cart velocity (index 1) "
         "and pole angular velocity (index 3), leaving only cart position and pole angle"
+    ),
+)
+parser.add_argument(
+    "--memory-type",
+    choices=("identity", "rnn", "gru", "lstm"),
+    default="identity",
+    help="recurrent cell after the linear projection (default: identity)",
+)
+parser.add_argument(
+    "--memory-hidden-dim",
+    type=int,
+    default=64,
+    metavar="N",
+    help="hidden-state width of the recurrent cell (default: 64)",
+)
+parser.add_argument(
+    "--projection-dim",
+    type=int,
+    default=64,
+    metavar="N",
+    help=(
+        "width of the linear obs embedding before the memory cell "
+        "(default: 64; pass 0 to disable the projection and feed raw obs)"
     ),
 )
 parser.add_argument(
@@ -165,18 +192,48 @@ hp = Hyperparameters(
     target_entropy=0.5,  # float(0.98 * math.log(spec.action_dim)),
 )
 
-print("Building SAC agent for CartPole-v1 (discrete, gymnax)…")
-state, fns, _, debug_fns = create_iqlearn_from_env(
+projection_dim = args.projection_dim if args.projection_dim > 0 else None
+
+print(
+    f"Building SAC + λ-discrepancy agent for CartPole-v1 "
+    f"(discrete, gymnax)  memory={args.memory_type} "
+    f"hidden={args.memory_hidden_dim} projection={projection_dim}…"
+)
+state, fns, debug_fns = create_iqlearn_from_env(
     spec,
     expert_data,
     buffer_size=1,  # expert buffer capacity; minimum valid size
     hp=hp,
-    fe_hidden_dims=(64, 64),
-    critic_head_dims=(64,),
+    projection_dim=projection_dim,
+    memory_type=args.memory_type,
+    memory_hidden_dim=args.memory_hidden_dim,
+    critic_dims=(64,),
+    lambda1_critic_dims=(64,),
+    lambda2_critic_dims=(64,),
     train_steps=args.train_steps,
-    approximate_mc=True,
+    approximate_lambda=True,
     debug=True,
 )
+
+# ── carry helper ──────────────────────────────────────────────────────────────
+#
+# RecurrentFeatureExtractor uses a flat carry of width:
+#   identity   -> 0
+#   rnn / gru  -> memory_hidden_dim
+#   lstm       -> 2 * memory_hidden_dim   (concatenated [c, h])
+
+if args.memory_type == "identity":
+    CARRY_DIM = 0
+elif args.memory_type == "lstm":
+    CARRY_DIM = 2 * args.memory_hidden_dim
+else:
+    CARRY_DIM = args.memory_hidden_dim
+
+
+def zero_carry() -> jax.Array:
+    """Zero carry shaped ``(carry_dim,)`` for a single-observation predict()."""
+    return jnp.zeros((CARRY_DIM,), dtype=jnp.float32)
+
 
 # ── initial environment reset ─────────────────────────────────────────────────
 
@@ -193,12 +250,15 @@ def evaluate(agent_state, rng_key, n_episodes: int = 10) -> float:
     for _ in range(n_episodes):
         rng_key, rk = jax.random.split(rng_key)
         ep_obs, ep_state = env.reset(rk, env_params)
+        ep_carry = zero_carry()
         ep_return = 0.0
         done = False
         while not done:
             rng_key, sk = jax.random.split(rng_key)
-            # predict returns a float32 scalar action index; gymnax expects int32
-            raw = fns.predict(agent_state, ep_obs, sk, deterministic=True)
+            # predict returns (action_index_float32, new_carry); gymnax expects int32
+            raw, ep_carry = fns.predict(
+                agent_state, ep_obs, ep_carry, sk, deterministic=True
+            )
             action = jnp.round(raw).astype(jnp.int32)
             rng_key, ek = jax.random.split(rng_key)
             ep_obs, ep_state, reward, done, _ = env.step(
@@ -227,9 +287,12 @@ if args.wandb:
             name=args.wandb_run_name,
             config={
                     "env": "CartPole-v1",
-                    "algo": "SAC",
+                    "algo": "SAC+lambda",
                     "action_space": "discrete",
-                    "approximate_mc": True,
+                    "approximate_lambda": True,
+                    "memory_type": args.memory_type,
+                    "memory_hidden_dim": args.memory_hidden_dim,
+                    "projection_dim": projection_dim,
                     "partial_obs": args.partial,
                     "rounds": args.rounds,
                     "train_steps": args.train_steps,
@@ -254,31 +317,13 @@ for rnd in range(1, args.rounds + 1):
     key, eval_key = jax.random.split(key)
     mean_return = evaluate(state, eval_key, n_episodes=10)
 
-    # Q comparison: SAC critic_target vs MC critic_target on a random batch
-    key, cmp_key, entropy_key = jax.random.split(key, 3)
-    buf_size = int(state.online_buffer.size)
-    # Only sample from slots that are marked sampling_ok (populated and have a
-    # valid successor).
-    sampling_ok_f = state.online_buffer.sampling_ok.astype(jnp.float32)
-    sampling_ok_probs = sampling_ok_f / sampling_ok_f.sum()
-    cmp_idx = jax.random.choice(
-        cmp_key, buf_size, (hp.online_batch_size,), replace=False, p=sampling_ok_probs
-    )
-    cmp_obs = state.online_buffer.info["observations"][cmp_idx]
-    cmp_actions = state.online_buffer.info["actions"][cmp_idx]
-    entropy = debug_fns.get_entropy(state.actor, cmp_obs, entropy_key)
-    q_sac = (
-        debug_fns.get_q(state.critic_target, cmp_obs, cmp_actions, False)
-        + state.alpha * entropy
-    )
-    q_mc = debug_fns.get_q(state.mc_critic_target, cmp_obs, cmp_actions, True)
-
     print(
         f"Round {rnd:4d}/{args.rounds}  "
         f"mean_return={mean_return:7.1f}  "
-        f"alpha={float(metrics['alpha']):.4f}  "
-        f"mc_critic_loss={float(metrics['mc_critic_loss']):.4f}  "
-        f"q_sac={q_sac.mean():7.3f}  q_mc={q_mc.mean():7.3f}  |Δq|={jnp.abs(q_sac - q_mc).mean():.4f}"
+        f"alpha={float(metrics.get('alpha', state.alpha)):.4f}  "
+        f"critic_loss={float(metrics.get('critic_loss', jnp.nan)):.4f}  "
+        f"entropy={float(metrics.get('entropy', jnp.nan)):.4f}  "
+        f"q={float(metrics.get('q', jnp.nan)):7.3f}"
     )
 
     if _wandb is not None:
@@ -287,9 +332,6 @@ for rnd in range(1, args.rounds + 1):
                 "round": rnd,
                 "step": rnd * args.train_steps,
                 "mean_return": mean_return,
-                "q_sac": q_sac.mean(),
-                "q_mc": q_mc.mean(),
-                "q_delta_abs": jnp.abs(q_sac - q_mc).mean(),
                 **{k: float(v) for k, v in metrics.items()},
             }
         )
@@ -320,6 +362,7 @@ print("Ctrl-C to quit.\n")
 vis_env = gym.make("CartPole-v1", render_mode="human")
 obs, _ = vis_env.reset()
 key = jax.random.key(args.seed + 1)
+vis_carry = zero_carry()
 
 while True:
     key, subkey = jax.random.split(key)
@@ -328,9 +371,10 @@ while True:
     vis_obs = jnp.array(obs)
     if args.partial:
         vis_obs = vis_obs[jnp.array([0, 2])]
-    # predict returns a float32 scalar; gymnasium CartPole expects a plain int
-    raw = fns.predict(state, vis_obs, subkey, deterministic=True)
+    # predict returns (action_float32, new_carry); gymnasium CartPole expects int
+    raw, vis_carry = fns.predict(state, vis_obs, vis_carry, subkey, deterministic=True)
     obs, _, terminated, truncated, _ = vis_env.step(int(jnp.round(raw)))
     if terminated or truncated:
         obs, _ = vis_env.reset()
+        vis_carry = zero_carry()
         input("Episode done — press Enter to continue…")

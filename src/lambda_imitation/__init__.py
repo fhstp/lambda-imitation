@@ -1,6 +1,11 @@
-"""lambda-imitation: IQ-Learn (Inverse Q-Learning) imitation learning.
+"""lambda-imitation: SAC / IQ-Learn imitation learning.
 
-Public API re-exports from the three sub-modules.
+NOTE (refactor in progress): only buffer symbols are re-exported from the
+package root.  The iqlearn / utils modules currently reference each other via
+names that have been renamed or not yet wired up (SACState vs IQLearnState,
+missing ``create_sequence_sample`` import, etc.), so importing them here would
+fail at package import time.  Import them directly from their submodules once
+fixed.
 """
 
 from lambda_imitation.buffer import (
@@ -9,53 +14,14 @@ from lambda_imitation.buffer import (
     BufferSample,
     create_buffer,
     create_sample,
-)
-from lambda_imitation.iqlearn import (
-    DebugFunctions,
-    Head,
-    Hyperparameters,
-    IQLearnFunctions,
-    IQLearnGraphs,
-    IQLearnState,
-    MLPFeatureExtractor,
-    NetworkGraphs,
-    NetworkState,
-    TwinCriticState,
-    create_iqlearn,
-    extract_buffer_shapes,
-)
-from lambda_imitation.utils import (
-    EnvSpec,
-    create_iqlearn_from_env,
-    env_spec_from_gymnasium,
-    env_spec_from_gymnax,
-    env_spec_from_jumanji,
+    create_sequence_sample,
 )
 
 __all__ = [
-    # buffer
     "Buffer",
     "BufferFunctions",
     "BufferSample",
     "create_buffer",
     "create_sample",
-    # iqlearn
-    "DebugFunctions",
-    "Head",
-    "Hyperparameters",
-    "IQLearnFunctions",
-    "IQLearnGraphs",
-    "IQLearnState",
-    "MLPFeatureExtractor",
-    "NetworkGraphs",
-    "NetworkState",
-    "TwinCriticState",
-    "create_iqlearn",
-    "extract_buffer_shapes",
-    # utils
-    "EnvSpec",
-    "create_iqlearn_from_env",
-    "env_spec_from_gymnasium",
-    "env_spec_from_gymnax",
-    "env_spec_from_jumanji",
+    "create_sequence_sample",
 ]

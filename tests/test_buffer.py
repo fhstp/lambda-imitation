@@ -1,367 +1,370 @@
-"""Tests for the circular replay buffer.
-
-The first class (TestSamplingOk) is a direct conversion of the old __main__
-inline tests to the new generic-info-dict API.  The remaining classes cover
-behaviour that was previously untested.
-"""
+"""Tests for :mod:`lambda_imitation.buffer`."""
 
 import jax
 import jax.numpy as jnp
 import pytest
 
-from lambda_imitation.buffer import create_buffer
+from lambda_imitation.buffer import (
+    Buffer,
+    BufferFunctions,
+    BufferSample,
+    create_buffer,
+    create_sample,
+    create_sequence_sample,
+)
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Fixtures / helpers
 # ---------------------------------------------------------------------------
 
-SHAPES = {"obs": (3,), "act": (2,), "rew": ()}
+
+@pytest.fixture
+def shapes():
+    return {"obs": (4,), "act": (2,), "rew": ()}
 
 
-def make_buffer(size=5, sampling_size=1):
-    """Create a buffer with the same logical schema the old tests used."""
-    return create_buffer(
-        shapes=SHAPES,
-        size=size,
-        sampling_size=sampling_size,
+@pytest.fixture
+def empty_buffer(shapes):
+    buffer, fns = create_buffer(
+        shapes=shapes,
+        size=8,
+        sampling_size=4,
         this_step_infos=["obs", "act", "rew"],
         next_step_infos=["obs"],
     )
+    return buffer, fns
 
 
-def add_step(buffer, fns, obs, act, rew, terminated):
-    """Thin wrapper matching the old positional add() signature."""
-    return fns.add(
-        buffer,
-        {"obs": jnp.array(obs, dtype=jnp.float32),
-         "act": jnp.array(act, dtype=jnp.float32),
-         "rew": jnp.array(rew, dtype=jnp.float32)},
-        terminated,
-    )
+def _step(i: int, shapes: dict[str, tuple[int, ...]]) -> dict[str, jax.Array]:
+    """Deterministic dummy transition keyed by step index."""
+    return {
+        "obs": jnp.full(shapes["obs"], float(i)),
+        "act": jnp.full(shapes["act"], float(i) * 0.1),
+        "rew": jnp.asarray(float(i) * 10.0),
+    }
 
 
 # ---------------------------------------------------------------------------
-# Converted old __main__ tests  (sampling_ok flag + stored data)
+# create_buffer: structure
 # ---------------------------------------------------------------------------
+
+
+class TestCreateBuffer:
+    def test_returns_buffer_and_functions(self, empty_buffer):
+        buffer, fns = empty_buffer
+        assert isinstance(buffer, Buffer)
+        assert isinstance(fns, BufferFunctions)
+        assert callable(fns.add)
+        assert callable(fns.sample)
+
+    def test_info_arrays_zeroed_with_correct_shape(self, shapes):
+        buffer, _ = create_buffer(
+            shapes=shapes,
+            size=8,
+            sampling_size=4,
+            this_step_infos=["obs"],
+            next_step_infos=["obs"],
+        )
+        for key, item_shape in shapes.items():
+            arr = buffer.info[key]
+            assert arr.shape == (8,) + item_shape
+            assert jnp.all(arr == 0)
+
+    def test_sampling_ok_all_false_initially(self, empty_buffer):
+        buffer, _ = empty_buffer
+        assert buffer.sampling_ok.shape == (8,)
+        assert buffer.sampling_ok.dtype == jnp.bool_
+        assert not jnp.any(buffer.sampling_ok)
+
+    def test_pos_starts_at_zero(self, empty_buffer):
+        buffer, _ = empty_buffer
+        assert int(buffer.pos) == 0
+
+    def test_size_field_matches_arg(self, empty_buffer):
+        buffer, _ = empty_buffer
+        assert buffer.size == 8
+
+
+# ---------------------------------------------------------------------------
+# add: writes and pos
+# ---------------------------------------------------------------------------
+
+
+class TestAdd:
+    def test_writes_provided_keys_into_current_slot(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        buffer = fns.add(buffer, _step(1, shapes), terminated=False)
+        assert jnp.all(buffer.info["obs"][0] == 1.0)
+        assert jnp.allclose(buffer.info["act"][0], 0.1)
+        assert float(buffer.info["rew"][0]) == 10.0
+
+    def test_does_not_touch_other_slots(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        buffer = fns.add(buffer, _step(1, shapes), terminated=False)
+        # all slots 1..7 still zero
+        assert jnp.all(buffer.info["obs"][1:] == 0)
+
+    def test_increments_pos(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        for i in range(3):
+            buffer = fns.add(buffer, _step(i, shapes), terminated=False)
+        assert int(buffer.pos) == 3
+
+    def test_wraps_position_modulo_size(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        # write size+2 = 10 transitions into a size-8 buffer
+        for i in range(buffer.size + 2):
+            buffer = fns.add(buffer, _step(i, shapes), terminated=False)
+        # pos counter itself is monotonic (not wrapped)
+        assert int(buffer.pos) == 10
+        # but slots 0..1 now hold the *last two* transitions (i=8, i=9)
+        assert float(buffer.info["obs"][0][0]) == 8.0
+        assert float(buffer.info["obs"][1][0]) == 9.0
+        # slot 7 still holds i=7 (most recent into upper half)
+        assert float(buffer.info["obs"][7][0]) == 7.0
+
+    def test_missing_keys_in_infos_leave_data_unchanged(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        # write a full transition
+        buffer = fns.add(buffer, _step(1, shapes), terminated=False)
+        # second write only updates "obs" — "act"/"rew" at slot 1 must remain 0
+        buffer = fns.add(buffer, {"obs": jnp.full(shapes["obs"], 5.0)}, terminated=False)
+        assert jnp.all(buffer.info["obs"][1] == 5.0)
+        assert jnp.all(buffer.info["act"][1] == 0.0)
+        assert float(buffer.info["rew"][1]) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# sampling_ok: predecessor + terminal rules
+# ---------------------------------------------------------------------------
+
 
 class TestSamplingOk:
-    """sampling_ok flag logic -- direct port of the seven original tests."""
+    def test_first_add_non_terminal_marks_nothing(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        buffer = fns.add(buffer, _step(0, shapes), terminated=False)
+        # slot 0 has no known successor yet
+        assert not bool(buffer.sampling_ok[0])
+        # prev wraps to size-1 but had no predecessor to validate either
+        assert not bool(buffer.sampling_ok[buffer.size - 1])
+        # everything else also False
+        assert not jnp.any(buffer.sampling_ok)
 
-    def test_single_non_terminal(self):
-        buf, fns = make_buffer()
-        buf = add_step(buf, fns, [1, 1, 1], [1, 1], 1.0, False)
+    def test_second_add_marks_previous_slot(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        buffer = fns.add(buffer, _step(0, shapes), terminated=False)
+        buffer = fns.add(buffer, _step(1, shapes), terminated=False)
+        # slot 0 now has a valid successor in slot 1
+        assert bool(buffer.sampling_ok[0])
+        # slot 1's "next" is still unknown
+        assert not bool(buffer.sampling_ok[1])
 
-        assert not buf.sampling_ok.any()
-        assert (buf.info["obs"][0] == jnp.array([1.0, 1.0, 1.0])).all()
-        assert (buf.info["obs"][1:] == 0).all()
-        assert (buf.info["act"][0] == jnp.array([1.0, 1.0])).all()
-        assert (buf.info["act"][1:] == 0).all()
-        assert (buf.info["rew"] == jnp.array([1.0, 0, 0, 0, 0])).all()
+    def test_terminal_slot_marked_immediately(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        buffer = fns.add(buffer, _step(0, shapes), terminated=True)
+        assert bool(buffer.sampling_ok[0])
 
-    def test_single_terminal(self):
-        buf, fns = make_buffer()
-        buf = add_step(buf, fns, [1, 1, 1], [1, 1], 1.0, True)
+    def test_non_terminal_then_terminal(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        buffer = fns.add(buffer, _step(0, shapes), terminated=False)
+        buffer = fns.add(buffer, _step(1, shapes), terminated=True)
+        # slot 0 valid (successor exists), slot 1 valid (terminal)
+        assert bool(buffer.sampling_ok[0])
+        assert bool(buffer.sampling_ok[1])
 
-        expected = jnp.array([True, False, False, False, False])
-        assert (buf.sampling_ok == expected).all()
-
-    def test_two_non_terminal(self):
-        buf, fns = make_buffer()
-        buf = add_step(buf, fns, [1, 1, 1], [1, 1], 1.0, False)
-        buf = add_step(buf, fns, [2, 2, 2], [2, 2], 2.0, False)
-
-        assert (buf.sampling_ok == jnp.array([True, False, False, False, False])).all()
-        assert (buf.info["obs"][0] == jnp.array([1.0, 1.0, 1.0])).all()
-        assert (buf.info["obs"][1] == jnp.array([2.0, 2.0, 2.0])).all()
-        assert (buf.info["obs"][2:] == 0).all()
-        assert (buf.info["act"][0] == jnp.array([1.0, 1.0])).all()
-        assert (buf.info["act"][1] == jnp.array([2.0, 2.0])).all()
-        assert (buf.info["act"][2:] == 0).all()
-        assert (buf.info["rew"] == jnp.array([1.0, 2.0, 0, 0, 0])).all()
-
-    def test_full_buffer(self):
-        buf, fns = make_buffer()
-        for i in range(5):
-            v = float(i + 1)
-            buf = add_step(buf, fns, [v, v, v], [v, v], v, False)
-
-        assert (buf.sampling_ok == jnp.array([True, True, True, True, False])).all()
-        for i in range(5):
-            v = float(i + 1)
-            assert (buf.info["obs"][i] == jnp.full((3,), v)).all()
-            assert (buf.info["act"][i] == jnp.full((2,), v)).all()
-        assert (buf.info["rew"] == jnp.arange(1, 6, dtype=jnp.float32)).all()
-
-    def test_circular_wrap(self):
-        """6 adds into size-5 buffer; write head wraps to slot 0."""
-        buf, fns = make_buffer()
-        for i in range(6):
-            v = float(i + 1)
-            buf = add_step(buf, fns, [v, v, v], [v, v], v, False)
-
-        assert (buf.sampling_ok == jnp.array([False, True, True, True, True])).all()
-        # slot 0 overwritten by step 6
-        assert (buf.info["obs"][0] == jnp.full((3,), 6.0)).all()
-        assert (buf.info["act"][0] == jnp.full((2,), 6.0)).all()
-        assert float(buf.info["rew"][0]) == 6.0
-        # slots 1-4 still hold original data
-        for i in range(1, 5):
-            v = float(i + 1)
-            assert (buf.info["obs"][i] == jnp.full((3,), v)).all()
-
-    def test_circular_wrap_plus_one(self):
-        """7 adds into size-5 buffer; write head at slot 1."""
-        buf, fns = make_buffer()
-        for i in range(7):
-            v = float(i + 1)
-            buf = add_step(buf, fns, [v, v, v], [v, v], v, False)
-
-        assert (buf.sampling_ok == jnp.array([True, False, True, True, True])).all()
-        assert (buf.info["obs"][0] == jnp.full((3,), 6.0)).all()
-        assert (buf.info["obs"][1] == jnp.full((3,), 7.0)).all()
-        for i in range(2, 5):
-            assert (buf.info["obs"][i] == jnp.full((3,), float(i + 1))).all()
-
-    def test_circular_terminal(self):
-        """6 adds, last one terminal: all slots become sampleable."""
-        buf, fns = make_buffer()
-        for i in range(6):
-            v = float(i + 1)
-            buf = add_step(buf, fns, [v, v, v], [v, v], v, i == 5)
-
-        assert (buf.sampling_ok == jnp.array([True, True, True, True, True])).all()
+    def test_predecessor_rule_survives_wraparound(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        # fill size+1 = 9 non-terminal transitions
+        for i in range(buffer.size + 1):
+            buffer = fns.add(buffer, _step(i, shapes), terminated=False)
+        # pos==9; last write went to slot 0 (i=8). that should have marked slot 7
+        # (its predecessor in ring) as valid. slot 0 itself is not yet valid:
+        # its successor (slot 1, holding old i=1 data) was not just written.
+        assert bool(buffer.sampling_ok[7])
+        assert not bool(buffer.sampling_ok[0])
 
 
 # ---------------------------------------------------------------------------
-# Initialisation
+# sample: shapes, contents, validity
 # ---------------------------------------------------------------------------
 
-class TestInit:
-    def test_initial_state(self):
-        buf, _ = make_buffer(size=4, sampling_size=2)
-        assert buf.pos == 0
-        assert buf.size == 4
-        assert not buf.sampling_ok.any()
-        for k, shape in SHAPES.items():
-            assert buf.info[k].shape == (4,) + shape
-            assert (buf.info[k] == 0).all()
 
-    def test_all_shape_keys_present(self):
-        buf, _ = make_buffer()
-        assert set(buf.info.keys()) == set(SHAPES.keys())
+class TestSample:
+    def _fill_with_terminals(self, fns, buffer, shapes, n):
+        """Fill `n` transitions, all terminal so every slot is sampleable."""
+        for i in range(n):
+            buffer = fns.add(buffer, _step(i, shapes), terminated=True)
+        return buffer
 
+    def test_sample_returns_buffer_sample_and_indices(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        buffer = self._fill_with_terminals(fns, buffer, shapes, n=8)
+        out, indices = fns.sample(buffer, jax.random.key(0))
+        assert isinstance(out, BufferSample)
+        # sampling_size=4 in the fixture
+        assert indices.shape == (4,)
 
-# ---------------------------------------------------------------------------
-# Position tracking
-# ---------------------------------------------------------------------------
+    def test_sample_this_info_keys_and_shapes(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        buffer = self._fill_with_terminals(fns, buffer, shapes, n=8)
+        out, _ = fns.sample(buffer, jax.random.key(0))
+        # this_step_infos = ["obs", "act", "rew"]
+        assert set(out.this_info.keys()) == {"obs", "act", "rew"}
+        assert out.this_info["obs"].shape == (4,) + shapes["obs"]
+        assert out.this_info["act"].shape == (4,) + shapes["act"]
+        assert out.this_info["rew"].shape == (4,)
 
-class TestPosTracking:
-    def test_pos_increments(self):
-        buf, fns = make_buffer()
-        assert buf.pos == 0
-        for i in range(10):
-            buf = add_step(buf, fns, [0, 0, 0], [0, 0], 0.0, False)
-            assert buf.pos == i + 1
+    def test_sample_next_info_only_contains_next_keys(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        buffer = self._fill_with_terminals(fns, buffer, shapes, n=8)
+        out, _ = fns.sample(buffer, jax.random.key(0))
+        # next_step_infos = ["obs"]
+        assert set(out.next_info.keys()) == {"obs"}
+        assert out.next_info["obs"].shape == (4,) + shapes["obs"]
 
-    def test_size_unchanged_after_wraps(self):
-        buf, fns = make_buffer(size=3)
-        for _ in range(7):
-            buf = add_step(buf, fns, [0, 0, 0], [0, 0], 0.0, False)
-        assert buf.size == 3
+    def test_sample_next_obs_is_circular_successor(self, empty_buffer, shapes):
+        buffer, fns = empty_buffer
+        buffer = self._fill_with_terminals(fns, buffer, shapes, n=8)
+        out, indices = fns.sample(buffer, jax.random.key(123))
+        for batch_idx in range(indices.shape[0]):
+            i = int(indices[batch_idx])
+            j = (i + 1) % buffer.size
+            assert jnp.allclose(out.this_info["obs"][batch_idx], buffer.info["obs"][i])
+            assert jnp.allclose(out.next_info["obs"][batch_idx], buffer.info["obs"][j])
 
-
-# ---------------------------------------------------------------------------
-# Partial add (only some info keys supplied)
-# ---------------------------------------------------------------------------
-
-class TestPartialAdd:
-    def test_missing_key_preserves_zeros(self):
-        buf, fns = make_buffer()
-        buf = fns.add(buf, {"obs": jnp.array([1.0, 2.0, 3.0])}, False)
-
-        assert (buf.info["obs"][0] == jnp.array([1.0, 2.0, 3.0])).all()
-        # act and rew were not supplied -- should stay zero
-        assert (buf.info["act"][0] == jnp.zeros(2)).all()
-        assert float(buf.info["rew"][0]) == 0.0
-
-    def test_overwrite_single_key(self):
-        """Add full step, then overwrite only one key at the same slot."""
-        buf, fns = make_buffer()
-        buf = add_step(buf, fns, [1, 1, 1], [1, 1], 1.0, False)
-        buf = add_step(buf, fns, [2, 2, 2], [2, 2], 2.0, False)
-        # Now overwrite slot 2 (pos=2) with only obs
-        buf = fns.add(buf, {"obs": jnp.array([9.0, 9.0, 9.0])}, False)
-        assert (buf.info["obs"][2] == jnp.full((3,), 9.0)).all()
-        # act and rew at slot 2 remain zero (never written)
-        assert (buf.info["act"][2] == jnp.zeros(2)).all()
-
-
-# ---------------------------------------------------------------------------
-# Episode boundaries
-# ---------------------------------------------------------------------------
-
-class TestEpisodeBoundary:
-    def test_terminal_then_new_episode(self):
-        """Terminal step followed by the start of a new episode."""
-        buf, fns = make_buffer()
-        # Episode 1: step 0 (non-terminal), step 1 (terminal)
-        buf = add_step(buf, fns, [1, 1, 1], [1, 1], 1.0, False)
-        buf = add_step(buf, fns, [2, 2, 2], [2, 2], 2.0, True)
-        assert (buf.sampling_ok == jnp.array([True, True, False, False, False])).all()
-
-        # Episode 2: step 2 (non-terminal)
-        buf = add_step(buf, fns, [3, 3, 3], [3, 3], 3.0, False)
-        # slot 1 still sampleable (was terminal; now also has valid next)
-        # slot 2 non-terminal with no next yet
-        assert (buf.sampling_ok == jnp.array([True, True, False, False, False])).all()
-
-    def test_two_complete_episodes(self):
-        """Two 2-step episodes back to back."""
-        buf, fns = make_buffer()
-        buf = add_step(buf, fns, [1, 0, 0], [0, 0], 0.0, False)
-        buf = add_step(buf, fns, [2, 0, 0], [0, 0], 1.0, True)
-        buf = add_step(buf, fns, [3, 0, 0], [0, 0], 0.0, False)
-        buf = add_step(buf, fns, [4, 0, 0], [0, 0], 1.0, True)
-
-        # 0: has next -> T, 1: terminal -> T, 2: has next -> T, 3: terminal -> T
-        assert (buf.sampling_ok == jnp.array([True, True, True, True, False])).all()
-
-
-# ---------------------------------------------------------------------------
-# Small buffer edge cases
-# ---------------------------------------------------------------------------
-
-class TestSmallBuffer:
-    def test_size_two_fill(self):
-        buf, fns = create_buffer(
-            shapes={"x": (1,)}, size=2, sampling_size=1,
-            this_step_infos=["x"], next_step_infos=["x"],
+    def test_sample_only_draws_valid_slots(self, shapes):
+        # size=4, only slot 2 valid → every drawn index must be 2.
+        buffer, fns = create_buffer(
+            shapes=shapes,
+            size=4,
+            sampling_size=16,
+            this_step_infos=["obs"],
+            next_step_infos=["obs"],
         )
-        buf = fns.add(buf, {"x": jnp.array([1.0])}, False)
-        assert not buf.sampling_ok.any()
-
-        buf = fns.add(buf, {"x": jnp.array([2.0])}, False)
-        # slot 0 has valid next (slot 1); slot 1 does not
-        assert (buf.sampling_ok == jnp.array([True, False])).all()
-
-    def test_size_two_wrap(self):
-        buf, fns = create_buffer(
-            shapes={"x": (1,)}, size=2, sampling_size=1,
-            this_step_infos=["x"], next_step_infos=["x"],
-        )
+        # write 3 non-terminal steps so slots 0,1 get marked valid (via predecessor
+        # rule on next add). Then write step 3 as terminal so slot 2 valid too.
+        # Mask everything off except slot 2 manually for a tighter test:
         for i in range(3):
-            buf = fns.add(buf, {"x": jnp.array([float(i)])}, False)
-        # 3 adds into size 2: slot 0 overwritten, write head back at slot 1
-        assert (buf.sampling_ok == jnp.array([False, True])).all()
+            buffer = fns.add(buffer, _step(i, shapes), terminated=False)
+        # mask: only slot 2 is valid
+        forced = jnp.array([False, False, True, False])
+        buffer = buffer._replace(sampling_ok=forced)
+        _, indices = fns.sample(buffer, jax.random.key(7))
+        assert jnp.all(indices == 2)
 
-    def test_size_three_multiple_wraps(self):
-        buf, fns = create_buffer(
-            shapes={"x": ()}, size=3, sampling_size=1,
-            this_step_infos=["x"], next_step_infos=["x"],
+
+# ---------------------------------------------------------------------------
+# create_sample: usable independently of create_buffer
+# ---------------------------------------------------------------------------
+
+
+class TestCreateSampleStandalone:
+    def test_works_against_externally_built_buffer(self, shapes):
+        size = 4
+        # build a Buffer manually
+        info = {k: jnp.arange(size * max(1, int(jnp.prod(jnp.asarray(shape)))))
+                .reshape((size,) + shape)
+                .astype(jnp.float32)
+                for k, shape in shapes.items()}
+        buffer = Buffer(
+            info=info,
+            sampling_ok=jnp.array([True, True, False, False]),
+            pos=4,
+            size=size,
+        )
+        sample_fn = create_sample(
+            buffer_size=size,
+            sampling_size=8,
+            this_keys=["obs"],
+            next_keys=["obs"],
+        )
+        out, indices = sample_fn(buffer, jax.random.key(0))
+        assert out.this_info["obs"].shape == (8,) + shapes["obs"]
+        # only slots 0,1 are valid; every drawn index must be 0 or 1
+        assert jnp.all((indices == 0) | (indices == 1))
+
+
+# ---------------------------------------------------------------------------
+# create_sequence_sample: contiguous K-step window sampling
+# ---------------------------------------------------------------------------
+
+
+class TestCreateSequenceSample:
+    def test_sequence_sample_shapes(self, shapes):
+        buffer, fns = create_buffer(
+            shapes=shapes,
+            size=8,
+            sampling_size=2,
+            this_step_infos=["obs"],
+            next_step_infos=["obs"],
         )
         for i in range(8):
-            buf = fns.add(buf, {"x": jnp.array(float(i))}, False)
-        # pos=8; last written slot is (8-1)%3 = 1 (pos is post-increment)
-        # slot 1 is freshest (no valid next yet) -> F
-        # slot 2: has next at 0 -> T, slot 0: has next at 1 -> T
-        assert (buf.sampling_ok == jnp.array([True, False, True])).all()
-
-
-# ---------------------------------------------------------------------------
-# Heterogeneous shapes
-# ---------------------------------------------------------------------------
-
-class TestHeterogeneousShapes:
-    def test_mixed_shapes(self):
-        """Buffer with scalar, 1-D, and 2-D info entries."""
-        buf, fns = create_buffer(
-            shapes={"scalar": (), "vec": (4,), "mat": (2, 3)},
-            size=3, sampling_size=1,
-            this_step_infos=["scalar", "vec", "mat"],
-            next_step_infos=["vec"],
+            buffer = fns.add(buffer, _step(i, shapes), terminated=True)
+        sample_fn = create_sequence_sample(
+            buffer_size=8,
+            sampling_size=2,
+            sequence_size=3,
+            keys=["obs"],
         )
-        assert buf.info["scalar"].shape == (3,)
-        assert buf.info["vec"].shape == (3, 4)
-        assert buf.info["mat"].shape == (3, 2, 3)
+        out, seq_indices = sample_fn(buffer, jax.random.key(0))
+        # sampling_size=2, sequence_size=3
+        assert seq_indices.shape == (2, 3)
+        assert out.this_info["obs"].shape == (2, 3) + shapes["obs"]
+        # content: row b column t holds the obs at slot seq_indices[b, t]
+        for b in range(2):
+            for t in range(3):
+                slot = int(seq_indices[b, t])
+                assert jnp.allclose(
+                    out.this_info["obs"][b, t], buffer.info["obs"][slot]
+                )
 
-        buf = fns.add(
-            buf,
-            {"scalar": jnp.array(5.0),
-             "vec": jnp.ones(4),
-             "mat": jnp.ones((2, 3)) * 2},
-            False,
+    def test_sequence_indices_are_contiguous(self, shapes):
+        buffer, fns = create_buffer(
+            shapes=shapes,
+            size=8,
+            sampling_size=4,
+            this_step_infos=["obs"],
+            next_step_infos=["obs"],
         )
-        assert float(buf.info["scalar"][0]) == 5.0
-        assert (buf.info["vec"][0] == 1.0).all()
-        assert (buf.info["mat"][0] == 2.0).all()
+        for i in range(8):
+            buffer = fns.add(buffer, _step(i, shapes), terminated=True)
+        sample_fn = create_sequence_sample(
+            buffer_size=8,
+            sampling_size=4,
+            sequence_size=3,
+            keys=["obs"],
+        )
+        _, seq_indices = sample_fn(buffer, jax.random.key(42))
+        # each row should be [k, k+1, k+2] for some start k
+        diffs = jnp.diff(seq_indices, axis=1)
+        assert jnp.all(diffs == 1)
 
-
-# ---------------------------------------------------------------------------
-# Sampling
-# ---------------------------------------------------------------------------
-
-class TestSampling:
-    @pytest.fixture()
-    def filled_buffer(self):
-        """Size-5 buffer fully filled (non-terminal), sampling_size=3."""
-        buf, fns = make_buffer(size=5, sampling_size=3)
-        for i in range(5):
-            v = float(i + 1)
-            buf = add_step(buf, fns, [v, v, v], [v, v], v, False)
-        return buf, fns
-
-    def test_output_shapes(self, filled_buffer):
-        buf, fns = filled_buffer
-        key = jax.random.key(42)
-        sample, indices = fns.sample(buf, key)
-
-        assert sample.this_info["obs"].shape == (3, 3)   # (sampling_size, obs_dim)
-        assert sample.this_info["act"].shape == (3, 2)
-        assert sample.this_info["rew"].shape == (3,)
-        assert sample.next_info["obs"].shape == (3, 3)
-        assert indices.shape == (3,)
-
-    def test_this_info_keys(self, filled_buffer):
-        buf, fns = filled_buffer
-        sample, _ = fns.sample(buf, jax.random.key(0))
-        assert set(sample.this_info.keys()) == {"obs", "act", "rew"}
-
-    def test_next_info_keys(self, filled_buffer):
-        buf, fns = filled_buffer
-        sample, _ = fns.sample(buf, jax.random.key(0))
-        assert set(sample.next_info.keys()) == {"obs"}
-
-    def test_sampled_indices_are_valid(self, filled_buffer):
-        """Every sampled index must have sampling_ok = True."""
-        buf, fns = filled_buffer
-        for seed in range(5):
-            _, indices = fns.sample(buf, jax.random.key(seed))
-            for idx in indices:
-                assert buf.sampling_ok[idx], f"seed={seed}, idx={int(idx)}"
-
-    def test_this_next_pairing(self, filled_buffer):
-        """sample.next_info[i] should hold data from slot (index+1) % size."""
-        buf, fns = filled_buffer
-        sample, indices = fns.sample(buf, jax.random.key(7))
-        for i, idx in enumerate(indices):
-            next_idx = (int(idx) + 1) % buf.size
-            expected = buf.info["obs"][next_idx]
-            assert (sample.next_info["obs"][i] == expected).all()
-
-    def test_this_data_matches_buffer(self, filled_buffer):
-        """sample.this_info[i] should hold data from slot index."""
-        buf, fns = filled_buffer
-        sample, indices = fns.sample(buf, jax.random.key(99))
-        for i, idx in enumerate(indices):
-            assert (sample.this_info["obs"][i] == buf.info["obs"][idx]).all()
-            assert (sample.this_info["act"][i] == buf.info["act"][idx]).all()
-            assert sample.this_info["rew"][i] == buf.info["rew"][idx]
-
-    def test_different_keys_give_different_samples(self, filled_buffer):
-        """Sanity: two different PRNG keys should (almost certainly) give different indices."""
-        buf, fns = filled_buffer
-        _, idx_a = fns.sample(buf, jax.random.key(0))
-        _, idx_b = fns.sample(buf, jax.random.key(1))
-        # With 4 valid slots and sampling_size=3 the chance of identical draws is tiny
-        assert not (idx_a == idx_b).all()
+    def test_sequence_sample_respects_window_validity(self, shapes):
+        # only an unbroken run of length sequence_size+1 starting at some slot
+        # may be drawn. force a single valid run starting at slot 2.
+        buffer, fns = create_buffer(
+            shapes=shapes,
+            size=8,
+            sampling_size=16,
+            this_step_infos=["obs"],
+            next_step_infos=["obs"],
+        )
+        for i in range(8):
+            buffer = fns.add(buffer, _step(i, shapes), terminated=True)
+        # mask: only slots 2,3,4,5 valid — one length-4 contiguous run
+        forced = jnp.array(
+            [False, False, True, True, True, True, False, False]
+        )
+        buffer = buffer._replace(sampling_ok=forced)
+        sample_fn = create_sequence_sample(
+            buffer_size=8,
+            sampling_size=16,
+            sequence_size=3,
+            keys=["obs"],
+        )
+        _, seq_indices = sample_fn(buffer, jax.random.key(0))
+        # with sequence_size=3 the reduce-window length is sequence_size+1=4,
+        # so only start=2 produces an all-valid window. every draw must start at 2.
+        starts = seq_indices[:, 0]
+        assert jnp.all(starts == 2)

@@ -6,6 +6,12 @@ environments into a common :class:`EnvSpec` NamedTuple, and a high-level
 convenience function :func:`create_iqlearn_from_env` that builds a ready-to-use
 IQ-Learn agent from an ``EnvSpec`` and a dict of expert transitions.
 
+Also exposes :class:`RecurrentFeatureExtractor`, an ``nnx.Module`` that
+combines an MLP backbone with an optional recurrent cell (identity, vanilla
+RNN, GRU or LSTM) and exposes the
+``feature_extractor(carry, obs) -> (new_carry, y)`` calling convention that
+:func:`lambda_imitation.iqlearn.create_iqlearn` expects.
+
 All three environment libraries are imported lazily, so only the library you
 actually use needs to be installed.
 
@@ -13,58 +19,37 @@ Both continuous (``Box``-style) and discrete action spaces are supported.
 For discrete spaces, ``action_low`` and ``action_high`` in the returned
 :class:`EnvSpec` are ``None``; ``action_dim`` holds the number of actions.
 Observation specs must be flat (single array); nested jumanji observation
-specs raise :exc:`ValueError` — flatten the observation manually before using
+specs raise :exc:`ValueError` -- flatten the observation manually before using
 this module.
 
-Typical usage (gymnasium, continuous)::
-
-    import gymnasium as gym
-    from lambda_imitation.utils import env_spec_from_gymnasium, create_iqlearn_from_env
-
-    env      = gym.make("HalfCheetah-v5")
-    spec     = env_spec_from_gymnasium(env)
-    state, fns, graphs = create_iqlearn_from_env(spec, expert_data)
-
-Typical usage (gymnasium, discrete)::
-
-    env  = gym.make("CartPole-v1")
-    spec = env_spec_from_gymnasium(env)   # is_discrete=True
-    state, fns, graphs = create_iqlearn_from_env(spec, expert_data)
-
-Typical usage (gymnax)::
+Typical usage (gymnax, GRU memory)::
 
     import gymnax
-    from lambda_imitation.utils import env_spec_from_gymnax, create_iqlearn_from_env
+    from lambda_imitation.utils import (
+        env_spec_from_gymnax, create_iqlearn_from_env,
+    )
 
-    env, params = gymnax.make("Pendulum-v1")
+    env, params = gymnax.make("CartPole-v1")
     spec        = env_spec_from_gymnax(env, params)
-    state, fns, graphs = create_iqlearn_from_env(spec, expert_data)
-
-Typical usage (jumanji)::
-
-    import jumanji
-    from lambda_imitation.utils import env_spec_from_jumanji, create_iqlearn_from_env
-
-    env  = jumanji.make("Ant-v1")
-    spec = env_spec_from_jumanji(env)
-    state, fns, graphs = create_iqlearn_from_env(spec, expert_data)
+    state, fns  = create_iqlearn_from_env(
+        spec, expert_data,
+        memory_type="gru", memory_hidden_dim=128,
+    )
 """
 
 import math
-from typing import NamedTuple, Tuple
+from typing import Literal, NamedTuple, Tuple
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from .buffer import Buffer, create_buffer
+from .buffer import create_buffer
 from .iqlearn import (
     DebugFunctions,
     Hyperparameters,
-    IQLearnFunctions,
-    IQLearnGraphs,
-    IQLearnState,
-    MLPFeatureExtractor,
+    SACFunctions,
+    SACState,
     create_iqlearn,
 )
 
@@ -95,6 +80,168 @@ class EnvSpec(NamedTuple):
     is_discrete: bool
     action_low: jax.Array | None = None
     action_high: jax.Array | None = None
+
+
+# ---------------------------------------------------------------------------
+# Recurrent feature extractor
+# ---------------------------------------------------------------------------
+
+
+MemoryType = Literal["identity", "rnn", "gru", "lstm"]
+
+
+class RecurrentFeatureExtractor(nnx.Module):
+    """Linear projection followed by an optional recurrent memory cell.
+
+    The module exposes the
+    ``feature_extractor(carry, obs) -> (new_carry, y)`` calling convention
+    required by :func:`lambda_imitation.iqlearn.calculate_latent`.
+
+    Layout::
+
+        obs --[ Linear(projection_dim) ]--> z --[ memory cell ]--> y
+                                                       |
+                                                       +---> new_carry
+
+    The projection is a plain ``nnx.Linear`` with **no activation**, mirroring
+    the embedding layer used in standard recurrent baselines (e.g. R2D2,
+    DRQN).  Set ``projection_dim=None`` to skip it and feed the flattened raw
+    observation straight into the recurrent cell.  The cell, if any, is a
+    Flax NNX ``SimpleCell`` (vanilla RNN), ``GRUCell`` or ``LSTMCell`` with
+    ``hidden_features=memory_hidden_dim``.  For ``"identity"`` no cell is
+    used and the carry is a zero-width dummy that is passed through
+    untouched.
+
+    Attributes:
+        output_dim: Width of the produced feature vector ``y``.  Equals
+            ``memory_hidden_dim`` for recurrent cells, otherwise
+            ``projection_dim`` (or ``input_dim`` when ``projection_dim`` is
+            ``None``).
+        memory_type: One of ``"identity"``, ``"rnn"``, ``"gru"``, ``"lstm"``.
+
+    Args:
+        input_dim: Flat size of a single observation (product of all dims).
+        projection_dim: Width of the linear embedding applied to the
+            flattened observation before the memory cell.  ``None`` skips
+            the projection.
+        memory_type: ``"identity"`` (no recurrency), ``"rnn"``, ``"gru"`` or
+            ``"lstm"``.
+        memory_hidden_dim: Hidden-state width for the recurrent cell.
+            Ignored when ``memory_type="identity"``.
+        rngs: Flax NNX RNG container used to initialise parameters.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        projection_dim: int | None = 256,
+        memory_type: MemoryType = "identity",
+        memory_hidden_dim: int = 128,
+        *,
+        rngs: nnx.Rngs,
+    ):
+        if memory_type not in ("identity", "rnn", "gru", "lstm"):
+            raise ValueError(
+                f"memory_type must be one of 'identity', 'rnn', 'gru', 'lstm'; "
+                f"got {memory_type!r}."
+            )
+
+        self.memory_type = memory_type
+        self._memory_hidden_dim = memory_hidden_dim
+
+        if projection_dim is None:
+            self.projection = None
+            cell_in_dim = input_dim
+        else:
+            self.projection = nnx.Linear(input_dim, projection_dim, rngs=rngs)
+            cell_in_dim = projection_dim
+
+        if memory_type == "identity":
+            self.cell = None
+            self.output_dim = cell_in_dim
+        elif memory_type == "rnn":
+            self.cell = nnx.SimpleCell(
+                in_features=cell_in_dim,
+                hidden_features=memory_hidden_dim,
+                rngs=rngs,
+            )
+            self.output_dim = memory_hidden_dim
+        elif memory_type == "gru":
+            self.cell = nnx.GRUCell(
+                in_features=cell_in_dim,
+                hidden_features=memory_hidden_dim,
+                rngs=rngs,
+            )
+            self.output_dim = memory_hidden_dim
+        else:  # "lstm"
+            self.cell = nnx.LSTMCell(
+                in_features=cell_in_dim,
+                hidden_features=memory_hidden_dim,
+                rngs=rngs,
+            )
+            self.output_dim = memory_hidden_dim
+
+    def __call__(self, carry: jax.Array, obs: jax.Array) -> Tuple[jax.Array, jax.Array]:
+        """One recurrent step.
+
+        The carry is always a single flat array of shape
+        ``(batch, carry_dim)``.  For LSTM, the cell's ``(c, h)`` tuple is
+        concatenated along the last axis on output and split back inside this
+        method on input, so callers never see the tuple structure.
+
+        Args:
+            carry: Hidden state from the previous step, shape
+                ``(batch, carry_dim)``.  Use :meth:`initialize_carry` to build
+                a zero carry of the right shape.
+            obs: Observation batch of shape ``(batch, *obs_shape)``.  Any
+                dims beyond the batch axis are flattened before the linear
+                projection.
+
+        Returns:
+            ``(new_carry, y)`` where both are flat arrays;
+            ``y`` has shape ``(batch, output_dim)``.
+        """
+        x = obs.reshape(obs.shape[0], -1)
+        if self.projection is not None:
+            x = self.projection(x)
+        if self.cell is None:
+            return carry, x
+        if self.memory_type == "lstm":
+            c, h = jnp.split(carry, 2, axis=-1)
+            (new_c, new_h), out = self.cell((c, h), x)
+            return jnp.concatenate([new_c, new_h], axis=-1), out
+        return self.cell(carry, x)
+
+    @property
+    def carry_dim(self) -> int:
+        """Width of the flat carry vector.
+
+        ``0`` for identity, ``memory_hidden_dim`` for RNN/GRU, and
+        ``2 * memory_hidden_dim`` for LSTM (concatenated ``[c, h]``).
+        """
+        if self.memory_type == "identity":
+            return 0
+        if self.memory_type == "lstm":
+            return 2 * self._memory_hidden_dim
+        return self._memory_hidden_dim
+
+    def initialize_carry(self, batch_size: int) -> jax.Array:
+        """Construct a zero carry matching this extractor's memory cell.
+
+        Always returns a single flat array of shape
+        ``(batch_size, carry_dim)``; LSTM's ``(c, h)`` split is handled
+        internally by :meth:`__call__`.
+
+        Args:
+            batch_size: Leading dim of the carry (one carry per env / row in
+                a sample batch).
+
+        Returns:
+            Zero array of shape ``(batch_size, carry_dim)``.
+            ``carry_dim`` is ``0`` for identity, ``memory_hidden_dim`` for
+            RNN/GRU, and ``2 * memory_hidden_dim`` for LSTM.
+        """
+        return jnp.zeros((batch_size, self.carry_dim), dtype=jnp.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +414,6 @@ def env_spec_from_jumanji(env) -> EnvSpec:
     obs_spec = env.observation_spec
     act_spec = env.action_spec
 
-    # Reject nested/composite observation specs
     if not isinstance(obs_spec, specs.Array):
         raise ValueError(
             f"env_spec_from_jumanji requires a flat Array observation spec, "
@@ -275,14 +421,12 @@ def env_spec_from_jumanji(env) -> EnvSpec:
             f"before using this utility."
         )
 
-    # MultiDiscreteArray is unsupported (factored categorical needs a different policy)
     if isinstance(act_spec, specs.MultiDiscreteArray):
         raise ValueError(
             f"env_spec_from_jumanji does not support MultiDiscreteArray action "
             f"specs. Flatten or handle this action space manually."
         )
 
-    # DiscreteArray (subclass of BoundedArray — check before BoundedArray)
     if isinstance(act_spec, specs.DiscreteArray):
         return EnvSpec(
             obs_shape=tuple(obs_spec.shape),
@@ -321,93 +465,86 @@ def create_iqlearn_from_env(
     env_spec: EnvSpec,
     expert_data: dict[str, jax.Array],
     buffer_size: int = 10_000,
-    hp: Hyperparameters = None,
-    fe_hidden_dims: tuple[int, ...] = (256, 256),
-    actor_head_dims: tuple[int, ...] = (),
-    critic_head_dims: tuple[int, ...] = (256, 256),
+    hp: Hyperparameters | None = None,
+    projection_dim: int | None = 256,
+    memory_type: MemoryType = "identity",
+    memory_hidden_dim: int = 128,
+    actor_dims: tuple[int, ...] = (),
+    critic_dims: tuple[int, ...] = (256, 256),
+    lambda1_critic_dims: tuple[int, ...] = (256, 256),
+    lambda2_critic_dims: tuple[int, ...] = (256, 256),
     train_steps: int = 1000,
     obs_key: str = "observations",
     action_key: str = "actions",
-    approximate_mc: bool = False,
+    approximate_lambda: bool = False,
     debug: bool = False,
     seed: int = 0,
 ) -> (
-    "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs] | "
-    "Tuple[IQLearnState, IQLearnFunctions, IQLearnGraphs, DebugFunctions]"
+    "Tuple[SACState, SACFunctions] | "
+    "Tuple[SACState, SACFunctions, DebugFunctions]"
 ):
     """Build a ready-to-use IQ-Learn agent from an :class:`EnvSpec`.
 
-    This is a high-level convenience wrapper around :func:`~lambda_imitation.iqlearn.create_iqlearn`
-    that handles:
+    Thin wrapper around :func:`lambda_imitation.iqlearn.create_iqlearn` that
+    handles:
 
-    * For **continuous** spaces: computing ``action_scale`` / ``action_bias``
-      to map the actor's ``[-1, 1]`` tanh output to the environment's actual
-      action range; setting ``target_entropy`` to ``-action_dim`` by default.
-    * For **discrete** spaces: setting ``target_entropy`` to
-      ``0.98 * log(num_actions)`` by default (Christodoulou 2019);
-      ``action_scale`` and ``action_bias`` are not used.
-    * Creating and pre-filling a replay :class:`~lambda_imitation.buffer.Buffer` from
-      ``expert_data``.
-    * Constructing three :class:`~lambda_imitation.iqlearn.MLPFeatureExtractor` instances
-      (one for the actor and one per critic Q-branch) with identical architecture.
+    * Computing ``action_scale`` / ``action_bias`` (continuous spaces) so the
+      actor's ``tanh`` output maps into the environment's real action range,
+      and setting a sensible default ``target_entropy``.
+    * Creating and pre-filling a replay :class:`Buffer` from ``expert_data``.
+    * Constructing a single :class:`RecurrentFeatureExtractor` whose memory
+      type and hidden width are configurable.
 
     The expert data is stored as-is; no normalisation is applied.  If
     ``expert_data`` contains more entries than ``buffer_size``, the last
     ``buffer_size`` transitions are kept (the buffer wraps circularly).
 
     Args:
-        env_spec: Environment dimensions produced by one of the
-            ``env_spec_from_*`` extractors.
+        env_spec: Environment dimensions from one of the ``env_spec_from_*``
+            extractors.
         expert_data: Dict mapping string keys to arrays of shape
-            ``(N, *item_shape)``, where ``N`` is the number of expert
-            transitions.  Must contain at least the keys ``obs_key`` and
-            ``action_key``.  For discrete spaces, actions should be stored as
-            float32 scalars (shape ``(N, 1)``), with action indices as floats
-            (e.g. ``0.0``, ``1.0``, ``2.0``).
-        buffer_size: Maximum number of transitions the replay buffer can hold.
-        hp: :class:`~lambda_imitation.iqlearn.Hyperparameters` instance.  When ``None``,
-            defaults are used with ``target_entropy`` set appropriately for
-            the action space type.
-        fe_hidden_dims: Hidden layer widths for the actor and critic
-            feature extractors.  All three share the same architecture;
-            construct them manually and call
-            :func:`~lambda_imitation.iqlearn.create_iqlearn` directly if you need
-            different backbones.
-        actor_head_dims: Hidden layer widths for the actor head.  Defaults to
-            ``()`` (direct linear projection).
-        critic_head_dims: Hidden layer widths for the critic head.  Defaults
-            to ``(256, 256)``.
-        train_steps: Number of gradient steps per :func:`~lambda_imitation.iqlearn.IQLearnFunctions.train`
-            call.
-        obs_key: Key in ``expert_data`` (and in the buffer) that holds
-            observations.
-        action_key: Key in ``expert_data`` (and in the buffer) that holds
-            actions.
-        approximate_mc: If True, enable the MC critic branch (passed through
-            to :func:`~lambda_imitation.iqlearn.create_iqlearn`).
-        debug: If True, return a 4-tuple whose fourth element is a
-            :class:`~lambda_imitation.iqlearn.DebugFunctions` named tuple
-            exposing ``calculate_td_lambda`` and ``get_q``.  Passed through
-            unchanged to :func:`~lambda_imitation.iqlearn.create_iqlearn`.
-        seed: Integer seed passed to ``nnx.Rngs`` when constructing the
-            feature extractors.
+            ``(N, *item_shape)``.  Must contain at least the keys ``obs_key``
+            and ``action_key``.  For discrete spaces, actions should be
+            stored as ``float32`` indices of shape ``(N, 1)``.
+        buffer_size: Maximum number of transitions stored in the expert
+            replay buffer.
+        hp: :class:`Hyperparameters` instance.  When ``None``, defaults are
+            used with ``target_entropy`` chosen automatically for the action
+            space type.
+        projection_dim: Width of the linear embedding applied to the
+            flattened observation before the recurrent cell (no activation).
+            Pass ``None`` to skip the projection and feed the raw flattened
+            observation straight into the memory cell.
+        memory_type: ``"identity"`` (no recurrency), ``"rnn"``, ``"gru"`` or
+            ``"lstm"``.  Selects the recurrent cell that follows the linear
+            projection.
+        memory_hidden_dim: Hidden-state width for the recurrent cell.
+            Ignored when ``memory_type="identity"``.
+        actor_dims: Hidden widths of the actor head.  ``()`` is a direct
+            linear projection.
+        critic_dims: Hidden widths of each SAC critic head.
+        lambda1_critic_dims: Hidden widths of the λ1 critic heads (twin-Q).
+            Only used when ``approximate_lambda=True``.
+        lambda2_critic_dims: Hidden widths of the λ2 critic heads (twin-Q).
+            Only used when ``approximate_lambda=True``.
+        train_steps: Number of gradient steps per
+            :func:`SACFunctions.train` call.
+        obs_key: Key under which observations are stored in ``expert_data``
+            and in the buffer.
+        action_key: Key under which actions are stored.
+        approximate_lambda: If True, enable the λ-discrepancy critic branches.
+        debug: If True, return a 3-tuple whose last element is a
+            :class:`DebugFunctions` named tuple.
+        seed: Integer seed for the ``nnx.Rngs`` used to initialise the
+            feature extractor.
 
     Returns:
-        When ``debug=False`` (default): a
-        ``(IQLearnState, IQLearnFunctions, IQLearnGraphs)`` triple ready for
-        training.
-
-        When ``debug=True``: a
-        ``(IQLearnState, IQLearnFunctions, IQLearnGraphs, DebugFunctions)``
-        4-tuple.
-
-        See :func:`~lambda_imitation.iqlearn.create_iqlearn` for details on
-        each element.
+        ``(SACState, SACFunctions)``, or
+        ``(SACState, SACFunctions, DebugFunctions)`` when ``debug=True``.
 
     Raises:
-        ValueError: If ``expert_data`` does not contain ``obs_key`` or
-            ``action_key``.
-        ValueError: If any expert data array has a leading dimension of zero.
+        ValueError: If ``expert_data`` is missing ``obs_key`` or
+            ``action_key``, or contains zero transitions.
     """
     if obs_key not in expert_data:
         raise ValueError(
@@ -425,25 +562,17 @@ def create_iqlearn_from_env(
         raise ValueError("expert_data arrays must have at least one transition.")
 
     if env_spec.is_discrete:
-        # Default target_entropy = 0.98 * log(num_actions) (Christodoulou 2019)
         if hp is None:
-            hp = Hyperparameters(
-                target_entropy=0.2  # float(0.98 * math.log(env_spec.action_dim))
-            )
+            hp = Hyperparameters(target_entropy=0.2)
         action_scale = 1.0
         action_bias = 0.0
     else:
-        # Default target_entropy = -action_dim for continuous
         if hp is None:
             hp = Hyperparameters(target_entropy=float(-env_spec.action_dim))
-        # action_scale / action_bias map tanh output in [-1, 1] to [low, high]:
-        #   action = tanh(raw) * scale + bias
-        #   scale  = (high - low) / 2
-        #   bias   = (high + low) / 2
+        # action = tanh(raw) * scale + bias, scale=(high-low)/2, bias=(high+low)/2
         action_scale = (env_spec.action_high - env_spec.action_low) / 2.0
         action_bias = (env_spec.action_high + env_spec.action_low) / 2.0
 
-    # Build shapes dict from expert_data (strip leading N dimension)
     shapes = {k: v.shape[1:] for k, v in expert_data.items()}
 
     buffer, buf_fns = create_buffer(
@@ -461,32 +590,31 @@ def create_iqlearn_from_env(
         terminated = bool(i == n_transitions - 1)
         buffer = buf_fns.add(buffer, step, terminated)
 
-    # Feature extractors — identical architecture, independent weights
     input_dim = math.prod(env_spec.obs_shape)
     rngs = nnx.Rngs(seed)
-    actor_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
-    critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
-    critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
-    mc_critic_q1_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
-    mc_critic_q2_fe = MLPFeatureExtractor(input_dim, fe_hidden_dims, rngs=rngs)
+    feature_extractor = RecurrentFeatureExtractor(
+        input_dim=input_dim,
+        projection_dim=projection_dim,
+        memory_type=memory_type,
+        memory_hidden_dim=memory_hidden_dim,
+        rngs=rngs,
+    )
 
     return create_iqlearn(
         params=hp,
         buffer=buffer,
         action_dim=env_spec.action_dim,
-        actor_feature_extractor=actor_fe,
-        critic_q1_feature_extractor=critic_q1_fe,
-        critic_q2_feature_extractor=critic_q2_fe,
-        mc_critic_q1_feature_extractor=mc_critic_q1_fe,
-        mc_critic_q2_feature_extractor=mc_critic_q2_fe,
+        feature_extractor=feature_extractor,
         obs_key=obs_key,
         action_key=action_key,
         action_scale=action_scale,
         action_bias=action_bias,
         train_steps=train_steps,
-        actor_head_dims=actor_head_dims,
-        critic_head_dims=critic_head_dims,
+        actor_dims=actor_dims,
+        critic_dims=critic_dims,
+        lambda1_critic_dims=lambda1_critic_dims,
+        lambda2_critic_dims=lambda2_critic_dims,
         is_discrete=env_spec.is_discrete,
-        approximate_mc=approximate_mc,
+        approximate_lambda=approximate_lambda,
         debug=debug,
     )

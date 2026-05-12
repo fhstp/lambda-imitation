@@ -118,6 +118,64 @@ def create_sample(
     return sample
 
 
+def create_sequence_sample(
+    buffer_size: int,
+    sampling_size: int,
+    sequence_size: int,
+    keys: list[str],
+) -> Callable[[Buffer, jax.Array], Tuple[BufferSample, Tuple[int]]]:
+    """Build a sampling function for a fixed buffer layout.
+
+    The returned function can be called independently of :func:`create_buffer`,
+    which is useful when the buffer is constructed elsewhere (e.g. inside
+    ``create_iqlearn``).
+
+    Args:
+        buffer_size: Total capacity of the buffer (number of slots).
+        sampling_size: Number of transitions to draw per call.
+        this_keys: Buffer keys to include in ``BufferSample.this_info``.
+        next_keys: Buffer keys to include in ``BufferSample.next_info``.
+
+    Returns:
+        A pure function ``sample(buffer, key) -> (BufferSample, indices)`` that
+        samples ``sampling_size`` transitions uniformly from valid slots (those
+        where ``buffer.sampling_ok`` is True) using the provided PRNG key.
+        Returns both the sample and the raw integer indices used, which callers
+        may need for priority updates.
+    """
+
+    base_indices = jnp.vstack((jnp.arange(sequence_size),) * sampling_size)
+
+    def sample(buffer: Buffer, key: jax.Array) -> Tuple[BufferSample, jax.Array]:
+        x = buffer.sampling_ok.astype(jnp.int32)
+        padded = jnp.concatenate([x, x[:sequence_size]])
+        sampling_ok = jax.lax.reduce_window(
+            padded,
+            init_value=jnp.iinfo(padded.dtype).max,
+            computation=jax.lax.min,
+            window_dimensions=(sequence_size + 1,),
+            window_strides=(1,),
+            padding="VALID",
+        )
+        probs = sampling_ok.astype(jnp.float32)
+        probs = probs / probs.sum()
+        indices = jax.random.choice(key, buffer_size, (sampling_size, 1), p=probs)
+        sequence_indices = indices + base_indices
+
+        return (
+            BufferSample(
+                this_info=jax.tree.map(
+                    lambda arr: arr[sequence_indices],
+                    {k: buffer.info[k] for k in keys},
+                ),
+                next_info={},
+            ),
+            sequence_indices,
+        )
+
+    return sample
+
+
 def create_buffer(
     shapes: dict[str, tuple[int, ...]],
     size: int,
