@@ -52,6 +52,13 @@ parser.add_argument(
     help="env steps and gradient updates per round (default: 1000)",
 )
 parser.add_argument(
+    "--lambda-coef",
+    type=float,
+    default=0.5,
+    metavar="N",
+    help="lambda discrepancy coefficient (default: 0.5)",
+)
+parser.add_argument(
     "--seed",
     type=int,
     default=0,
@@ -69,20 +76,20 @@ parser.add_argument(
 parser.add_argument(
     "--memory-type",
     choices=("identity", "rnn", "gru", "lstm"),
-    default="identity",
+    default="gru",
     help="recurrent cell after the linear projection (default: identity)",
 )
 parser.add_argument(
     "--memory-hidden-dim",
     type=int,
-    default=64,
+    default=256,
     metavar="N",
     help="hidden-state width of the recurrent cell (default: 64)",
 )
 parser.add_argument(
     "--projection-dim",
     type=int,
-    default=64,
+    default=128,
     metavar="N",
     help=(
         "width of the linear obs embedding before the memory cell "
@@ -207,6 +214,7 @@ hp = Hyperparameters(
     lambda1=0.05,
     lambda2=0.8,
     lambda_truncation=30,
+    lambda_coef = args.lambda_coef,
 )
 
 projection_dim = args.projection_dim if args.projection_dim > 0 else None
