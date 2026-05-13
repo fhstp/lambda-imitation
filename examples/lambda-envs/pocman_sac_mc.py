@@ -394,7 +394,8 @@ for rnd in tqdm(range(1, args.rounds + 1)):
                 "step": rnd * args.train_steps,
                 "mean_return": mean_return,
                 **{k: float(v) for k, v in metrics.items()},
-            }
+            },
+            step=rnd * args.train_steps,
         )
 
 print("\nTraining complete.")
