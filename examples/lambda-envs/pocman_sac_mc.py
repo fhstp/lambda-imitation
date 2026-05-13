@@ -64,9 +64,9 @@ parser.add_argument(
 parser.add_argument(
     "--seed",
     type=int,
-    default=0,
+    default=None,
     metavar="S",
-    help="JAX random seed (default: 0)",
+    help="JAX random seed (default: random from /dev/urandom)",
 )
 parser.add_argument(
     "--memory-type",
@@ -134,6 +134,10 @@ parser.add_argument(
     help="W&B run name (default: auto-generated)",
 )
 args, _ = parser.parse_known_args()
+if args.seed is None:
+    import os
+    args.seed = int.from_bytes(os.urandom(4), "little")
+    print(f"No --seed given, using random seed: {args.seed}")
 if not args.wandb_sweep and "WANDB_SWEEP_ID" in __import__("os").environ:
     args.wandb_sweep = True
 if args.wandb_sweep:
