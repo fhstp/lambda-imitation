@@ -25,11 +25,13 @@ unroll; ``jax.grad(..., argnums=[0,1,2,3,4])`` distributes gradients to FE
 
 Typical usage::
 
+    key = jax.random.key(42)
+    key_fe, key_heads = jax.random.split(key)
     fe = RecurrentFeatureExtractor(obs_dim, projection_dim=128,
                                    memory_type="gru", memory_hidden_dim=128,
-                                   rngs=nnx.Rngs(0))
+                                   rngs=nnx.Rngs(key_fe))
     state, fns = create_iqlearn(
-        Hyperparameters(), buffer, action_dim, fe,
+        Hyperparameters(), buffer, action_dim, fe, key=key_heads,
         is_discrete=True, approximate_lambda=True,
     )
     state, env_state, metrics = fns.train(state, env, env_params, env_state, key)
@@ -374,7 +376,7 @@ class Hyperparameters(NamedTuple):
     sequence_length: int = 80
     lambda_truncation: int = 30
     lambda_coef: float = 0.2
-    fake_onpolicy_loss: bool = False
+    fake_onpolicy_loss: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +416,7 @@ def create_iqlearn(
     buffer: Buffer,
     action_dim: int,
     feature_extractor: nnx.Module,
+    key: jax.Array,
     obs_key: str = "observations",
     action_key: str = "actions",
     action_scale: float | jax.Array = 1,
@@ -457,6 +460,9 @@ def create_iqlearn(
             convention and an ``initialize_carry(batch_size)`` helper (see
             ``utils.RecurrentFeatureExtractor``).  Ownership is transferred;
             do not use the module directly after this call.
+        key: JAX PRNGKey used to initialise actor / critic / λ-critic
+            head parameters.  Split internally so each head gets a
+            unique sub-key.
         obs_key: Key in the online buffer that holds observations.
         action_key: Key in the online buffer that holds actions.
         action_scale: Per-dimension scale applied after the tanh squashing
@@ -544,57 +550,59 @@ def create_iqlearn(
 
     # Create heads — discrete and continuous differ only in output_dim and
     # whether actions are concatenated to features before the head.
-    rngs = nnx.Rngs(0)
+    # Split key so each head gets unique initialisation.
+    k_actor, k_cq1, k_cq2, k_l1q1, k_l1q2, k_l2q1, k_l2q2 = \
+        jax.random.split(key, 7)
     if is_discrete:
         actor_model = Head(
             feature_dim,
             actor_dims,
             action_dim,
-            rngs=rngs,
+            rngs=nnx.Rngs(k_actor),
         )
         critic_q1_model = Head(
             feature_dim,
             critic_dims,
             action_dim,
-            rngs=rngs,
+            rngs=nnx.Rngs(k_cq1),
         )
         critic_q2_model = Head(
             feature_dim,
             critic_dims,
             action_dim,
-            rngs=rngs,
+            rngs=nnx.Rngs(k_cq2),
         )
         if approximate_lambda:
             lambda1_q1_critic_model = Head(
                 feature_dim,
                 lambda1_critic_dims,
                 action_dim,
-                rngs=rngs,
+                rngs=nnx.Rngs(k_l1q1),
             )
             lambda1_q2_critic_model = Head(
                 feature_dim,
                 lambda1_critic_dims,
                 action_dim,
-                rngs=rngs,
+                rngs=nnx.Rngs(k_l1q2),
             )
             lambda2_q1_critic_model = Head(
                 feature_dim,
                 lambda2_critic_dims,
                 action_dim,
-                rngs=rngs,
+                rngs=nnx.Rngs(k_l2q1),
             )
             lambda2_q2_critic_model = Head(
                 feature_dim,
                 lambda2_critic_dims,
                 action_dim,
-                rngs=rngs,
+                rngs=nnx.Rngs(k_l2q2),
             )
     else:
         actor_model = Head(
             feature_dim,
             actor_dims,
             2 * action_dim,
-            rngs=rngs,
+            rngs=nnx.Rngs(k_actor),
         )
         # For continuous critics, features and actions are concatenated before
         # the head, so input_dim = feature_dim + action_dim, output_dim = 1.
@@ -602,38 +610,38 @@ def create_iqlearn(
             feature_dim + action_dim,
             critic_dims,
             1,
-            rngs=rngs,
+            rngs=nnx.Rngs(k_cq1),
         )
         critic_q2_model = Head(
             feature_dim + action_dim,
             critic_dims,
             1,
-            rngs=rngs,
+            rngs=nnx.Rngs(k_cq2),
         )
         if approximate_lambda:
             lambda1_q1_critic_model = Head(
                 feature_dim + action_dim,
                 lambda1_critic_dims,
                 1,
-                rngs=rngs,
+                rngs=nnx.Rngs(k_l1q1),
             )
             lambda1_q2_critic_model = Head(
                 feature_dim + action_dim,
                 lambda1_critic_dims,
                 1,
-                rngs=rngs,
+                rngs=nnx.Rngs(k_l1q2),
             )
             lambda2_q1_critic_model = Head(
                 feature_dim + action_dim,
                 lambda2_critic_dims,
                 1,
-                rngs=rngs,
+                rngs=nnx.Rngs(k_l2q1),
             )
             lambda2_q2_critic_model = Head(
                 feature_dim + action_dim,
                 lambda2_critic_dims,
                 1,
-                rngs=rngs,
+                rngs=nnx.Rngs(k_l2q2),
             )
 
     # Split all six modules into (graph_def, state)

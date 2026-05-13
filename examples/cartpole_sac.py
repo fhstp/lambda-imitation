@@ -124,6 +124,7 @@ state, fns, _ = create_iqlearn_from_env(
     fe_hidden_dims=(64, 64),
     critic_head_dims=(64,),
     train_steps=args.train_steps,
+    seed=args.seed,
 )
 
 # ── initial environment reset ─────────────────────────────────────────────────

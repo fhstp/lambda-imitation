@@ -591,13 +591,14 @@ def create_iqlearn_from_env(
         buffer = buf_fns.add(buffer, step, terminated)
 
     input_dim = math.prod(env_spec.obs_shape)
-    rngs = nnx.Rngs(seed)
+    key = jax.random.key(seed)
+    key_fe, key_heads = jax.random.split(key)
     feature_extractor = RecurrentFeatureExtractor(
         input_dim=input_dim,
         projection_dim=projection_dim,
         memory_type=memory_type,
         memory_hidden_dim=memory_hidden_dim,
-        rngs=rngs,
+        rngs=nnx.Rngs(key_fe),
     )
 
     return create_iqlearn(
@@ -605,6 +606,7 @@ def create_iqlearn_from_env(
         buffer=buffer,
         action_dim=env_spec.action_dim,
         feature_extractor=feature_extractor,
+        key=key_heads,
         obs_key=obs_key,
         action_key=action_key,
         action_scale=action_scale,
