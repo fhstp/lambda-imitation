@@ -43,14 +43,14 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "--rounds",
     type=int,
-    default=200,
+    default=20,
     metavar="N",
     help="number of training rounds (default: 200)",
 )
 parser.add_argument(
     "--train-steps",
     type=int,
-    default=1000,
+    default=10000,
     metavar="N",
     help="env steps and gradient updates per round (default: 1000)",
 )
@@ -136,6 +136,7 @@ parser.add_argument(
 args, _ = parser.parse_known_args()
 if args.seed is None:
     import os
+
     args.seed = int.from_bytes(os.urandom(4), "little")
     print(f"No --seed given, using random seed: {args.seed}")
 if not args.wandb_sweep and "WANDB_SWEEP_ID" in __import__("os").environ:
