@@ -44,7 +44,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "--rounds",
     type=int,
-    default=20,
+    default=3,
     metavar="N",
     help="number of training rounds (default: 20)",
 )
@@ -500,7 +500,7 @@ def run_seed(seed_val: int, seed_idx: int) -> float:
                 _wandb.log(
                     {
                         "round": rnd,
-                        "step": rnd * args.train_steps,
+                        "env_interactions": rnd * args.train_steps,
                         "mean_return": mean_return,
                         **{k: float(v) for k, v in metrics.items()},
                     },
@@ -510,7 +510,7 @@ def run_seed(seed_val: int, seed_idx: int) -> float:
                 prefix = f"seed_{seed_idx}"
                 _wandb.log(
                     {
-                        "step": rnd * args.train_steps,
+                        "env_interactions": rnd * args.train_steps,
                         f"{prefix}/mean_return": mean_return,
                         **{f"{prefix}/{k}": float(v) for k, v in metrics.items()},
                     }
@@ -551,9 +551,9 @@ if _wandb is not None and not args.wandb_sweep:
 # ── wandb metric setup ───────────────────────────────────────────────────────
 
 if _wandb is not None and args.num_seeds > 1:
-    _wandb.define_metric("step")
+    _wandb.define_metric("env_interactions")
     for i in range(args.num_seeds):
-        _wandb.define_metric(f"seed_{i}/*", step_metric="step")
+        _wandb.define_metric(f"seed_{i}/*", step_metric="env_interactions")
 
 # ── main: run seeds and aggregate ────────────────────────────────────────────
 
