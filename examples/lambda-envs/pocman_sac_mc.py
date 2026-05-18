@@ -552,7 +552,8 @@ if _wandb is not None and not args.wandb_sweep:
 
 if _wandb is not None and args.num_seeds > 1:
     _wandb.define_metric("step")
-    _wandb.define_metric("seed_*/*", step_metric="step")
+    for i in range(args.num_seeds):
+        _wandb.define_metric(f"seed_{i}/*", step_metric="step")
 
 # ── main: run seeds and aggregate ────────────────────────────────────────────
 
