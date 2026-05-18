@@ -44,7 +44,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "--rounds",
     type=int,
-    default=3,
+    default=20,
     metavar="N",
     help="number of training rounds (default: 20)",
 )
