@@ -26,6 +26,7 @@ Usage
     python pocman_sac_mc.py --rounds 200                 # more training
     python pocman_sac_mc.py --memory-type lstm            # LSTM memory
     python pocman_sac_mc.py --wandb                      # enable W&B logging
+    python pocman_sac_mc.py --num-seeds 5                # 5 seeds, aggregate
     python pocman_sac_mc.py --help                       # full option list
 """
 
@@ -45,7 +46,7 @@ parser.add_argument(
     type=int,
     default=20,
     metavar="N",
-    help="number of training rounds (default: 200)",
+    help="number of training rounds (default: 20)",
 )
 parser.add_argument(
     "--train-steps",
@@ -69,6 +70,13 @@ parser.add_argument(
     help="JAX random seed (default: random from /dev/urandom)",
 )
 parser.add_argument(
+    "--num-seeds",
+    type=int,
+    default=1,
+    metavar="N",
+    help="number of seeds per parameter set (default: 1; sweep default: 5)",
+)
+parser.add_argument(
     "--memory-type",
     choices=("identity", "rnn", "gru", "lstm"),
     default="gru",
@@ -77,9 +85,9 @@ parser.add_argument(
 parser.add_argument(
     "--memory-hidden-dim",
     type=int,
-    default=512,
+    default=750,
     metavar="N",
-    help="hidden-state width of the recurrent cell (default: 512)",
+    help="hidden-state width of the recurrent cell (default: 750)",
 )
 parser.add_argument(
     "--projection-dim",
@@ -111,6 +119,116 @@ parser.add_argument(
     metavar="G",
     help="global-norm gradient clip (0.0 disables; default: 0.5)",
 )
+parser.add_argument(
+    "--actor-lr",
+    type=float,
+    default=6e-5,
+    help="actor learning rate (default: 6e-5)",
+)
+parser.add_argument(
+    "--critic-lr",
+    type=float,
+    default=2e-4,
+    help="critic learning rate (default: 2e-4)",
+)
+parser.add_argument(
+    "--lambda-critic-lr",
+    type=float,
+    default=1.8e-4,
+    help="λ-critic learning rate (default: 1.8e-4)",
+)
+parser.add_argument(
+    "--fe-lr",
+    type=float,
+    default=7e-5,
+    help="feature extractor learning rate (default: 7e-5)",
+)
+parser.add_argument(
+    "--alpha-lr",
+    type=float,
+    default=1e-4,
+    help="entropy coef learning rate (default: 1e-4)",
+)
+parser.add_argument(
+    "--alpha",
+    type=float,
+    default=0.1,
+    help="initial entropy coefficient (default: 0.1)",
+)
+parser.add_argument(
+    "--autotune-alpha",
+    dest="autotune_alpha",
+    action="store_true",
+    help="enable automatic entropy tuning",
+)
+parser.add_argument(
+    "--no-autotune-alpha",
+    dest="autotune_alpha",
+    action="store_false",
+    help="disable automatic entropy tuning (default)",
+)
+parser.set_defaults(autotune_alpha=False)
+parser.add_argument(
+    "--tau",
+    type=float,
+    default=0.006,
+    help="target network EMA rate (default: 0.006)",
+)
+parser.add_argument(
+    "--target-entropy",
+    type=float,
+    default=0.0,
+    help="target entropy (default: 0.0)",
+)
+parser.add_argument(
+    "--batch-size",
+    type=int,
+    default=512,
+    help="training batch size (default: 512)",
+)
+parser.add_argument(
+    "--online-buffer-size",
+    type=int,
+    default=200_000,
+    help="replay buffer capacity (default: 200000)",
+)
+parser.add_argument(
+    "--sequence-length",
+    type=int,
+    default=20,
+    help="sequence length for R2D2-style sampling (default: 20)",
+)
+parser.add_argument(
+    "--burn-in-length",
+    type=int,
+    default=32,
+    help="burn-in steps for recurrent state (default: 32)",
+)
+parser.add_argument(
+    "--c-bar",
+    type=float,
+    default=1.17,
+    help="V-trace IS clipping c̄ (default: 1.17)",
+)
+parser.add_argument(
+    "--rho-bar",
+    type=float,
+    default=1.15,
+    help="V-trace IS clipping ρ̄ (default: 1.15)",
+)
+parser.add_argument(
+    "--fake-onpolicy-loss",
+    dest="fake_onpolicy_loss",
+    action="store_true",
+    help="use fake on-policy loss",
+)
+parser.add_argument(
+    "--no-fake-onpolicy-loss",
+    dest="fake_onpolicy_loss",
+    action="store_false",
+    help="disable fake on-policy loss (default)",
+)
+parser.set_defaults(fake_onpolicy_loss=False)
 parser.add_argument(
     "--wandb",
     action="store_true",
@@ -218,78 +336,59 @@ if args.wandb_sweep:
 
     args.memory_hidden_dim = sc.get("memory_hidden_dim", args.memory_hidden_dim)
     args.lambda_coef = sc.get("lambda_coef", args.lambda_coef)
+    args.num_seeds = sc.get("num_seeds", 5)
 
     hp = Hyperparameters(
         online_batch_size=128,
-        online_buffer_size=sc.get("online_buffer_size", 100_000),
-        target_entropy=sc.get("target_entropy", 0.3),
-        fe_lr=sc.get("fe_lr", 1e-4),
-        actor_lr=sc.get("actor_lr", 1e-4),
-        critic_lr=sc.get("critic_lr", 1e-4),
-        lambda_critic_lr=sc.get("lambda_critic_lr", 1e-4),
-        alpha_lr=sc.get("alpha_lr", 1e-4),
-        alpha=sc.get("alpha", 0.2),
-        autotune_alpha=_sweep_bool(sc.get("autotune_alpha", False)),
-        batch_size=sc.get("batch_size", 256),
+        online_buffer_size=sc.get("online_buffer_size", args.online_buffer_size),
+        target_entropy=sc.get("target_entropy", args.target_entropy),
+        fe_lr=sc.get("fe_lr", args.fe_lr),
+        actor_lr=sc.get("actor_lr", args.actor_lr),
+        critic_lr=sc.get("critic_lr", args.critic_lr),
+        lambda_critic_lr=sc.get("lambda_critic_lr", args.lambda_critic_lr),
+        alpha_lr=sc.get("alpha_lr", args.alpha_lr),
+        alpha=sc.get("alpha", args.alpha),
+        autotune_alpha=_sweep_bool(sc.get("autotune_alpha", args.autotune_alpha)),
+        batch_size=sc.get("batch_size", args.batch_size),
         gamma=0.95,
-        tau=sc.get("tau", 0.005),
+        tau=sc.get("tau", args.tau),
         lambda1=sc.get("lambda1", 0.05),
         lambda2=sc.get("lambda2", 0.8),
-        c_bar=sc.get("c_bar", 1.0),
-        rho_bar=sc.get("rho_bar", 1.0),
+        c_bar=sc.get("c_bar", args.c_bar),
+        rho_bar=sc.get("rho_bar", args.rho_bar),
         lambda_truncation=17,
-        sequence_length=sc.get("sequence_length", 20),
-        burn_in_length=sc.get("burn_in_length", 20),
+        sequence_length=sc.get("sequence_length", args.sequence_length),
+        burn_in_length=sc.get("burn_in_length", args.burn_in_length),
         lambda_coef=args.lambda_coef,
-        fake_onpolicy_loss=_sweep_bool(sc.get("fake_onpolicy_loss", True)),
+        fake_onpolicy_loss=_sweep_bool(
+            sc.get("fake_onpolicy_loss", args.fake_onpolicy_loss)
+        ),
     )
 else:
     hp = Hyperparameters(
         online_batch_size=128,
-        online_buffer_size=100_000,
-        target_entropy=0.3,
-        actor_lr=1e-4,
-        critic_lr=1e-4,
-        lambda_critic_lr=1e-4,
-        alpha_lr=1e-4,
-        alpha=0.2,
-        autotune_alpha=False,
-        batch_size=256,
+        online_buffer_size=args.online_buffer_size,
+        target_entropy=args.target_entropy,
+        fe_lr=args.fe_lr,
+        actor_lr=args.actor_lr,
+        critic_lr=args.critic_lr,
+        lambda_critic_lr=args.lambda_critic_lr,
+        alpha_lr=args.alpha_lr,
+        alpha=args.alpha,
+        autotune_alpha=args.autotune_alpha,
+        batch_size=args.batch_size,
         gamma=0.95,
-        tau=0.005,
+        tau=args.tau,
         lambda1=0.05,
         lambda2=0.8,
+        c_bar=args.c_bar,
+        rho_bar=args.rho_bar,
         lambda_truncation=17,
-        sequence_length=20,
-        burn_in_length=20,
+        sequence_length=args.sequence_length,
+        burn_in_length=args.burn_in_length,
         lambda_coef=args.lambda_coef,
+        fake_onpolicy_loss=args.fake_onpolicy_loss,
     )
-
-# ── build agent ───────────────────────────────────────────────────────────────
-
-projection_dim = args.projection_dim if args.projection_dim > 0 else None
-
-print(
-    f"Building SAC + λ-discrepancy agent for PocMan "
-    f"(discrete, lambda-envs)  memory={args.memory_type} "
-    f"hidden={args.memory_hidden_dim} projection={projection_dim}…"
-)
-state, fns, debug_fns = create_iqlearn_from_env(
-    spec,
-    expert_data,
-    buffer_size=1,
-    hp=hp,
-    projection_dim=projection_dim,
-    memory_type=args.memory_type,
-    memory_hidden_dim=args.memory_hidden_dim,
-    critic_dims=(128,),
-    lambda1_critic_dims=(128,),
-    lambda2_critic_dims=(128,),
-    train_steps=args.train_steps,
-    approximate_lambda=args.approximate_lambda,
-    debug=True,
-    seed=args.seed,
-)
 
 # ── carry helper ──────────────────────────────────────────────────────────────
 
@@ -300,21 +399,17 @@ elif args.memory_type == "lstm":
 else:
     CARRY_DIM = args.memory_hidden_dim
 
+projection_dim = args.projection_dim if args.projection_dim > 0 else None
+
 
 def zero_carry() -> jax.Array:
     return jnp.zeros((CARRY_DIM,), dtype=jnp.float32)
 
 
-# ── initial environment reset ─────────────────────────────────────────────────
-
-key = jax.random.key(args.seed)
-key, reset_key = jax.random.split(key)
-obs, env_state = env.reset(reset_key, env_params)
-
 # ── evaluation helper ─────────────────────────────────────────────────────────
 
 
-def evaluate(agent_state, rng_key, n_episodes: int = 10) -> float:
+def evaluate(fns, agent_state, rng_key, n_episodes: int = 10) -> float:
     total = 0.0
     max_steps = int(env_params.max_steps_in_episode)
     for _ in range(n_episodes):
@@ -341,6 +436,96 @@ def evaluate(agent_state, rng_key, n_episodes: int = 10) -> float:
     return total / n_episodes
 
 
+# ── single seed run ──────────────────────────────────────────────────────────
+
+
+def run_seed(seed_val: int, seed_idx: int) -> float:
+    print(
+        f"\n{'=' * 60}\n"
+        f"Seed {seed_idx + 1}/{args.num_seeds}  (seed={seed_val})\n"
+        f"{'=' * 60}"
+    )
+    print(
+        f"Building SAC + λ-discrepancy agent for PocMan "
+        f"(discrete, lambda-envs)  memory={args.memory_type} "
+        f"hidden={args.memory_hidden_dim} projection={projection_dim}…"
+    )
+    state, fns, debug_fns = create_iqlearn_from_env(
+        spec,
+        expert_data,
+        buffer_size=1,
+        hp=hp,
+        projection_dim=projection_dim,
+        memory_type=args.memory_type,
+        memory_hidden_dim=args.memory_hidden_dim,
+        critic_dims=(128,),
+        lambda1_critic_dims=(128,),
+        lambda2_critic_dims=(128,),
+        train_steps=args.train_steps,
+        approximate_lambda=args.approximate_lambda,
+        debug=True,
+        seed=seed_val,
+    )
+
+    key = jax.random.key(seed_val)
+    key, reset_key = jax.random.split(key)
+    _obs, env_state = env.reset(reset_key, env_params)
+
+    total_steps = args.rounds * args.train_steps
+    print(
+        f"Training for {args.rounds} rounds × {args.train_steps} steps "
+        f"= {total_steps} total env steps."
+    )
+
+    for rnd in tqdm(range(1, args.rounds + 1), desc=f"Seed {seed_idx + 1}"):
+        key, train_key = jax.random.split(key)
+        state, env_state, metrics = fns.train(
+            state, env, env_params, env_state, train_key
+        )
+
+        key, eval_key = jax.random.split(key)
+        mean_return = evaluate(fns, state, eval_key, n_episodes=10)
+
+        print(
+            f"Round {rnd:4d}/{args.rounds}  "
+            f"mean_return={mean_return:7.1f}  "
+            f"alpha={float(metrics.get('alpha', state.alpha)):.4f}  "
+            f"critic_loss={float(metrics.get('critic_loss', jnp.nan)):.4f}  "
+            f"entropy={float(metrics.get('entropy', jnp.nan)):.4f}  "
+            f"q={float(metrics.get('q', jnp.nan)):7.3f}"
+        )
+
+        if _wandb is not None:
+            if args.num_seeds == 1:
+                _wandb.log(
+                    {
+                        "round": rnd,
+                        "step": rnd * args.train_steps,
+                        "mean_return": mean_return,
+                        **{k: float(v) for k, v in metrics.items()},
+                    },
+                    step=rnd * args.train_steps,
+                )
+            else:
+                prefix = f"seed_{seed_idx}"
+                _wandb.log(
+                    {
+                        f"{prefix}/step": rnd * args.train_steps,
+                        f"{prefix}/round": rnd,
+                        f"{prefix}/mean_return": mean_return,
+                        **{f"{prefix}/{k}": float(v) for k, v in metrics.items()},
+                    }
+                )
+
+    key, eval_key = jax.random.split(key)
+    final_return = evaluate(fns, state, eval_key, n_episodes=20)
+    print(
+        f"Seed {seed_idx + 1} final evaluation (20 episodes): "
+        f"mean_return={final_return:.1f}"
+    )
+    return final_return
+
+
 # ── wandb (non-sweep init) ───────────────────────────────────────────────────
 
 if _wandb is not None and not args.wandb_sweep:
@@ -358,51 +543,47 @@ if _wandb is not None and not args.wandb_sweep:
             "projection_dim": projection_dim,
             "rounds": args.rounds,
             "train_steps": args.train_steps,
+            "num_seeds": args.num_seeds,
             "seed": args.seed,
             **hp._asdict(),
         },
     )
 
-# ── training loop ─────────────────────────────────────────────────────────────
+# ── wandb metric setup ───────────────────────────────────────────────────────
 
-total_steps = args.rounds * args.train_steps
+if _wandb is not None and args.num_seeds > 1:
+    for i in range(args.num_seeds):
+        _wandb.define_metric(f"seed_{i}/step")
+        _wandb.define_metric(f"seed_{i}/*", step_metric=f"seed_{i}/step")
+
+# ── main: run seeds and aggregate ────────────────────────────────────────────
+
+seeds = [args.seed + i for i in range(args.num_seeds)]
+final_returns = []
+
+for i, s in enumerate(seeds):
+    ret = run_seed(s, i)
+    final_returns.append(ret)
+
+returns_arr = jnp.array(final_returns)
+mean_ret = float(jnp.mean(returns_arr))
+std_ret = float(jnp.std(returns_arr))
+
 print(
-    f"Training for {args.rounds} rounds × {args.train_steps} steps "
-    f"= {total_steps} total env steps."
+    f"\n{'=' * 60}\n"
+    f"Aggregated over {args.num_seeds} seed(s):\n"
+    f"  final_mean_return = {mean_ret:.1f}\n"
+    f"  final_std_return  = {std_ret:.1f}\n"
+    f"{'=' * 60}"
 )
 
-for rnd in tqdm(range(1, args.rounds + 1)):
-    key, train_key = jax.random.split(key)
-    state, env_state, metrics = fns.train(state, env, env_params, env_state, train_key)
-
-    key, eval_key = jax.random.split(key)
-    mean_return = evaluate(state, eval_key, n_episodes=10)
-
-    print(
-        f"Round {rnd:4d}/{args.rounds}  "
-        f"mean_return={mean_return:7.1f}  "
-        f"alpha={float(metrics.get('alpha', state.alpha)):.4f}  "
-        f"critic_loss={float(metrics.get('critic_loss', jnp.nan)):.4f}  "
-        f"entropy={float(metrics.get('entropy', jnp.nan)):.4f}  "
-        f"q={float(metrics.get('q', jnp.nan)):7.3f}"
-    )
-
-    if _wandb is not None:
-        _wandb.log(
-            {
-                "round": rnd,
-                "step": rnd * args.train_steps,
-                "mean_return": mean_return,
-                **{k: float(v) for k, v in metrics.items()},
-            },
-            step=rnd * args.train_steps,
-        )
-
-print("\nTraining complete.")
-key, eval_key = jax.random.split(key)
-final_return = evaluate(state, eval_key, n_episodes=20)
-print(f"Final evaluation (20 episodes): mean_return={final_return:.1f}")
-
 if _wandb is not None:
-    _wandb.log({"final_mean_return": final_return})
+    _wandb.log(
+        {
+            "mean_final_return": mean_ret,
+            "std_final_return": std_ret,
+        }
+    )
+    for i, ret in enumerate(final_returns):
+        _wandb.log({f"final_return_seed_{i}": ret})
     _wandb.finish()
