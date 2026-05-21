@@ -56,6 +56,20 @@ parser.add_argument(
     help="env steps and gradient updates per round (default: 1000)",
 )
 parser.add_argument(
+    "--lambda1",
+    type=float,
+    default=0.05,
+    metavar="LC",
+    help="lambda1 head (default: 0.05)",
+)
+parser.add_argument(
+    "--lambda2",
+    type=float,
+    default=0.75,
+    metavar="LC",
+    help="lambda2 head (default: 0.75)",
+)
+parser.add_argument(
     "--lambda-coef",
     type=float,
     default=1.0,
@@ -352,8 +366,8 @@ if args.wandb_sweep:
         batch_size=sc.get("batch_size", args.batch_size),
         gamma=0.95,
         tau=sc.get("tau", args.tau),
-        lambda1=sc.get("lambda1", 0.05),
-        lambda2=sc.get("lambda2", 0.8),
+        lambda1=sc.get("lambda1", args.lambda1),
+        lambda2=sc.get("lambda2", args.lambda2),
         c_bar=sc.get("c_bar", args.c_bar),
         rho_bar=sc.get("rho_bar", args.rho_bar),
         lambda_truncation=17,
