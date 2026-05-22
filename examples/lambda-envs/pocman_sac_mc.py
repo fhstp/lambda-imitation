@@ -467,8 +467,6 @@ def _make_evaluate(fns):
 # ── agent factory (shared across seeds) ─────────────────────────────────────
 
 _AGENT_KWARGS = dict(
-    spec=spec,
-    expert_data=expert_data,
     buffer_size=1,
     hp=hp,
     projection_dim=projection_dim,
@@ -484,7 +482,7 @@ _AGENT_KWARGS = dict(
 
 
 def _build_agent(seed_val: int):
-    return create_iqlearn_from_env(**_AGENT_KWARGS, seed=seed_val)
+    return create_iqlearn_from_env(spec, expert_data, **_AGENT_KWARGS, seed=seed_val)
 
 
 # ── single seed run ──────────────────────────────────────────────────────────
