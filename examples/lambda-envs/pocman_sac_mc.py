@@ -32,6 +32,7 @@ Usage
 
 import argparse
 import sys
+from functools import partial
 
 from tqdm.rich import tqdm
 
@@ -423,62 +424,77 @@ def zero_carry() -> jax.Array:
 # ── evaluation helper ─────────────────────────────────────────────────────────
 
 
-def evaluate(fns, agent_state, rng_key, n_episodes: int = 10) -> float:
-    total = 0.0
-    max_steps = int(env_params.max_steps_in_episode)
-    for _ in range(n_episodes):
-        rng_key, rk = jax.random.split(rng_key)
-        ep_obs, ep_state = env.reset(rk, env_params)
-        ep_carry = zero_carry()
-        ep_return = 0.0
-        done = False
-        step = 0
-        while not done and step < max_steps:
-            rng_key, sk = jax.random.split(rng_key)
-            raw, ep_carry = fns.predict(
-                agent_state, ep_obs, ep_carry, sk, deterministic=True
+_MAX_STEPS = int(env_params.max_steps_in_episode)
+
+
+def _make_evaluate(fns):
+    """Build a JIT-compiled evaluator that uses lax.scan + vmap."""
+
+    @partial(jax.jit, static_argnames=["n_episodes"])
+    def _evaluate(agent_state, rng_key, n_episodes=10):
+        def run_episode(key):
+            key, rk = jax.random.split(key)
+            obs, env_st = env.reset(rk, env_params)
+            carry = zero_carry()
+
+            def step_fn(state, _):
+                obs, env_st, carry, key, ret, done = state
+                key, sk, ek = jax.random.split(key, 3)
+                raw, new_carry = fns.predict(
+                    agent_state, obs, carry, sk, deterministic=True
+                )
+                action = jnp.round(raw).astype(jnp.int32)
+                next_obs, next_st, reward, d, _ = env.step(
+                    ek, env_st, action, env_params
+                )
+                ret = ret + reward * (1.0 - done)
+                done = jnp.maximum(done, d.astype(jnp.float32))
+                return (next_obs, next_st, new_carry, key, ret, done), None
+
+            init = (obs, env_st, carry, key, jnp.float32(0.0), jnp.float32(0.0))
+            (_, _, _, _, ep_return, _), _ = jax.lax.scan(
+                step_fn, init, length=_MAX_STEPS
             )
-            action = jnp.round(raw).astype(jnp.int32)
-            rng_key, ek = jax.random.split(rng_key)
-            ep_obs, ep_state, reward, done, _ = env.step(
-                ek, ep_state, action, env_params
-            )
-            ep_return += float(reward)
-            done = bool(done)
-            step += 1
-        total += ep_return
-    return total / n_episodes
+            return ep_return
+
+        keys = jax.random.split(rng_key, n_episodes)
+        returns = jax.vmap(run_episode)(keys)
+        return jnp.mean(returns)
+
+    return _evaluate
+
+
+# ── agent factory (shared across seeds) ─────────────────────────────────────
+
+_AGENT_KWARGS = dict(
+    spec=spec,
+    expert_data=expert_data,
+    buffer_size=1,
+    hp=hp,
+    projection_dim=projection_dim,
+    memory_type=args.memory_type,
+    memory_hidden_dim=args.memory_hidden_dim,
+    critic_dims=(128,),
+    lambda1_critic_dims=(128,),
+    lambda2_critic_dims=(128,),
+    train_steps=args.train_steps,
+    approximate_lambda=args.approximate_lambda,
+    debug=True,
+)
+
+
+def _build_agent(seed_val: int):
+    return create_iqlearn_from_env(**_AGENT_KWARGS, seed=seed_val)
 
 
 # ── single seed run ──────────────────────────────────────────────────────────
 
 
-def run_seed(seed_val: int, seed_idx: int) -> float:
+def run_seed(seed_val: int, seed_idx: int, state, fns, evaluate) -> float:
     print(
         f"\n{'=' * 60}\n"
         f"Seed {seed_idx + 1}/{args.num_seeds}  (seed={seed_val})\n"
         f"{'=' * 60}"
-    )
-    print(
-        f"Building SAC + λ-discrepancy agent for PocMan "
-        f"(discrete, lambda-envs)  memory={args.memory_type} "
-        f"hidden={args.memory_hidden_dim} projection={projection_dim}…"
-    )
-    state, fns, debug_fns = create_iqlearn_from_env(
-        spec,
-        expert_data,
-        buffer_size=1,
-        hp=hp,
-        projection_dim=projection_dim,
-        memory_type=args.memory_type,
-        memory_hidden_dim=args.memory_hidden_dim,
-        critic_dims=(128,),
-        lambda1_critic_dims=(128,),
-        lambda2_critic_dims=(128,),
-        train_steps=args.train_steps,
-        approximate_lambda=args.approximate_lambda,
-        debug=True,
-        seed=seed_val,
     )
 
     key = jax.random.key(seed_val)
@@ -498,7 +514,7 @@ def run_seed(seed_val: int, seed_idx: int) -> float:
         )
 
         key, eval_key = jax.random.split(key)
-        mean_return = evaluate(fns, state, eval_key, n_episodes=10)
+        mean_return = float(evaluate(state, eval_key, n_episodes=10))
 
         print(
             f"Round {rnd:4d}/{args.rounds}  "
@@ -531,7 +547,7 @@ def run_seed(seed_val: int, seed_idx: int) -> float:
                 )
 
     key, eval_key = jax.random.split(key)
-    final_return = evaluate(fns, state, eval_key, n_episodes=20)
+    final_return = float(evaluate(state, eval_key, n_episodes=20))
     print(
         f"Seed {seed_idx + 1} final evaluation (20 episodes): "
         f"mean_return={final_return:.1f}"
@@ -572,10 +588,23 @@ if _wandb is not None and args.num_seeds > 1:
 # ── main: run seeds and aggregate ────────────────────────────────────────────
 
 seeds = [args.seed + i for i in range(args.num_seeds)]
+
+print(
+    f"Building SAC + λ-discrepancy agent for PocMan "
+    f"(discrete, lambda-envs)  memory={args.memory_type} "
+    f"hidden={args.memory_hidden_dim} projection={projection_dim}…"
+)
+state_0, fns, debug_fns = _build_agent(seeds[0])
+evaluate = _make_evaluate(fns)
+
 final_returns = []
 
 for i, s in enumerate(seeds):
-    ret = run_seed(s, i)
+    if i == 0:
+        state = state_0
+    else:
+        state, _, _ = _build_agent(s)
+    ret = run_seed(s, i, state, fns, evaluate)
     final_returns.append(ret)
 
 returns_arr = jnp.array(final_returns)

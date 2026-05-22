@@ -1976,6 +1976,56 @@ def create_iqlearn(
         )
         return sac, env_state, metrics
 
+    @partial(jax.jit, static_argnames=["env", "n_steps"])
+    def _prefill_jit(sac, env, env_params, env_state, n_steps, key):
+        print("compiling prefill...")
+
+        def scan_body(carry, step_idx):
+            sac, env_state, key = carry
+            key, key_act, key_step = jax.random.split(key, 3)
+            obs = env.get_obs(env_state, env_params)
+            if is_discrete:
+                action_idx = jax.random.randint(key_act, (), 0, action_dim)
+                action = action_idx.astype(jnp.float32)
+                prob = jnp.float32(1.0 / action_dim)
+                env_action = action_idx
+            else:
+                u = jax.random.normal(key_act, (action_dim,))
+                y_t = jnp.tanh(u)
+                action = y_t * action_scale + action_bias
+                log_prob = (
+                    -(u**2) / 2
+                    - 0.5 * jnp.log(2 * jnp.pi)
+                    - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
+                ).sum()
+                prob = jnp.exp(log_prob)
+                env_action = action
+            _next_obs, env_state, reward, done, _ = env.step(
+                key_step, env_state, env_action, env_params
+            )
+            terminated = done | (step_idx == n_steps - 1)
+            transition = {
+                obs_key: obs,
+                action_key: jnp.atleast_1d(action),
+                reward_key: jnp.asarray(reward, dtype=jnp.float32),
+                terminated_key: jnp.asarray(terminated, dtype=jnp.float32),
+            }
+            if approximate_lambda:
+                transition[behaviour_key] = prob
+                if not is_discrete:
+                    transition[unsquashed_action_key] = jnp.atleast_1d(u)
+            sac = sac._replace(
+                online_buffer=online_buffer_functions.add(
+                    sac.online_buffer, transition, terminated=terminated
+                )
+            )
+            return (sac, env_state, key), None
+
+        (sac, env_state, _), _ = jax.lax.scan(
+            scan_body, (sac, env_state, key), jnp.arange(n_steps)
+        )
+        return sac, env_state
+
     def prefill_buffer(
         sac: SACState,
         env,
@@ -2012,47 +2062,7 @@ def create_iqlearn(
             ``online_buffer`` and ``new_env_state`` is the post-step gymnax
             state.
         """
-        for i in range(n_steps):
-            key, key_act, key_step = jax.random.split(key, 3)
-            obs = env.get_obs(env_state, env_params)
-            if is_discrete:
-                action_idx = jax.random.randint(key_act, (), 0, action_dim)
-                action = action_idx.astype(jnp.float32)
-                prob = jnp.float32(1.0 / action_dim)
-                env_action = action_idx
-            else:
-                u = jax.random.normal(key_act, (action_dim,))
-                y_t = jnp.tanh(u)
-                action = y_t * action_scale + action_bias
-                log_prob = (
-                    -(u**2) / 2
-                    - 0.5 * jnp.log(2 * jnp.pi)
-                    - jnp.log(action_scale * (1 - y_t**2) + 1e-6)
-                ).sum()
-                prob = jnp.exp(log_prob)
-                env_action = action
-            _next_obs, env_state, reward, done, _ = env.step(
-                key_step, env_state, env_action, env_params
-            )
-            # Force-terminate the last step so that all n_steps slots are
-            # immediately sampleable (terminal transitions need no successor).
-            terminated = bool(done) | (i == n_steps - 1)
-            transition = {
-                obs_key: obs,
-                action_key: jnp.atleast_1d(action),
-                reward_key: jnp.asarray(reward, dtype=jnp.float32),
-                terminated_key: jnp.asarray(terminated, dtype=jnp.float32),
-            }
-            if approximate_lambda:
-                transition[behaviour_key] = prob
-                if not is_discrete:
-                    transition[unsquashed_action_key] = jnp.atleast_1d(u)
-            sac = sac._replace(
-                online_buffer=online_buffer_functions.add(
-                    sac.online_buffer, transition, terminated=terminated
-                )
-            )
-        return sac, env_state
+        return _prefill_jit(sac, env, env_params, env_state, n_steps, key)
 
     fns = SACFunctions(predict, train, get_importance_ratios, prefill_buffer)
     if debug:
