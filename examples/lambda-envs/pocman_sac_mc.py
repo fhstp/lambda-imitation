@@ -350,7 +350,7 @@ if args.wandb_sweep:
 
     args.memory_hidden_dim = sc.get("memory_hidden_dim", args.memory_hidden_dim)
     args.lambda_coef = sc.get("lambda_coef", args.lambda_coef)
-    args.num_seeds = sc.get("num_seeds", 5)
+    args.num_seeds = sc.get("num_seeds", 10)
 
     hp = Hyperparameters(
         online_batch_size=128,
