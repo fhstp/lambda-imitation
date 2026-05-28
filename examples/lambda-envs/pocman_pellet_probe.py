@@ -51,6 +51,7 @@ g.add_argument("--online-buffer-size", type=int, default=200_000)
 
 g = parser.add_argument_group("data collection")
 g.add_argument("--collect-steps", type=int, default=100_000, help="total env steps to collect (default 100 000)")
+g.add_argument("--collect-epsilon", type=float, default=0.1, help="epsilon-greedy rate during collection (default 0.1)")
 
 g = parser.add_argument_group("probe training")
 g.add_argument("--probe-steps", type=int, default=500_000, help="SGD steps (default 500 k)")
@@ -291,11 +292,14 @@ if not args.vis_only:
                 player_row = env_st.player_locations.x
                 player_col = env_st.player_locations.y
 
-                key, sk, ek = jax.random.split(key, 3)
+                key, sk, ek, eps_key = jax.random.split(key, 4)
                 raw, new_carry = fns.predict(
                     agent_state, obs, carry, sk, deterministic=False
                 )
-                action = jnp.round(raw).astype(jnp.int32)
+                policy_action = jnp.round(raw).astype(jnp.int32)
+                random_action = jax.random.randint(eps_key, policy_action.shape, 0, 4)
+                use_random = jax.random.uniform(eps_key) < args.collect_epsilon
+                action = jnp.where(use_random, random_action, policy_action)
 
                 next_obs, next_st, _, done, _ = env.step(
                     ek, env_st, action, env_params
