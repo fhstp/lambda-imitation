@@ -292,7 +292,7 @@ if not args.vis_only:
 
                 key, sk, ek = jax.random.split(key, 3)
                 raw, new_carry = fns.predict(
-                    agent_state, obs, carry, sk, deterministic=True
+                    agent_state, obs, carry, sk, deterministic=False
                 )
                 action = jnp.round(raw).astype(jnp.int32)
 
