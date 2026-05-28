@@ -6,7 +6,7 @@ Replicates the analysis from Section I.5 / Figure 6 (right) of:
 
 Pipeline:
   1. Train a PocMan SAC(+LD) agent for 80 k env steps (default)
-  2. Collect rollouts saving hidden states and true pellet occupancy
+  2. Collect rollouts (step-based, auto-reset) saving hidden states and true pellet occupancy
   3. Train a 3-layer MLP probe: hidden state -> pellet occupancy (BCE)
   4. Visualise probe predictions vs ground truth on the maze grid
 
@@ -50,7 +50,7 @@ g.add_argument("--burn-in-length", type=int, default=32)
 g.add_argument("--online-buffer-size", type=int, default=200_000)
 
 g = parser.add_argument_group("data collection")
-g.add_argument("--collect-episodes", type=int, default=200, help="rollout episodes (default 200)")
+g.add_argument("--collect-steps", type=int, default=100_000, help="total env steps to collect (default 100 000)")
 
 g = parser.add_argument_group("probe training")
 g.add_argument("--probe-steps", type=int, default=500_000, help="SGD steps (default 500 k)")
@@ -276,48 +276,56 @@ if not args.vis_only:
         init_pellet_locs = np.array(dummy_st.pellet_locations)
         num_pellets = init_pellet_locs.shape[0]
         print(f"Maze {MAZE_ROWS}×{MAZE_COLS}, {num_pellets} pellet slots.")
-        print(f"Collecting {args.collect_episodes} episodes…")
+        print(f"Collecting {args.collect_steps} steps (auto-reset)…")
 
-        all_carries, all_masks, all_rows, all_cols = [], [], [], []
-        ep_bounds = [0]
-        key = jax.random.key(args.seed + 1000)
-
-        for ep in tqdm(range(args.collect_episodes), desc="Collecting"):
+        @partial(jax.jit, static_argnames=["n_steps"])
+        def collect_rollout(agent_state, key, n_steps):
             key, rk = jax.random.split(key)
             obs, env_st = env.reset(rk, env_params)
             carry = zero_carry()
 
-            for _ in range(_MAX_STEPS):
+            def step_fn(scan_carry, _):
+                obs, env_st, carry, key = scan_carry
                 pellet_alive = jnp.any(env_st.pellet_locations != 0, axis=-1)
+                player_row = env_st.player_locations.x
+                player_col = env_st.player_locations.y
 
                 key, sk, ek = jax.random.split(key, 3)
                 raw, new_carry = fns.predict(
-                    state, obs, carry, sk, deterministic=True
+                    agent_state, obs, carry, sk, deterministic=True
                 )
                 action = jnp.round(raw).astype(jnp.int32)
-
-                all_carries.append(np.array(new_carry))
-                all_masks.append(np.array(pellet_alive, dtype=np.float32))
-                all_rows.append(int(env_st.player_locations.x))
-                all_cols.append(int(env_st.player_locations.y))
 
                 next_obs, next_st, _, done, _ = env.step(
                     ek, env_st, action, env_params
                 )
-                obs, env_st = next_obs, next_st
-                carry = jnp.where(done, zero_carry(), new_carry)
-                if done:
-                    break
+                carry_out = jnp.where(done, zero_carry(), new_carry)
+                return (next_obs, next_st, carry_out, key), {
+                    "carries": new_carry,
+                    "pellet_masks": pellet_alive.astype(jnp.float32),
+                    "player_rows": player_row,
+                    "player_cols": player_col,
+                    "dones": done.astype(jnp.float32),
+                }
 
-            ep_bounds.append(len(all_carries))
+            _, data = jax.lax.scan(step_fn, (obs, env_st, carry, key), length=n_steps)
+            return data
 
-        carries = np.stack(all_carries)
-        pellet_masks = np.stack(all_masks)
-        player_rows = np.array(all_rows)
-        player_cols = np.array(all_cols)
-        ep_bounds = np.array(ep_bounds)
+        key = jax.random.key(args.seed + 1000)
+        data = collect_rollout(state, key, args.collect_steps)
 
-        print(f"Collected {len(carries)} timesteps.  Saving → {dataset_path}")
+        carries = np.array(data["carries"])
+        pellet_masks = np.array(data["pellet_masks"])
+        player_rows = np.array(data["player_rows"])
+        player_cols = np.array(data["player_cols"])
+        dones = np.array(data["dones"])
+
+        done_idxs = np.where(dones > 0.5)[0]
+        ep_starts = np.concatenate([[0], done_idxs + 1])
+        ep_starts = ep_starts[ep_starts < len(carries)]
+        ep_bounds = np.concatenate([ep_starts, [len(carries)]])
+
+        print(f"Collected {len(carries)} steps, {len(ep_starts)} episodes.  Saving → {dataset_path}")
         with open(dataset_path, "wb") as f:
             pickle.dump(
                 {
@@ -365,24 +373,41 @@ if not args.vis_only:
         t_jnp = jnp.array(pellet_masks)
         n_samples = c_jnp.shape[0]
 
-        @jax.jit
-        def probe_step(params, opt_state, c_batch, t_batch):
-            def loss_fn(p):
-                logits = probe_forward(p, c_batch)
-                return optax.sigmoid_binary_cross_entropy(logits, t_batch).mean()
-            loss, grads = jax.value_and_grad(loss_fn)(params)
-            updates, new_os = opt.update(grads, opt_state, params)
-            return optax.apply_updates(params, updates), new_os, loss
+        @partial(jax.jit, static_argnames=["n_steps", "batch_size"])
+        def probe_train_chunk(params, opt_state, key, c_data, t_data, n_steps, batch_size):
+            n = c_data.shape[0]
+            def body(carry, _):
+                params, opt_state, key = carry
+                key, bk = jax.random.split(key)
+                idx = jax.random.randint(bk, (batch_size,), 0, n)
+                def loss_fn(p):
+                    logits = probe_forward(p, c_data[idx])
+                    return optax.sigmoid_binary_cross_entropy(logits, t_data[idx]).mean()
+                loss, grads = jax.value_and_grad(loss_fn)(params)
+                updates, new_os = opt.update(grads, opt_state, params)
+                return (optax.apply_updates(params, updates), new_os, key), loss
+            (params, opt_state, key), losses = jax.lax.scan(body, (params, opt_state, key), length=n_steps)
+            return params, opt_state, key, losses[-1]
 
+        _CHUNK = 50_000
+        n_chunks = args.probe_steps // _CHUNK
+        remainder = args.probe_steps % _CHUNK
         key = jax.random.key(args.seed + 3000)
-        for i in tqdm(range(args.probe_steps), desc="Probe"):
-            key, bk = jax.random.split(key)
-            idx = jax.random.randint(bk, (args.probe_batch_size,), 0, n_samples)
-            probe_params, opt_state, loss_val = probe_step(
-                probe_params, opt_state, c_jnp[idx], t_jnp[idx]
+        steps_done = 0
+
+        for _ in tqdm(range(n_chunks), desc="Probe"):
+            probe_params, opt_state, key, loss_val = probe_train_chunk(
+                probe_params, opt_state, key, c_jnp, t_jnp, _CHUNK, args.probe_batch_size
             )
-            if i % 50_000 == 0 or i == args.probe_steps - 1:
-                print(f"  step {i:7d}  bce={float(loss_val):.6f}")
+            steps_done += _CHUNK
+            print(f"  step {steps_done:7d}  bce={float(loss_val):.6f}")
+
+        if remainder > 0:
+            probe_params, opt_state, key, loss_val = probe_train_chunk(
+                probe_params, opt_state, key, c_jnp, t_jnp, remainder, args.probe_batch_size
+            )
+            steps_done += remainder
+            print(f"  step {steps_done:7d}  bce={float(loss_val):.6f}")
 
         print(f"Saving probe → {probe_path}")
         leaves, td = jax.tree.flatten(probe_params)
