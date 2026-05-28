@@ -109,6 +109,7 @@ def probe_forward(params, x):
 os.makedirs(args.output_dir, exist_ok=True)
 agent_path = os.path.join(args.output_dir, "agent.pkl")
 dataset_path = os.path.join(args.output_dir, "dataset.pkl")
+test_dataset_path = os.path.join(args.output_dir, "test_dataset.pkl")
 probe_path = os.path.join(args.output_dir, "probe.pkl")
 
 
@@ -311,61 +312,48 @@ if not args.vis_only:
             _, data = jax.lax.scan(step_fn, (obs, env_st, carry, key), length=n_steps)
             return data
 
-        key = jax.random.key(args.seed + 1000)
-        data = collect_rollout(state, key, args.collect_steps)
+        def _collect_and_parse(seed_offset):
+            data = collect_rollout(state, jax.random.key(args.seed + seed_offset), args.collect_steps)
+            c = np.array(data["carries"])
+            m = np.array(data["pellet_masks"])
+            r = np.array(data["player_rows"])
+            col = np.array(data["player_cols"])
+            d = np.array(data["dones"])
+            di = np.where(d > 0.5)[0]
+            es = np.concatenate([[0], di + 1])
+            es = es[es < len(c)]
+            eb = np.concatenate([es, [len(c)]])
+            return c, m, r, col, eb
 
-        carries = np.array(data["carries"])
-        pellet_masks = np.array(data["pellet_masks"])
-        player_rows = np.array(data["player_rows"])
-        player_cols = np.array(data["player_cols"])
-        dones = np.array(data["dones"])
+        def _save_dataset(path, c, m, r, col, eb):
+            print(f"  {len(c)} steps, {len(eb)-1} episodes → {path}")
+            with open(path, "wb") as f:
+                pickle.dump({"carries": c, "pellet_masks": m, "player_rows": r,
+                             "player_cols": col, "ep_bounds": eb,
+                             "init_pellet_locs": init_pellet_locs,
+                             "wall_grid": WALL_GRID, "tag": tag}, f)
 
-        done_idxs = np.where(dones > 0.5)[0]
-        ep_starts = np.concatenate([[0], done_idxs + 1])
-        ep_starts = ep_starts[ep_starts < len(carries)]
-        ep_bounds = np.concatenate([ep_starts, [len(carries)]])
+        print(f"Collecting {args.collect_steps} train steps (auto-reset)…")
+        carries, pellet_masks, player_rows, player_cols, ep_bounds = _collect_and_parse(1000)
+        _save_dataset(dataset_path, carries, pellet_masks, player_rows, player_cols, ep_bounds)
 
-        print(f"Collected {len(carries)} steps, {len(ep_starts)} episodes.  Saving → {dataset_path}")
-        with open(dataset_path, "wb") as f:
-            pickle.dump(
-                {
-                    "carries": carries,
-                    "pellet_masks": pellet_masks,
-                    "player_rows": player_rows,
-                    "player_cols": player_cols,
-                    "ep_bounds": ep_bounds,
-                    "init_pellet_locs": init_pellet_locs,
-                    "wall_grid": WALL_GRID,
-                    "tag": tag,
-                },
-                f,
-            )
+        print(f"Collecting {args.collect_steps} test steps (separate seed)…")
+        test_carries, test_pellet_masks, test_player_rows, test_player_cols, test_ep_bounds = _collect_and_parse(2000)
+        _save_dataset(test_dataset_path, test_carries, test_pellet_masks, test_player_rows, test_player_cols, test_ep_bounds)
     else:
-        print(f"Loading dataset ← {dataset_path}")
-        with open(dataset_path, "rb") as f:
-            ds = pickle.load(f)
-        carries = ds["carries"]
-        pellet_masks = ds["pellet_masks"]
-        player_rows = ds["player_rows"]
-        player_cols = ds["player_cols"]
-        ep_bounds = ds["ep_bounds"]
-        init_pellet_locs = ds["init_pellet_locs"]
-        WALL_GRID = ds.get("wall_grid", WALL_GRID)
-        tag = ds.get("tag", tag)
-        num_pellets = init_pellet_locs.shape[0]
-        print(f"Loaded {len(carries)} timesteps, {num_pellets} pellet slots.")
+        def _load_dataset(path):
+            print(f"Loading dataset ← {path}")
+            with open(path, "rb") as f:
+                ds = pickle.load(f)
+            return (ds["carries"], ds["pellet_masks"], ds["player_rows"],
+                    ds["player_cols"], ds["ep_bounds"], ds["init_pellet_locs"],
+                    ds.get("wall_grid", WALL_GRID), ds.get("tag", tag))
 
-    # ── train/test split by episode (deterministic from seed) ─────────────
-    _n_episodes = len(ep_bounds) - 1
-    _split_rng = np.random.default_rng(args.seed)
-    _ep_perm = _split_rng.permutation(_n_episodes)
-    _ep_split = int(0.8 * _n_episodes)
-    train_episodes = sorted(_ep_perm[:_ep_split])
-    test_episodes = sorted(_ep_perm[_ep_split:])
-    train_idx = np.concatenate([np.arange(ep_bounds[i], ep_bounds[i + 1]) for i in train_episodes])
-    test_idx = np.concatenate([np.arange(ep_bounds[i], ep_bounds[i + 1]) for i in test_episodes])
-    print(f"Split: {len(train_episodes)} train episodes ({len(train_idx)} steps), "
-          f"{len(test_episodes)} test episodes ({len(test_idx)} steps)")
+        carries, pellet_masks, player_rows, player_cols, ep_bounds, init_pellet_locs, WALL_GRID, tag = _load_dataset(dataset_path)
+        test_carries, test_pellet_masks, test_player_rows, test_player_cols, test_ep_bounds, _, _, _ = _load_dataset(test_dataset_path)
+        num_pellets = init_pellet_locs.shape[0]
+        print(f"Train: {len(carries)} steps, {len(ep_bounds)-1} eps.  "
+              f"Test: {len(test_carries)} steps, {len(test_ep_bounds)-1} eps.")
 
     # ── Phase 3 — Train probe ────────────────────────────────────────────────
 
@@ -381,8 +369,8 @@ if not args.vis_only:
         opt = optax.adam(args.probe_lr)
         opt_state = opt.init(probe_params)
 
-        c_jnp = jnp.array(carries[train_idx])
-        t_jnp = jnp.array(pellet_masks[train_idx])
+        c_jnp = jnp.array(carries)
+        t_jnp = jnp.array(pellet_masks)
         n_samples = c_jnp.shape[0]
 
         @partial(jax.jit, static_argnames=["n_steps", "batch_size"])
@@ -447,16 +435,22 @@ if args.vis_only:
         ds = pickle.load(f)
     carries = ds["carries"]
     pellet_masks = ds["pellet_masks"]
-    player_rows = ds["player_rows"]
-    player_cols = ds["player_cols"]
-    ep_bounds = ds["ep_bounds"]
     init_pellet_locs = ds["init_pellet_locs"]
     WALL_GRID = ds["wall_grid"]
     tag = ds.get("tag", "SAC+LD")
     num_pellets = init_pellet_locs.shape[0]
     CARRY_DIM = carries.shape[1]
-    print(f"  dataset: {len(carries)} timesteps, {num_pellets} pellets, "
-          f"{len(ep_bounds)-1} episodes")
+    print(f"  train: {len(carries)} timesteps, {num_pellets} pellets, "
+          f"{len(ds['ep_bounds'])-1} episodes")
+
+    with open(test_dataset_path, "rb") as f:
+        tds = pickle.load(f)
+    test_carries = tds["carries"]
+    test_pellet_masks = tds["pellet_masks"]
+    test_player_rows = tds["player_rows"]
+    test_player_cols = tds["player_cols"]
+    test_ep_bounds = tds["ep_bounds"]
+    print(f"  test:  {len(test_carries)} timesteps, {len(test_ep_bounds)-1} episodes")
 
     with open(probe_path, "rb") as f:
         saved = pickle.load(f)
@@ -464,17 +458,6 @@ if args.vis_only:
         [jnp.array(l) for l in saved["leaves"]]
     )
     print(f"  probe loaded")
-
-    _n_episodes = len(ep_bounds) - 1
-    _split_rng = np.random.default_rng(args.seed)
-    _ep_perm = _split_rng.permutation(_n_episodes)
-    _ep_split = int(0.8 * _n_episodes)
-    train_episodes = sorted(_ep_perm[:_ep_split])
-    test_episodes = sorted(_ep_perm[_ep_split:])
-    train_idx = np.concatenate([np.arange(ep_bounds[i], ep_bounds[i + 1]) for i in train_episodes])
-    test_idx = np.concatenate([np.arange(ep_bounds[i], ep_bounds[i + 1]) for i in test_episodes])
-    print(f"  split: {len(train_episodes)} train episodes ({len(train_idx)} steps), "
-          f"{len(test_episodes)} test episodes ({len(test_idx)} steps)")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -522,13 +505,13 @@ def render(ax, pellet_grid, pr, pc, title=""):
     ax.set_yticks([])
 
 
-def _vis_stored_episode(ve_idx, probe_params):
+def _vis_stored_episode(ve_idx, probe_params, ds_carries, ds_masks, ds_rows, ds_cols, ds_ep_bounds):
     """Render one stored episode (truth vs probe) as a multi-frame PNG."""
-    start, end = ep_bounds[ve_idx], ep_bounds[ve_idx + 1]
-    ep_c = carries[start:end]
-    ep_m = pellet_masks[start:end]
-    ep_r = player_rows[start:end]
-    ep_col = player_cols[start:end]
+    start, end = ds_ep_bounds[ve_idx], ds_ep_bounds[ve_idx + 1]
+    ep_c = ds_carries[start:end]
+    ep_m = ds_masks[start:end]
+    ep_r = ds_rows[start:end]
+    ep_col = ds_cols[start:end]
     ep_len = end - start
 
     preds = np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(ep_c))))
@@ -557,19 +540,20 @@ def _vis_stored_episode(ve_idx, probe_params):
 
 # ── episode PNGs (from held-out test episodes) ─────────────────────────────
 
-n_vis = min(args.vis_episodes, len(test_episodes))
-print(f"Generating {n_vis} episode visualisation(s) from test episodes…")
+n_test_eps = len(test_ep_bounds) - 1
+n_vis = min(args.vis_episodes, n_test_eps)
+print(f"Generating {n_vis} episode visualisation(s) from test set…")
 for vi in range(n_vis):
-    ep_idx = test_episodes[vi]
-    p = _vis_stored_episode(ep_idx, probe_params)
-    print(f"  → {p}  (episode {ep_idx})")
+    p = _vis_stored_episode(vi, probe_params, test_carries, test_pellet_masks,
+                            test_player_rows, test_player_cols, test_ep_bounds)
+    print(f"  → {p}")
 
 # ── accuracy summary ─────────────────────────────────────────────────────────
 
 print("Computing probe accuracy on held-out test set…")
-test_logits = probe_forward(probe_params, jnp.array(carries[test_idx]))
+test_logits = probe_forward(probe_params, jnp.array(test_carries))
 test_preds = (jax.nn.sigmoid(test_logits) > 0.5).astype(jnp.float32)
-test_targets = jnp.array(pellet_masks[test_idx])
+test_targets = jnp.array(test_pellet_masks)
 
 correct = (test_preds == test_targets).astype(jnp.float32)
 acc = float(jnp.mean(correct))
@@ -613,13 +597,13 @@ print(f"  → {p}")
 if args.mp4:
     from matplotlib.animation import FuncAnimation
 
-    test_ep_lens = np.array([ep_bounds[i + 1] - ep_bounds[i] for i in test_episodes])
-    best = test_episodes[int(np.argmax(test_ep_lens))]
-    start, end = int(ep_bounds[best]), int(ep_bounds[best + 1])
-    ep_c = carries[start:end]
-    ep_m = pellet_masks[start:end]
-    ep_r = player_rows[start:end]
-    ep_col = player_cols[start:end]
+    test_ep_lens = np.diff(test_ep_bounds)
+    best = int(np.argmax(test_ep_lens))
+    start, end = int(test_ep_bounds[best]), int(test_ep_bounds[best + 1])
+    ep_c = test_carries[start:end]
+    ep_m = test_pellet_masks[start:end]
+    ep_r = test_player_rows[start:end]
+    ep_col = test_player_cols[start:end]
     ep_len = end - start
 
     ep_preds = np.array(
