@@ -355,6 +355,18 @@ if not args.vis_only:
         num_pellets = init_pellet_locs.shape[0]
         print(f"Loaded {len(carries)} timesteps, {num_pellets} pellet slots.")
 
+    # ── train/test split by episode (deterministic from seed) ─────────────
+    _n_episodes = len(ep_bounds) - 1
+    _split_rng = np.random.default_rng(args.seed)
+    _ep_perm = _split_rng.permutation(_n_episodes)
+    _ep_split = int(0.8 * _n_episodes)
+    train_episodes = sorted(_ep_perm[:_ep_split])
+    test_episodes = sorted(_ep_perm[_ep_split:])
+    train_idx = np.concatenate([np.arange(ep_bounds[i], ep_bounds[i + 1]) for i in train_episodes])
+    test_idx = np.concatenate([np.arange(ep_bounds[i], ep_bounds[i + 1]) for i in test_episodes])
+    print(f"Split: {len(train_episodes)} train episodes ({len(train_idx)} steps), "
+          f"{len(test_episodes)} test episodes ({len(test_idx)} steps)")
+
     # ── Phase 3 — Train probe ────────────────────────────────────────────────
 
     if not args.skip_probe:
@@ -369,8 +381,8 @@ if not args.vis_only:
         opt = optax.adam(args.probe_lr)
         opt_state = opt.init(probe_params)
 
-        c_jnp = jnp.array(carries)
-        t_jnp = jnp.array(pellet_masks)
+        c_jnp = jnp.array(carries[train_idx])
+        t_jnp = jnp.array(pellet_masks[train_idx])
         n_samples = c_jnp.shape[0]
 
         @partial(jax.jit, static_argnames=["n_steps", "batch_size"])
@@ -453,6 +465,17 @@ if args.vis_only:
     )
     print(f"  probe loaded")
 
+    _n_episodes = len(ep_bounds) - 1
+    _split_rng = np.random.default_rng(args.seed)
+    _ep_perm = _split_rng.permutation(_n_episodes)
+    _ep_split = int(0.8 * _n_episodes)
+    train_episodes = sorted(_ep_perm[:_ep_split])
+    test_episodes = sorted(_ep_perm[_ep_split:])
+    train_idx = np.concatenate([np.arange(ep_bounds[i], ep_bounds[i + 1]) for i in train_episodes])
+    test_idx = np.concatenate([np.arange(ep_bounds[i], ep_bounds[i + 1]) for i in test_episodes])
+    print(f"  split: {len(train_episodes)} train episodes ({len(train_idx)} steps), "
+          f"{len(test_episodes)} test episodes ({len(test_idx)} steps)")
+
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Phase 4 — Visualise (shared rendering code)
@@ -532,80 +555,35 @@ def _vis_stored_episode(ve_idx, probe_params):
     return p
 
 
-# ── episode PNGs ─────────────────────────────────────────────────────────────
+# ── episode PNGs (from held-out test episodes) ─────────────────────────────
 
-if args.vis_only:
-    n_eps = min(args.vis_episodes, len(ep_bounds) - 1)
-    print(f"Generating {n_eps} episode visualisation(s) from stored data…")
-    for ve in range(n_eps):
-        p = _vis_stored_episode(ve, probe_params)
-        print(f"  → {p}")
-else:
-    probe_jit = jax.jit(partial(probe_forward, probe_params))
-    print(f"Generating {args.vis_episodes} episode visualisation(s)…")
-
-    key = jax.random.key(args.seed + 5000)
-    for ve in range(args.vis_episodes):
-        key, rk = jax.random.split(key)
-        obs, env_st = env.reset(rk, env_params)
-        carry = zero_carry()
-
-        true_grids, pred_grids, prs, pcs = [], [], [], []
-        for _ in range(_MAX_STEPS):
-            alive = np.array(
-                jnp.any(env_st.pellet_locations != 0, axis=-1), dtype=np.float32
-            )
-            key, sk, ek = jax.random.split(key, 3)
-            raw, new_carry = fns.predict(
-                state, obs, carry, sk, deterministic=True
-            )
-            action = jnp.round(raw).astype(jnp.int32)
-
-            pred = np.array(jax.nn.sigmoid(probe_jit(new_carry)))
-            true_grids.append(to_grid(alive))
-            pred_grids.append(to_grid(pred))
-            prs.append(int(env_st.player_locations.x))
-            pcs.append(int(env_st.player_locations.y))
-
-            next_obs, next_st, _, done, _ = env.step(
-                ek, env_st, action, env_params
-            )
-            obs, env_st = next_obs, next_st
-            carry = jnp.where(done, zero_carry(), new_carry)
-            if done:
-                break
-
-        ep_len = len(true_grids)
-        nf = min(args.vis_frames, ep_len)
-        idxs = np.linspace(0, ep_len - 1, nf, dtype=int)
-
-        fig, axes = plt.subplots(2, nf, figsize=(2.4 * nf, 6))
-        if nf == 1:
-            axes = axes.reshape(2, 1)
-        fig.suptitle(
-            f"Pellet Probe — {tag}  episode {ve + 1}  (len={ep_len})",
-            fontsize=10,
-        )
-        for j, idx in enumerate(idxs):
-            render(axes[0, j], true_grids[idx], prs[idx], pcs[idx], f"True  t={idx}")
-            render(axes[1, j], pred_grids[idx], prs[idx], pcs[idx], f"Pred  t={idx}")
-        axes[0, 0].set_ylabel("Ground Truth", fontsize=9)
-        axes[1, 0].set_ylabel("Probe", fontsize=9)
-        fig.tight_layout()
-        p = os.path.join(args.output_dir, f"pellet_probe_ep{ve + 1}.png")
-        fig.savefig(p, dpi=150)
-        plt.close(fig)
-        print(f"  → {p}")
+n_vis = min(args.vis_episodes, len(test_episodes))
+print(f"Generating {n_vis} episode visualisation(s) from test episodes…")
+for vi in range(n_vis):
+    ep_idx = test_episodes[vi]
+    p = _vis_stored_episode(ep_idx, probe_params)
+    print(f"  → {p}  (episode {ep_idx})")
 
 # ── accuracy summary ─────────────────────────────────────────────────────────
 
-print("Computing overall probe accuracy…")
-all_logits = probe_forward(probe_params, jnp.array(carries))
-preds_bin = (jax.nn.sigmoid(all_logits) > 0.5).astype(jnp.float32)
-targets = jnp.array(pellet_masks)
-acc = float(jnp.mean(preds_bin == targets))
-per_pellet = np.array(jnp.mean(preds_bin == targets, axis=0))
-print(f"Overall accuracy: {acc:.1%}")
+print("Computing probe accuracy on held-out test set…")
+test_logits = probe_forward(probe_params, jnp.array(carries[test_idx]))
+test_preds = (jax.nn.sigmoid(test_logits) > 0.5).astype(jnp.float32)
+test_targets = jnp.array(pellet_masks[test_idx])
+
+correct = (test_preds == test_targets).astype(jnp.float32)
+acc = float(jnp.mean(correct))
+
+alive_mask = (test_targets == 1).astype(jnp.float32)
+eaten_mask = (test_targets == 0).astype(jnp.float32)
+alive_acc = float(jnp.sum(correct * alive_mask) / jnp.maximum(jnp.sum(alive_mask), 1))
+eaten_acc = float(jnp.sum(correct * eaten_mask) / jnp.maximum(jnp.sum(eaten_mask), 1))
+balanced_acc = (alive_acc + eaten_acc) / 2
+
+per_pellet = np.array(jnp.mean(correct, axis=0))
+alive_frac = float(jnp.mean(alive_mask))
+print(f"Test accuracy: {acc:.1%}  (alive={alive_acc:.1%}, eaten={eaten_acc:.1%}, balanced={balanced_acc:.1%})")
+print(f"Class balance: {alive_frac:.1%} alive, {1 - alive_frac:.1%} eaten")
 
 fig, ax = plt.subplots(figsize=(5.5, 6.5))
 g = to_grid(per_pellet)
@@ -619,7 +597,9 @@ for r in range(MAZE_ROWS):
             else:
                 img[r, c] = [1.0 - v, v, 0.15]
 ax.imshow(img, interpolation="nearest", aspect="equal")
-ax.set_title(f"Per-Cell Probe Accuracy — {tag}\nOverall: {acc:.1%}", fontsize=10)
+ax.set_title(f"Per-Cell Probe Accuracy (test) — {tag}\n"
+             f"Overall: {acc:.1%}  Eaten: {eaten_acc:.1%}  Balanced: {balanced_acc:.1%}",
+             fontsize=10)
 ax.set_xticks([])
 ax.set_yticks([])
 fig.tight_layout()
@@ -633,8 +613,8 @@ print(f"  → {p}")
 if args.mp4:
     from matplotlib.animation import FuncAnimation
 
-    ep_lens = np.diff(ep_bounds)
-    best = int(np.argmax(ep_lens))
+    test_ep_lens = np.array([ep_bounds[i + 1] - ep_bounds[i] for i in test_episodes])
+    best = test_episodes[int(np.argmax(test_ep_lens))]
     start, end = int(ep_bounds[best]), int(ep_bounds[best + 1])
     ep_c = carries[start:end]
     ep_m = pellet_masks[start:end]
