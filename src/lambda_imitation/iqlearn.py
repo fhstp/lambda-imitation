@@ -272,12 +272,20 @@ class SACFunctions(NamedTuple):
             immediately sampleable.  Called automatically by :attr:`train`
             when the online buffer has fewer than ``params.online_batch_size``
             sampleable transitions.
+        train_unrolled: ``(state, env, env_params, env_state, env_carry, key)
+            -> (state, env_state, env_carry, metrics)`` -- the un-jitted body
+            behind :attr:`train`'s scan, with no host-side control flow.  Safe
+            to ``jax.vmap`` over a leading seed axis to train many seeds
+            concurrently in one kernel.  Unlike :attr:`train` it does **not**
+            auto-prefill: the caller must warm the buffer first via
+            :attr:`prefill_buffer` and thread ``env_carry`` explicitly.
     """
 
     predict: Callable
     train: Callable
     get_importance_ratios: Callable
     prefill_buffer: Callable
+    train_unrolled: Callable
 
 
 class DebugFunctions(NamedTuple):
@@ -1325,8 +1333,15 @@ def create_iqlearn(
             ``(scalar_loss, {"ld_loss": loss})``.
         """
 
-        q1 = get_q(lambda1_critic, lambda1_graph, latents, actions)
-        q2 = get_q(lambda2_critic, lambda2_graph, latents, actions)
+        # Freeze the λ-critic head params for this term so the discrepancy
+        # gradient flows ONLY into the shared FE via ``latents`` — the
+        # representation is what the λ-discrepancy is meant to regularise.
+        # Without the stop_gradient the heads can trivially collapse q1≈q2 by
+        # themselves (the cheapest descent direction), self-satisfying the
+        # regulariser and leaving the FE — and thus ``lambda_coef`` — with no
+        # effect.  The λ-critics still train via their V-trace losses.
+        q1 = get_q(jax.lax.stop_gradient(lambda1_critic), lambda1_graph, latents, actions)
+        q2 = get_q(jax.lax.stop_gradient(lambda2_critic), lambda2_graph, latents, actions)
         loss = optax.losses.huber_loss(q1, q2).mean()
         return loss, {"ld_loss": loss}
 
@@ -1892,8 +1907,7 @@ def create_iqlearn(
     # Single-row (unbatched) zero carry for the env-rollout policy queries.
     _env_zero_carry = feature_extractor.initialize_carry(1)[0]
 
-    @partial(jax.jit, static_argnames=["env"])
-    def _train_jit(
+    def _train_unrolled(
         sac: SACState,
         env,
         env_params,
@@ -1901,7 +1915,15 @@ def create_iqlearn(
         env_carry,
         key: jax.Array,
     ) -> Tuple[SACState, any, any, dict]:
-        print("compiling...")
+        """Pure ``train_steps``-long (env-step + grad-update) scan.
+
+        No host-side control flow and no jit, so it is safe to ``jax.vmap``
+        over a leading seed axis (stack ``sac`` / ``env_state`` / ``env_carry``
+        / ``key``, keep ``env`` / ``env_params`` broadcast) to train many seeds
+        concurrently in one kernel.  The caller is responsible for pre-filling
+        the buffer first (see :func:`prefill_buffer`); :func:`train` wraps this
+        with the automatic warm-up check, which is itself not vmap-safe.
+        """
 
         def scan_fun(carry, _):
             sac, env_state, env_carry, key = carry
@@ -1917,6 +1939,18 @@ def create_iqlearn(
         )
         metrics = jax.tree.map(lambda x: x.mean(), metrics)
         return sac, env_state, env_carry, metrics
+
+    @partial(jax.jit, static_argnames=["env"])
+    def _train_jit(
+        sac: SACState,
+        env,
+        env_params,
+        env_state,
+        env_carry,
+        key: jax.Array,
+    ) -> Tuple[SACState, any, any, dict]:
+        print("compiling...")
+        return _train_unrolled(sac, env, env_params, env_state, env_carry, key)
 
     def train(
         sac: SACState,
@@ -2064,7 +2098,9 @@ def create_iqlearn(
         """
         return _prefill_jit(sac, env, env_params, env_state, n_steps, key)
 
-    fns = SACFunctions(predict, train, get_importance_ratios, prefill_buffer)
+    fns = SACFunctions(
+        predict, train, get_importance_ratios, prefill_buffer, _train_unrolled
+    )
     if debug:
         return (
             iqlearn,

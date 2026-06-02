@@ -27,6 +27,7 @@ Usage
     python pocman_sac_mc.py --memory-type lstm            # LSTM memory
     python pocman_sac_mc.py --wandb                      # enable W&B logging
     python pocman_sac_mc.py --num-seeds 5                # 5 seeds, aggregate
+    python pocman_sac_mc.py --num-seeds 8 --concurrent-seeds 4  # 2×4 vmapped
     python pocman_sac_mc.py --help                       # full option list
 """
 
@@ -90,6 +91,19 @@ parser.add_argument(
     default=1,
     metavar="N",
     help="number of seeds per parameter set (default: 1; sweep default: 5)",
+)
+parser.add_argument(
+    "--concurrent-seeds",
+    type=int,
+    default=1,
+    metavar="N",
+    help=(
+        "number of seeds trained concurrently in a single vmapped+jitted "
+        "kernel (default: 1 = sequential). --num-seeds must be divisible by "
+        "this. Higher values trade GPU memory for throughput; the sweet spot "
+        "is GPU-dependent (the workload is often latency/occupancy bound, so "
+        "vmapping seeds is a near-free speedup until memory runs out)"
+    ),
 )
 parser.add_argument(
     "--memory-type",
@@ -352,6 +366,7 @@ if args.wandb_sweep:
     args.memory_hidden_dim = sc.get("memory_hidden_dim", args.memory_hidden_dim)
     args.lambda_coef = sc.get("lambda_coef", args.lambda_coef)
     args.num_seeds = sc.get("num_seeds", 10)
+    args.concurrent_seeds = sc.get("concurrent_seeds", args.concurrent_seeds)
 
     hp = Hyperparameters(
         online_batch_size=128,
@@ -485,72 +500,31 @@ def _build_agent(seed_val: int):
     return create_iqlearn_from_env(spec, expert_data, **_AGENT_KWARGS, seed=seed_val)
 
 
-# ── single seed run ──────────────────────────────────────────────────────────
+# ── vmapped multi-seed training ───────────────────────────────────────────────
+#
+# Seeds are trained in groups of ``--concurrent-seeds``: a group's agent states /
+# env states / carries / keys are stacked along a leading axis and the
+# (env-rollout + grad-update) scan runs under a single ``jax.vmap`` + ``jax.jit``.
+# When the workload is latency / occupancy bound on the GPU this trains N seeds
+# in roughly the wall-time of one.  ``fns.train_unrolled`` (not ``fns.train``) is
+# used because the latter's host-side buffer-warmth check is not vmap-safe; the
+# buffer is instead pre-filled explicitly per seed before the round loop.
+
+# Transitions collected before training, matching fns.train's auto-prefill size.
+PREFILL_STEPS = hp.online_batch_size * (
+    hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
+)
 
 
-def run_seed(seed_val: int, seed_idx: int, state, fns, evaluate) -> float:
-    print(
-        f"\n{'=' * 60}\n"
-        f"Seed {seed_idx + 1}/{args.num_seeds}  (seed={seed_val})\n"
-        f"{'=' * 60}"
-    )
+def _stack_states(states):
+    """Stack a list of per-seed pytrees along a new leading axis."""
+    return jax.tree.map(lambda *xs: jnp.stack(xs), *states)
 
-    key = jax.random.key(seed_val)
-    key, reset_key = jax.random.split(key)
-    _obs, env_state = env.reset(reset_key, env_params)
 
-    total_steps = args.rounds * args.train_steps
-    print(
-        f"Training for {args.rounds} rounds × {args.train_steps} steps "
-        f"= {total_steps} total env steps."
-    )
-
-    for rnd in tqdm(range(1, args.rounds + 1), desc=f"Seed {seed_idx + 1}"):
-        key, train_key = jax.random.split(key)
-        state, env_state, metrics = fns.train(
-            state, env, env_params, env_state, train_key
-        )
-
-        key, eval_key = jax.random.split(key)
-        mean_return = float(evaluate(state, eval_key, n_episodes=10))
-
-        print(
-            f"Round {rnd:4d}/{args.rounds}  "
-            f"mean_return={mean_return:7.1f}  "
-            f"alpha={float(metrics.get('alpha', state.alpha)):.4f}  "
-            f"critic_loss={float(metrics.get('critic_loss', jnp.nan)):.4f}  "
-            f"entropy={float(metrics.get('entropy', jnp.nan)):.4f}  "
-            f"q={float(metrics.get('q', jnp.nan)):7.3f}"
-        )
-
-        if _wandb is not None:
-            if args.num_seeds == 1:
-                _wandb.log(
-                    {
-                        "round": rnd,
-                        "env_interactions": rnd * args.train_steps,
-                        "mean_return": mean_return,
-                        **{k: float(v) for k, v in metrics.items()},
-                    },
-                    step=rnd * args.train_steps,
-                )
-            else:
-                prefix = f"seed_{seed_idx}"
-                _wandb.log(
-                    {
-                        "env_interactions": rnd * args.train_steps,
-                        f"{prefix}/mean_return": mean_return,
-                        **{f"{prefix}/{k}": float(v) for k, v in metrics.items()},
-                    }
-                )
-
-    key, eval_key = jax.random.split(key)
-    final_return = float(evaluate(state, eval_key, n_episodes=20))
-    print(
-        f"Seed {seed_idx + 1} final evaluation (20 episodes): "
-        f"mean_return={final_return:.1f}"
-    )
-    return final_return
+def _split_each(keys):
+    """Split a batch of PRNG keys, returning two batches (carry, fresh)."""
+    out = jax.vmap(lambda k: jax.random.split(k))(keys)
+    return out[:, 0], out[:, 1]
 
 
 # ── wandb (non-sweep init) ───────────────────────────────────────────────────
@@ -571,6 +545,7 @@ if _wandb is not None and not args.wandb_sweep:
             "rounds": args.rounds,
             "train_steps": args.train_steps,
             "num_seeds": args.num_seeds,
+            "concurrent_seeds": args.concurrent_seeds,
             "seed": args.seed,
             **hp._asdict(),
         },
@@ -583,27 +558,154 @@ if _wandb is not None and args.num_seeds > 1:
     for i in range(args.num_seeds):
         _wandb.define_metric(f"seed_{i}/*", step_metric="env_interactions")
 
-# ── main: run seeds and aggregate ────────────────────────────────────────────
+# ── main: run seeds (grouped, vmapped) and aggregate ──────────────────────────
+
+CONCURRENT = args.concurrent_seeds
+if CONCURRENT < 1:
+    sys.exit("--concurrent-seeds must be >= 1")
+if args.num_seeds % CONCURRENT != 0:
+    sys.exit(
+        f"--num-seeds ({args.num_seeds}) must be divisible by "
+        f"--concurrent-seeds ({CONCURRENT})."
+    )
 
 seeds = [args.seed + i for i in range(args.num_seeds)]
+n_groups = args.num_seeds // CONCURRENT
 
 print(
     f"Building SAC + λ-discrepancy agent for PocMan "
     f"(discrete, lambda-envs)  memory={args.memory_type} "
     f"hidden={args.memory_hidden_dim} projection={projection_dim}…"
 )
+print(
+    f"{args.num_seeds} seed(s) in {n_groups} group(s) of {CONCURRENT} trained "
+    f"concurrently (vmap); {args.rounds} rounds × {args.train_steps} steps each."
+)
 state_0, fns, debug_fns = _build_agent(seeds[0])
 evaluate = _make_evaluate(fns)
 
-final_returns = []
+# vmapped + jitted env reset / prefill / train over the leading seed axis.
+# env / env_params are captured as closure constants (static), not vmapped.
+_reset_v = jax.jit(jax.vmap(lambda k: env.reset(k, env_params)))
+_prefill_v = jax.jit(
+    jax.vmap(
+        lambda s, es, k: fns.prefill_buffer(s, env, env_params, es, PREFILL_STEPS, k),
+        in_axes=(0, 0, 0),
+    )
+)
+_train_v = jax.jit(
+    jax.vmap(
+        lambda s, es, ec, k: fns.train_unrolled(s, env, env_params, es, ec, k),
+        in_axes=(0, 0, 0, 0),
+    )
+)
 
-for i, s in enumerate(seeds):
-    if i == 0:
-        state = state_0
-    else:
-        state, _, _ = _build_agent(s)
-    ret = run_seed(s, i, state, fns, evaluate)
-    final_returns.append(ret)
+
+def _evaluate_v(states, keys, n_episodes):
+    return jax.vmap(lambda s, k: evaluate(s, k, n_episodes=n_episodes))(states, keys)
+
+
+def run_group(group_idx: int, group: list) -> list:
+    """Train one group of ``CONCURRENT`` seeds concurrently; return finals.
+
+    ``group`` is a list of ``(global_seed_idx, seed_val)`` pairs.  Returns a
+    list of ``(global_seed_idx, final_return)``.
+    """
+    idxs = [gi for gi, _ in group]
+    svals = [sv for _, sv in group]
+    print(
+        f"\n{'=' * 60}\n"
+        f"Group {group_idx + 1}/{n_groups}  seeds={svals} "
+        f"(global idx {idxs[0]}–{idxs[-1]})\n"
+        f"{'=' * 60}"
+    )
+
+    # One agent per seed, stacked into a single batched state.  Reuse the
+    # already-built agent for the very first seed of the first group.
+    states = []
+    for j, sv in enumerate(svals):
+        if group_idx == 0 and j == 0:
+            states.append(state_0)
+        else:
+            st, _, _ = _build_agent(sv)
+            states.append(st)
+    batched = _stack_states(states)
+
+    keys = jnp.stack([jax.random.key(sv) for sv in svals])
+    keys, reset_keys = _split_each(keys)
+    _obs, env_state = _reset_v(reset_keys)
+    keys, prefill_keys = _split_each(keys)
+    batched, env_state = _prefill_v(batched, env_state, prefill_keys)
+
+    # Fresh zero carry each round, matching fns.train's per-call carry reset.
+    zero_carry_b = jnp.zeros((CONCURRENT, CARRY_DIM), dtype=jnp.float32)
+
+    for rnd in tqdm(range(1, args.rounds + 1), desc=f"Group {group_idx + 1}"):
+        keys, train_keys = _split_each(keys)
+        batched, env_state, _carry, metrics = _train_v(
+            batched, env_state, zero_carry_b, train_keys
+        )
+
+        keys, eval_keys = _split_each(keys)
+        returns = _evaluate_v(batched, eval_keys, 10)  # (CONCURRENT,)
+
+        def _gm(name):  # group mean of a batched metric, for the console line
+            v = metrics.get(name)
+            return float(jnp.mean(v)) if v is not None else float("nan")
+
+        print(
+            f"Round {rnd:4d}/{args.rounds}  "
+            f"mean_return={float(jnp.mean(returns)):7.1f}  "
+            f"alpha={_gm('alpha'):.4f}  "
+            f"critic_loss={_gm('critic_loss'):.4f}  "
+            f"entropy={_gm('entropy'):.4f}  "
+            f"q={_gm('q'):7.3f}"
+        )
+
+        if _wandb is not None:
+            if args.num_seeds == 1:
+                _wandb.log(
+                    {
+                        "round": rnd,
+                        "env_interactions": rnd * args.train_steps,
+                        "mean_return": float(returns[0]),
+                        **{k: float(v[0]) for k, v in metrics.items()},
+                    },
+                    step=rnd * args.train_steps,
+                )
+            else:
+                for j, gi in enumerate(idxs):
+                    prefix = f"seed_{gi}"
+                    _wandb.log(
+                        {
+                            "env_interactions": rnd * args.train_steps,
+                            f"{prefix}/mean_return": float(returns[j]),
+                            **{
+                                f"{prefix}/{k}": float(v[j])
+                                for k, v in metrics.items()
+                            },
+                        }
+                    )
+
+    keys, eval_keys = _split_each(keys)
+    final_returns_b = _evaluate_v(batched, eval_keys, 20)  # (CONCURRENT,)
+    for j, gi in enumerate(idxs):
+        print(
+            f"Seed {gi + 1} (seed={svals[j]}) final evaluation (20 episodes): "
+            f"mean_return={float(final_returns_b[j]):.1f}"
+        )
+    return [(gi, float(final_returns_b[j])) for j, gi in enumerate(idxs)]
+
+
+indexed_seeds = list(enumerate(seeds))
+groups = [
+    indexed_seeds[g * CONCURRENT : (g + 1) * CONCURRENT] for g in range(n_groups)
+]
+
+final_returns = [None] * args.num_seeds
+for g, group in enumerate(groups):
+    for gi, ret in run_group(g, group):
+        final_returns[gi] = ret
 
 returns_arr = jnp.array(final_returns)
 mean_ret = float(jnp.mean(returns_arr))
