@@ -54,6 +54,54 @@ from .iqlearn import (
 )
 
 # ---------------------------------------------------------------------------
+# Dtype resolution (precision experiments)
+# ---------------------------------------------------------------------------
+
+
+_DTYPE_ALIASES: dict[str, jnp.dtype] = {
+    "float32": jnp.float32,
+    "f32": jnp.float32,
+    "fp32": jnp.float32,
+    "32": jnp.float32,
+    "float16": jnp.float16,
+    "f16": jnp.float16,
+    "fp16": jnp.float16,
+    "16": jnp.float16,
+    "half": jnp.float16,
+    "bfloat16": jnp.bfloat16,
+    "bf16": jnp.bfloat16,
+}
+
+
+def resolve_dtype(name: str | jnp.dtype | None) -> jnp.dtype | None:
+    """Map a precision string to a concrete JAX dtype.
+
+    Convenience for CLI-driven precision experiments: turns ``"bf16"``,
+    ``"float16"``, ``"fp32"`` etc. into the matching ``jnp`` dtype.  Passing a
+    dtype through returns it unchanged; ``None`` returns ``None`` (used to mean
+    "tie ``param_dtype`` to ``dtype``").
+
+    Args:
+        name: A case-insensitive alias (see :data:`_DTYPE_ALIASES`), an
+            already-resolved JAX dtype, or ``None``.
+
+    Returns:
+        The corresponding JAX dtype, or ``None`` when ``name`` is ``None``.
+
+    Raises:
+        ValueError: If ``name`` is a string with no known alias.
+    """
+    if name is None or not isinstance(name, str):
+        return name
+    key = name.strip().lower()
+    if key not in _DTYPE_ALIASES:
+        raise ValueError(
+            f"unknown dtype {name!r}; expected one of {sorted(_DTYPE_ALIASES)}."
+        )
+    return _DTYPE_ALIASES[key]
+
+
+# ---------------------------------------------------------------------------
 # Common spec container
 # ---------------------------------------------------------------------------
 
@@ -129,6 +177,19 @@ class RecurrentFeatureExtractor(nnx.Module):
         memory_hidden_dim: Hidden-state width for the recurrent cell.
             Ignored when ``memory_type="identity"``.
         rngs: Flax NNX RNG container used to initialise parameters.
+        dtype: Compute dtype for the projection and the heads downstream.
+            Weights are always initialised in float32; storage precision is
+            set afterwards by the caller (the cells' orthogonal init is
+            unsupported in bf16/fp16).
+        carry_dtype: Compute dtype for the recurrent memory cell and the carry
+            returned by :meth:`initialize_carry`.  ``None`` ties it to
+            ``dtype``.  Keeping this at ``jnp.float32`` while ``dtype`` is low
+            precision preserves recurrent hidden-state fidelity (important for
+            long-horizon / POMDP memory) while the large projection + head
+            matmuls still run low-precision.  The cell upcasts its
+            low-precision projected input to ``carry_dtype`` internally, so the
+            FE output ``y`` (the hidden state, for recurrent cells) is in
+            ``carry_dtype``.
     """
 
     def __init__(
@@ -139,6 +200,8 @@ class RecurrentFeatureExtractor(nnx.Module):
         memory_hidden_dim: int = 128,
         *,
         rngs: nnx.Rngs,
+        dtype: jnp.dtype = jnp.float32,
+        carry_dtype: jnp.dtype | None = None,
     ):
         if memory_type not in ("identity", "rnn", "gru", "lstm"):
             raise ValueError(
@@ -146,14 +209,25 @@ class RecurrentFeatureExtractor(nnx.Module):
                 f"got {memory_type!r}."
             )
 
+        carry_dtype = dtype if carry_dtype is None else carry_dtype
         self.memory_type = memory_type
         self._memory_hidden_dim = memory_hidden_dim
+        # The recurrent cell + carry run in carry_dtype; the projection runs in
+        # the (possibly lower) compute dtype.  Decoupling them lets the carry
+        # stay fp32 (precise long-horizon memory) while the big matmuls go bf16.
+        # Weights are initialised in float32 (the cells' orthogonal
+        # recurrent-kernel init runs a QR that XLA does not support in
+        # bf16/fp16); storage dtype is set afterwards by the caller.
+        self._dtype = dtype
+        self._carry_dtype = carry_dtype
 
         if projection_dim is None:
             self.projection = None
             cell_in_dim = input_dim
         else:
-            self.projection = nnx.Linear(input_dim, projection_dim, rngs=rngs)
+            self.projection = nnx.Linear(
+                input_dim, projection_dim, dtype=dtype, rngs=rngs
+            )
             cell_in_dim = projection_dim
 
         if memory_type == "identity":
@@ -163,6 +237,7 @@ class RecurrentFeatureExtractor(nnx.Module):
             self.cell = nnx.SimpleCell(
                 in_features=cell_in_dim,
                 hidden_features=memory_hidden_dim,
+                dtype=carry_dtype,
                 rngs=rngs,
             )
             self.output_dim = memory_hidden_dim
@@ -170,6 +245,7 @@ class RecurrentFeatureExtractor(nnx.Module):
             self.cell = nnx.GRUCell(
                 in_features=cell_in_dim,
                 hidden_features=memory_hidden_dim,
+                dtype=carry_dtype,
                 rngs=rngs,
             )
             self.output_dim = memory_hidden_dim
@@ -177,6 +253,7 @@ class RecurrentFeatureExtractor(nnx.Module):
             self.cell = nnx.LSTMCell(
                 in_features=cell_in_dim,
                 hidden_features=memory_hidden_dim,
+                dtype=carry_dtype,
                 rngs=rngs,
             )
             self.output_dim = memory_hidden_dim
@@ -241,7 +318,7 @@ class RecurrentFeatureExtractor(nnx.Module):
             ``carry_dim`` is ``0`` for identity, ``memory_hidden_dim`` for
             RNN/GRU, and ``2 * memory_hidden_dim`` for LSTM.
         """
-        return jnp.zeros((batch_size, self.carry_dim), dtype=jnp.float32)
+        return jnp.zeros((batch_size, self.carry_dim), dtype=self._carry_dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +556,9 @@ def create_iqlearn_from_env(
     approximate_lambda: bool = False,
     debug: bool = False,
     seed: int = 0,
+    dtype: jnp.dtype = jnp.float32,
+    param_dtype: jnp.dtype | None = None,
+    carry_dtype: jnp.dtype | None = None,
 ) -> (
     "Tuple[SACState, SACFunctions] | "
     "Tuple[SACState, SACFunctions, DebugFunctions]"
@@ -537,6 +617,18 @@ def create_iqlearn_from_env(
             :class:`DebugFunctions` named tuple.
         seed: Integer seed for the ``nnx.Rngs`` used to initialise the
             feature extractor.
+        dtype: Global compute dtype for the whole agent (feature extractor +
+            all heads).  Use :func:`resolve_dtype` to map a CLI string such as
+            ``"bf16"`` to the JAX dtype.  ``jnp.bfloat16`` is the safe
+            low-precision choice for structured precision experiments.
+        param_dtype: Global storage dtype for the weights.  ``None`` ties it to
+            ``dtype`` (full low-precision cast); pass ``jnp.float32`` with a
+            low-precision ``dtype`` for mixed-precision (AMP) training.
+        carry_dtype: Compute dtype for the recurrent memory cell and its carry.
+            ``None`` ties it to ``dtype``.  Set to ``jnp.float32`` with a
+            low-precision ``dtype`` to keep the recurrent hidden state precise
+            (recommended for memory-heavy / POMDP tasks) while the projection
+            and heads still run low-precision matmuls.
 
     Returns:
         ``(SACState, SACFunctions)``, or
@@ -599,6 +691,8 @@ def create_iqlearn_from_env(
         memory_type=memory_type,
         memory_hidden_dim=memory_hidden_dim,
         rngs=nnx.Rngs(key_fe),
+        dtype=dtype,
+        carry_dtype=carry_dtype,
     )
 
     return create_iqlearn(
@@ -619,4 +713,6 @@ def create_iqlearn_from_env(
         is_discrete=env_spec.is_discrete,
         approximate_lambda=approximate_lambda,
         debug=debug,
+        dtype=dtype,
+        param_dtype=param_dtype,
     )

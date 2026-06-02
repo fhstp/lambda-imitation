@@ -115,6 +115,37 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--dtype",
+    default="float32",
+    metavar="DTYPE",
+    help=(
+        "global compute dtype for the agent: float32 | float16 | bfloat16 "
+        "(aliases f32/f16/bf16 accepted). bfloat16 is the safe low-precision "
+        "choice; float16 may overflow without loss scaling (default: float32)"
+    ),
+)
+parser.add_argument(
+    "--param-dtype",
+    default=None,
+    metavar="DTYPE",
+    help=(
+        "weight storage dtype. Default: same as --dtype (full cast). "
+        "Pass float32 with a low-precision --dtype for mixed-precision (AMP): "
+        "weights + optimizer stay fp32, only matmuls run low-precision"
+    ),
+)
+parser.add_argument(
+    "--carry-dtype",
+    default=None,
+    metavar="DTYPE",
+    help=(
+        "recurrent memory cell + carry compute dtype. Default: same as "
+        "--dtype. Pass float32 with a low-precision --dtype to keep the "
+        "recurrent hidden state precise (helps memory-heavy / POMDP tasks) "
+        "while projection + heads still run low-precision matmuls"
+    ),
+)
+parser.add_argument(
     "--approximate-lambda",
     dest="approximate_lambda",
     action="store_true",
@@ -291,7 +322,21 @@ except ImportError:
     )
 
 from lambda_imitation.iqlearn import Hyperparameters
-from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
+from lambda_imitation.utils import (
+    create_iqlearn_from_env,
+    env_spec_from_gymnax,
+    resolve_dtype,
+)
+
+# Resolve precision: --param-dtype / --carry-dtype default to --dtype.
+DTYPE = resolve_dtype(args.dtype)
+PARAM_DTYPE = resolve_dtype(args.param_dtype)  # None -> tied to DTYPE downstream
+CARRY_DTYPE = resolve_dtype(args.carry_dtype) or DTYPE  # concrete carry dtype
+print(
+    f"Precision: compute={jnp.dtype(DTYPE).name} "
+    f"params={jnp.dtype(PARAM_DTYPE if PARAM_DTYPE is not None else DTYPE).name} "
+    f"carry={jnp.dtype(CARRY_DTYPE).name}"
+)
 
 # ── env adapter: add params kwarg to get_obs ──────────────────────────────────
 #
@@ -418,7 +463,7 @@ projection_dim = args.projection_dim if args.projection_dim > 0 else None
 
 
 def zero_carry() -> jax.Array:
-    return jnp.zeros((CARRY_DIM,), dtype=jnp.float32)
+    return jnp.zeros((CARRY_DIM,), dtype=CARRY_DTYPE)
 
 
 # ── evaluation helper ─────────────────────────────────────────────────────────
@@ -478,6 +523,9 @@ _AGENT_KWARGS = dict(
     train_steps=args.train_steps,
     approximate_lambda=args.approximate_lambda,
     debug=True,
+    dtype=DTYPE,
+    param_dtype=PARAM_DTYPE,
+    carry_dtype=CARRY_DTYPE,
 )
 
 

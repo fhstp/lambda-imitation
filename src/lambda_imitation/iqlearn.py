@@ -55,6 +55,31 @@ LOG_STD_MIN = -5
 LOG_STD_MAX = 2
 
 
+def cast_floating(tree, dtype: jnp.dtype):
+    """Cast every floating-point leaf of a pytree to ``dtype``.
+
+    Used to set the storage precision of a freshly-initialised parameter
+    state.  Parameters are always *initialised* in float32 (some Flax cells
+    use an orthogonal recurrent-kernel init whose QR step XLA does not support
+    in bf16/fp16); this cast applies the requested storage dtype afterwards.
+    Non-floating leaves (integer counters, booleans) are passed through
+    unchanged, so it is safe to apply to whole graph states.
+
+    Args:
+        tree: Any JAX pytree (e.g. an ``nnx`` graph state).
+        dtype: Target floating dtype.
+
+    Returns:
+        A pytree of the same structure with floating leaves cast to ``dtype``.
+    """
+    return jax.tree.map(
+        lambda x: x.astype(dtype)
+        if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+        else x,
+        tree,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Network building blocks
 # ---------------------------------------------------------------------------
@@ -85,6 +110,12 @@ class Head(nnx.Module):
             direct linear projection from features to output.
         output_dim: Dimensionality of the output.
         rngs: Flax NNX RNG container used to initialise parameters.
+        dtype: Compute dtype for the linear layers (matmul / activation
+            precision).  ``jnp.bfloat16`` / ``jnp.float16`` enable low-precision
+            forward + backward passes.  Weights are always *initialised* in
+            float32 (low-precision orthogonal/QR init is unsupported by XLA);
+            storage precision is set afterwards by the caller via a param-state
+            cast (see :func:`create_iqlearn`).
     """
 
     def __init__(
@@ -94,10 +125,14 @@ class Head(nnx.Module):
         output_dim: int,
         *,
         rngs: nnx.Rngs,
+        dtype: jnp.dtype = jnp.float32,
     ):
         dims = [feature_dim] + list(hidden_dims) + [output_dim]
         self.layers = nnx.data(
-            [nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)]
+            [
+                nnx.Linear(dims[i], dims[i + 1], dtype=dtype, rngs=rngs)
+                for i in range(len(dims) - 1)
+            ]
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -272,12 +307,19 @@ class SACFunctions(NamedTuple):
             immediately sampleable.  Called automatically by :attr:`train`
             when the online buffer has fewer than ``params.online_batch_size``
             sampleable transitions.
+        train_unrolled: ``(state, env, env_params, env_state, env_carry, key)
+            -> (state, env_state, env_carry, metrics)`` -- the pure, un-jitted
+            ``train_steps``-long scan underlying :attr:`train`, without the
+            host-side buffer warm-up check.  Safe to ``jax.vmap`` over a
+            leading seed axis (buffer must be pre-filled first via
+            :attr:`prefill_buffer`).
     """
 
     predict: Callable
     train: Callable
     get_importance_ratios: Callable
     prefill_buffer: Callable
+    train_unrolled: Callable
 
 
 class DebugFunctions(NamedTuple):
@@ -429,6 +471,8 @@ def create_iqlearn(
     is_discrete: bool = False,
     approximate_lambda: bool = False,
     debug: bool = False,
+    dtype: jnp.dtype = jnp.float32,
+    param_dtype: jnp.dtype | None = None,
 ) -> (
     "Tuple[SACState, SACFunctions] | "
     "Tuple[SACState, SACFunctions, DebugFunctions]"
@@ -487,6 +531,19 @@ def create_iqlearn(
             discrepancy to the joint loss as a regulariser.
         debug: If True, additionally return a :class:`DebugFunctions` named
             tuple exposing internal helpers (``get_q``, ``get_entropy``).
+        dtype: Compute dtype for all actor / critic / λ-critic heads.  The
+            feature extractor's dtype is fixed when it is constructed by the
+            caller, so pass a matching ``dtype`` there too (see
+            :func:`create_iqlearn_from_env`).  ``jnp.bfloat16`` is the safe
+            low-precision choice; ``jnp.float16`` has a narrow range and may
+            overflow without loss scaling.
+        param_dtype: Storage dtype for ALL weights (FE + every head).  Applied
+            as a post-init cast (see :func:`cast_floating`), so it also fixes
+            the dtype of the Adam moments and the EMA target nets.  ``None``
+            (default) ties it to ``dtype`` (full low-precision cast).  Setting
+            ``param_dtype=jnp.float32`` while ``dtype`` is low precision gives
+            mixed-precision (AMP-style) training: weights and optimizer moments
+            stay fp32, only the matmuls run low-precision.
 
     Returns:
         When ``debug=False`` (default): a ``(SACState, SACFunctions)`` pair.
@@ -558,18 +615,21 @@ def create_iqlearn(
             feature_dim,
             actor_dims,
             action_dim,
+            dtype=dtype,
             rngs=nnx.Rngs(k_actor),
         )
         critic_q1_model = Head(
             feature_dim,
             critic_dims,
             action_dim,
+            dtype=dtype,
             rngs=nnx.Rngs(k_cq1),
         )
         critic_q2_model = Head(
             feature_dim,
             critic_dims,
             action_dim,
+            dtype=dtype,
             rngs=nnx.Rngs(k_cq2),
         )
         if approximate_lambda:
@@ -577,24 +637,28 @@ def create_iqlearn(
                 feature_dim,
                 lambda1_critic_dims,
                 action_dim,
+                dtype=dtype,
                 rngs=nnx.Rngs(k_l1q1),
             )
             lambda1_q2_critic_model = Head(
                 feature_dim,
                 lambda1_critic_dims,
                 action_dim,
+                dtype=dtype,
                 rngs=nnx.Rngs(k_l1q2),
             )
             lambda2_q1_critic_model = Head(
                 feature_dim,
                 lambda2_critic_dims,
                 action_dim,
+                dtype=dtype,
                 rngs=nnx.Rngs(k_l2q1),
             )
             lambda2_q2_critic_model = Head(
                 feature_dim,
                 lambda2_critic_dims,
                 action_dim,
+                dtype=dtype,
                 rngs=nnx.Rngs(k_l2q2),
             )
     else:
@@ -602,6 +666,7 @@ def create_iqlearn(
             feature_dim,
             actor_dims,
             2 * action_dim,
+            dtype=dtype,
             rngs=nnx.Rngs(k_actor),
         )
         # For continuous critics, features and actions are concatenated before
@@ -610,12 +675,14 @@ def create_iqlearn(
             feature_dim + action_dim,
             critic_dims,
             1,
+            dtype=dtype,
             rngs=nnx.Rngs(k_cq1),
         )
         critic_q2_model = Head(
             feature_dim + action_dim,
             critic_dims,
             1,
+            dtype=dtype,
             rngs=nnx.Rngs(k_cq2),
         )
         if approximate_lambda:
@@ -623,24 +690,28 @@ def create_iqlearn(
                 feature_dim + action_dim,
                 lambda1_critic_dims,
                 1,
+                dtype=dtype,
                 rngs=nnx.Rngs(k_l1q1),
             )
             lambda1_q2_critic_model = Head(
                 feature_dim + action_dim,
                 lambda1_critic_dims,
                 1,
+                dtype=dtype,
                 rngs=nnx.Rngs(k_l1q2),
             )
             lambda2_q1_critic_model = Head(
                 feature_dim + action_dim,
                 lambda2_critic_dims,
                 1,
+                dtype=dtype,
                 rngs=nnx.Rngs(k_l2q1),
             )
             lambda2_q2_critic_model = Head(
                 feature_dim + action_dim,
                 lambda2_critic_dims,
                 1,
+                dtype=dtype,
                 rngs=nnx.Rngs(k_l2q2),
             )
 
@@ -678,6 +749,20 @@ def create_iqlearn(
         lambda2_critic_graph = TwinCriticGraph(
             lambda2_q1_critic_graph, lambda2_q2_critic_graph
         )
+
+    # Apply the global storage precision.  ``param_dtype=None`` ties storage to
+    # the compute dtype (full low-precision cast); passing ``jnp.float32`` while
+    # ``dtype`` is bf16/fp16 yields mixed-precision (AMP) training where weights
+    # and Adam moments stay fp32 but matmuls run low-precision.  Casting here —
+    # before optimizer init and before the EMA targets are copied below — keeps
+    # the optimizer moments and target nets in the same storage dtype.
+    storage_dtype = dtype if param_dtype is None else param_dtype
+    feature_extractor_state = cast_floating(feature_extractor_state, storage_dtype)
+    actor_state = cast_floating(actor_state, storage_dtype)
+    critic_state = cast_floating(critic_state, storage_dtype)
+    if approximate_lambda:
+        lambda1_critic_state = cast_floating(lambda1_critic_state, storage_dtype)
+        lambda2_critic_state = cast_floating(lambda2_critic_state, storage_dtype)
 
     # Optimizers: actor operates on its nnx.GraphState; critic on TwinCriticState.
     fe_optimizer = optax.adam(params.fe_lr)
@@ -1574,10 +1659,18 @@ def create_iqlearn(
             ),
         )
 
+        # Run the V-trace recursion in float32.  ``v`` may be low precision
+        # (it comes from a bf16/fp16 critic) but the recursion mixes in float32
+        # rewards / dones, which would promote the scan carry mid-loop and break
+        # lax.scan's in==out dtype requirement.  Value bootstrapping is also the
+        # most precision-sensitive part of the loss, so fp32 here is the safe
+        # choice; ``q`` stays in compute dtype and the Huber loss promotes.
+        v = v.astype(jnp.float32)
+
         _carry, targets = jax.lax.scan(
             scan_target,
             (jnp.zeros_like(v[0]), jnp.zeros_like(v[0])),
-            (v, dones, rewards, ratios),
+            (v, dones.astype(jnp.float32), rewards.astype(jnp.float32), ratios),
             reverse=True,
         )
 
@@ -1786,28 +1879,42 @@ def create_iqlearn(
             key,
         )
 
-        updates, new_fe_opt = fe_optimizer.update(grads_fe, sac.fe_optimizer_state)
-        new_fe = optax.apply_updates(sac.feature_extractor, updates)  # type: ignore
+        # Optax's Adam bias-correction divides the (low-precision) moments by
+        # float32 scalars, so both the updates and the resulting parameters are
+        # promoted to float32.  Under jax.lax.scan the carry dtype must be
+        # identical in and out, so when params are stored in a low-precision
+        # ``storage_dtype`` we cast the new params *and* optimizer moments back
+        # to it after every step.  For float32 storage these casts are no-ops.
+        def _apply(opt_update_fn, params, grads, opt_state):
+            updates, new_opt = opt_update_fn(grads, opt_state)
+            new_params = optax.apply_updates(params, updates)
+            return (
+                cast_floating(new_params, storage_dtype),
+                cast_floating(new_opt, storage_dtype),
+            )
 
-        updates, new_actor_opt = actor_optimizer.update(
-            grads_actor, sac.actor_optimizer_state
+        new_fe, new_fe_opt = _apply(
+            fe_optimizer.update, sac.feature_extractor, grads_fe,
+            sac.fe_optimizer_state,
         )
-        new_actor = optax.apply_updates(sac.actor, updates)  # type: ignore
-
-        updates, new_critic_opt = critic_optimizer.update(
-            grads_critic, sac.critic_optimizer_state
+        new_actor, new_actor_opt = _apply(
+            actor_optimizer.update, sac.actor, grads_actor,
+            sac.actor_optimizer_state,
         )
-        new_critic = optax.apply_updates(sac.critic, updates)  # type: ignore
+        new_critic, new_critic_opt = _apply(
+            critic_optimizer.update, sac.critic, grads_critic,
+            sac.critic_optimizer_state,
+        )
 
         if approximate_lambda:
-            updates, new_lambda1_critic_opt = lambda1_critic_optimizer.update(
-                grads_lambda1_critic, sac.lambda1_critic_optimizer_state
+            new_lambda1_critic, new_lambda1_critic_opt = _apply(
+                lambda1_critic_optimizer.update, sac.lambda1_critic,
+                grads_lambda1_critic, sac.lambda1_critic_optimizer_state,
             )
-            new_lambda1_critic = optax.apply_updates(sac.lambda1_critic, updates)  # type: ignore
-            updates, new_lambda2_critic_opt = lambda2_critic_optimizer.update(
-                grads_lambda2_critic, sac.lambda2_critic_optimizer_state
+            new_lambda2_critic, new_lambda2_critic_opt = _apply(
+                lambda2_critic_optimizer.update, sac.lambda2_critic,
+                grads_lambda2_critic, sac.lambda2_critic_optimizer_state,
             )
-            new_lambda2_critic = optax.apply_updates(sac.lambda2_critic, updates)  # type: ignore
 
         if params.autotune_alpha:
             grads_alpha = jax.grad(loss_alpha)(sac.log_alpha, -metrics["entropy"])
@@ -1892,8 +1999,7 @@ def create_iqlearn(
     # Single-row (unbatched) zero carry for the env-rollout policy queries.
     _env_zero_carry = feature_extractor.initialize_carry(1)[0]
 
-    @partial(jax.jit, static_argnames=["env"])
-    def _train_jit(
+    def _train_unrolled(
         sac: SACState,
         env,
         env_params,
@@ -1901,7 +2007,15 @@ def create_iqlearn(
         env_carry,
         key: jax.Array,
     ) -> Tuple[SACState, any, any, dict]:
-        print("compiling...")
+        """Pure ``train_steps``-long (env-step + grad-update) scan.
+
+        No host-side control flow and no jit, so it is safe to ``jax.vmap``
+        over a leading seed axis (stack ``sac`` / ``env_state`` / ``env_carry``
+        / ``key``, keep ``env`` / ``env_params`` broadcast) to train many seeds
+        concurrently in one kernel.  The caller is responsible for pre-filling
+        the buffer first (see :func:`prefill_buffer`); :func:`train` wraps this
+        with the automatic warm-up check, which is itself not vmap-safe.
+        """
 
         def scan_fun(carry, _):
             sac, env_state, env_carry, key = carry
@@ -1917,6 +2031,18 @@ def create_iqlearn(
         )
         metrics = jax.tree.map(lambda x: x.mean(), metrics)
         return sac, env_state, env_carry, metrics
+
+    @partial(jax.jit, static_argnames=["env"])
+    def _train_jit(
+        sac: SACState,
+        env,
+        env_params,
+        env_state,
+        env_carry,
+        key: jax.Array,
+    ) -> Tuple[SACState, any, any, dict]:
+        print("compiling...")
+        return _train_unrolled(sac, env, env_params, env_state, env_carry, key)
 
     def train(
         sac: SACState,
@@ -2064,7 +2190,9 @@ def create_iqlearn(
         """
         return _prefill_jit(sac, env, env_params, env_state, n_steps, key)
 
-    fns = SACFunctions(predict, train, get_importance_ratios, prefill_buffer)
+    fns = SACFunctions(
+        predict, train, get_importance_ratios, prefill_buffer, _train_unrolled
+    )
     if debug:
         return (
             iqlearn,
