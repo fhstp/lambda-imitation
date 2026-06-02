@@ -95,7 +95,7 @@ parser.add_argument(
 parser.add_argument(
     "--concurrent-seeds",
     type=int,
-    default=1,
+    default=10,
     metavar="N",
     help=(
         "number of seeds trained concurrently in a single vmapped+jitted "
