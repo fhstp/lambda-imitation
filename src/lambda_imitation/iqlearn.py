@@ -436,6 +436,8 @@ def create_iqlearn(
     lambda2_critic_dims: tuple[int, ...] = (256, 256),
     is_discrete: bool = False,
     approximate_lambda: bool = False,
+    obs_fn: Callable[[jax.Array], jax.Array] = lambda obs: obs,
+    mask_fn: Callable[[jax.Array], jax.Array] | None = None,
     debug: bool = False,
 ) -> (
     "Tuple[SACState, SACFunctions] | "
@@ -493,6 +495,20 @@ def create_iqlearn(
         approximate_lambda: If True, additionally train two V-trace
             λ-return critics (one per ``lambda{1,2}``) and add their Huber
             discrepancy to the joint loss as a regulariser.
+        obs_fn: Pure function mapping the raw stored observation to the
+            observation actually fed to the feature extractor.  Defaults to
+            the identity.  Use it to hide part of the observation from the
+            network (e.g. an action mask packed into the obs); the *full* raw
+            observation is still stored in the buffer so ``mask_fn`` can
+            recover the masked view during the loss.  The feature extractor
+            must already be sized for ``obs_fn``'s output.
+        mask_fn: Optional pure function mapping the raw stored observation to
+            a boolean (or 0/1) action mask of shape ``(*batch, action_dim)``.
+            When provided (discrete only), invalid actions are removed from
+            the policy everywhere logits become a categorical distribution
+            (action selection, soft value, entropy, importance ratios, and the
+            random pre-fill policy).  ``None`` (default) disables masking and
+            leaves behaviour identical to before.
         debug: If True, additionally return a :class:`DebugFunctions` named
             tuple exposing internal helpers (``get_q``, ``get_entropy``).
 
@@ -549,8 +565,10 @@ def create_iqlearn(
     )
 
     # Infer feature dims via dummy forward pass (before split).
-    # FE call returns (new_carry, y); we only need y's last dim.
-    dummy_obs = jnp.zeros((1,) + buffer.info[obs_key].shape[1:])
+    # FE call returns (new_carry, y); we only need y's last dim.  ``obs_fn`` is
+    # applied first so the dummy matches the (possibly reduced) observation the
+    # FE was sized for.
+    dummy_obs = obs_fn(jnp.zeros((1,) + buffer.info[obs_key].shape[1:]))
     _, dummy_y = feature_extractor(
         feature_extractor.initialize_carry(1), dummy_obs
     )
@@ -755,6 +773,29 @@ def create_iqlearn(
         head = nnx.merge(actor_graph, actor)
         return head(x)
 
+    def _apply_mask(logits: jax.Array, mask: jax.Array | None) -> jax.Array:
+        """Drive logits of illegal actions to a large finite negative value.
+
+        ``mask`` is a boolean / 0-1 array broadcastable to ``logits``
+        (``(*batch, num_actions)``); ``None`` returns the logits unchanged.
+        Rows with no legal action (e.g. zero-padded burn-in observations) are
+        left fully unmasked so the subsequent ``softmax`` is well defined.
+
+        A finite fill (``-1e9``) is used rather than ``-inf`` on purpose: with
+        ``-inf`` the masked ``log_softmax`` entries become ``-inf`` and the
+        ``probs * log_probs`` entropy term has a ``0 * -inf`` gradient that
+        back-propagates as ``NaN`` (the ``jnp.where``-with-``inf`` trap),
+        contaminating the shared feature extractor.  ``-1e9`` makes the masked
+        probabilities underflow to exactly ``0`` while keeping all gradients
+        finite.
+        """
+        if mask is None:
+            return logits
+        mask = mask.astype(bool)
+        safe = jnp.any(mask, axis=-1, keepdims=True)
+        keep = jnp.logical_or(mask, jnp.logical_not(safe))
+        return jnp.where(keep, logits, -1e9)
+
     # ------------------------------------------------------------------
     # Action-space-specific helpers
     # ------------------------------------------------------------------
@@ -832,6 +873,7 @@ def create_iqlearn(
             key: jax.Array,
             include_entropy: bool = True,
             include_log: bool = False,
+            mask: jax.Array | None = None,
         ) -> jax.Array | Tuple[jax.Array, dict]:
             """Compute the soft value V(x) = Σ_a π(a|x)·(Q(x,a) − α·log π(a|x)).
 
@@ -850,16 +892,20 @@ def create_iqlearn(
                 include_log: If True, also return a metrics dict with scalar
                     summaries ``{"q": ..., "entropy": ...}``.  Only meaningful
                     when ``include_entropy`` is True.
+                mask: Optional action mask ``(batch, num_actions)``; illegal
+                    actions are dropped from the policy before the softmax.
 
             Returns:
                 When ``include_log=False``: value array of shape ``(batch,)``.
                 When ``include_log=True``: ``(values, metrics_dict)``.
             """
-            logits = run_actor(actor, x)  # (batch, num_actions)
+            logits = _apply_mask(run_actor(actor, x), mask)  # (batch, num_actions)
             probs = jax.nn.softmax(logits)  # (batch, num_actions)
             log_probs = jax.nn.log_softmax(logits)  # (batch, num_actions)
             q_twin = run_critic(critic, graph, x)  # (batch, num_actions, 2)
             q_min = jnp.minimum(q_twin[..., 0], q_twin[..., 1])  # (batch, num_actions)
+            # Illegal actions have probs≈0 and a large-but-finite log_probs, so
+            # their contribution to the entropy is ~0 with finite gradients.
             entropy = -(probs * log_probs).sum(-1)  # (batch,) — exact H(π)
             if include_entropy:
                 v = (probs * q_min).sum(-1) + alpha * entropy
@@ -872,8 +918,8 @@ def create_iqlearn(
             else:
                 return (probs * q_min).sum(-1)
 
-        def get_entropy(actor, x, _key):
-            logits = run_actor(actor, x)  # (batch, num_actions)
+        def get_entropy(actor, x, _key, mask=None):
+            logits = _apply_mask(run_actor(actor, x), mask)  # (batch, num_actions)
             probs = jax.nn.softmax(logits)  # (batch, num_actions)
             log_probs = jax.nn.log_softmax(logits)  # (batch, num_actions)
             entropy = -(probs * log_probs).sum(-1)  # (batch,) — exact H(π)
@@ -906,12 +952,13 @@ def create_iqlearn(
                 ``(action, new_carry)``, or ``(action, new_carry, prob)`` when
                 ``return_prob=True``.  ``action`` is a ``float32`` index.
             """
-            obs_batch = jnp.expand_dims(obs, 0)
+            obs_batch = jnp.expand_dims(obs_fn(obs), 0)
             carry_batch = jnp.expand_dims(carry, 0)
             new_carry, x = nnx.merge(
                 feature_extractor_graph, iqlearn.feature_extractor
             )(carry_batch, obs_batch)
-            logits = run_actor(iqlearn.actor, x)[0]  # (num_actions,)
+            mask = mask_fn(obs) if mask_fn is not None else None
+            logits = _apply_mask(run_actor(iqlearn.actor, x)[0], mask)  # (num_actions,)
             if deterministic:
                 action = jnp.argmax(logits)
             else:
@@ -933,6 +980,7 @@ def create_iqlearn(
             x: jax.Array,
             actions: jax.Array,
             behaviour_probs: jax.Array,
+            mask: jax.Array | None = None,
         ) -> jax.Array:
             """Compute importance ratios ``π(a|s) / b(a|s)`` for a batch.
 
@@ -946,11 +994,13 @@ def create_iqlearn(
                     ``(*batch_dims,)`` or ``(*batch_dims, 1)``.
                 behaviour_probs: Behaviour-policy probabilities, shape
                     broadcastable to ``(*batch_dims,)``.
+                mask: Optional action mask broadcastable to the logits;
+                    illegal actions are dropped before the softmax.
 
             Returns:
                 Importance ratios of shape ``(*batch_dims,)``.
             """
-            logits = run_actor(actor, x)  # (*batch_dims, num_actions)
+            logits = _apply_mask(run_actor(actor, x), mask)  # (*batch_dims, num_actions)
             probs = jax.nn.softmax(logits)
             idx = jnp.round(actions).astype(jnp.int32).reshape(probs.shape[:-1] + (1,))
             pi_a = jnp.take_along_axis(probs, idx, axis=-1).squeeze(-1)
@@ -1215,6 +1265,7 @@ def create_iqlearn(
         latents: jax.Array,
         alpha: jax.Array,
         key: jax.Array,
+        mask: jax.Array | None = None,
     ) -> Tuple[jax.Array, dict]:
         """Actor loss: maximise the soft state value V(s) = Q(s,a) - α log π(a|s).
 
@@ -1229,12 +1280,14 @@ def create_iqlearn(
             latents: Features of shape ``(batch, feature_dim)``.
             alpha: Current entropy temperature.
             key: JAX PRNG key (used only on the continuous path).
+            mask: Optional action mask for ``latents`` (discrete only).
 
         Returns:
             ``(scalar_loss, metrics)`` where metrics contains ``"q"``,
             ``"entropy"`` and ``"v"``.
         """
         key_v = key
+        mask_kw = {"mask": mask} if is_discrete else {}
         v, metrics = get_v(
             actor,
             critic,
@@ -1244,6 +1297,7 @@ def create_iqlearn(
             key_v,
             include_entropy=True,
             include_log=True,
+            **mask_kw,
         )
         metrics.update({"v": v.mean()})
         return -v.mean(), metrics
@@ -1259,6 +1313,7 @@ def create_iqlearn(
         terminated: jax.Array,
         alpha: jax.Array,
         key: jax.Array,
+        next_mask: jax.Array | None = None,
     ) -> Tuple[jax.Array, dict]:
         """SAC Bellman MSE loss for the twin-critic (continuous and discrete).
 
@@ -1281,6 +1336,8 @@ def create_iqlearn(
             terminated: Per-step done flags (float32 0/1), shape ``(batch,)``.
             alpha: Current entropy temperature.
             key: JAX PRNG key (used only on the continuous path).
+            next_mask: Optional action mask for the next state ``s'``
+                (discrete only); used inside ``V(s')``.
 
         Returns:
             ``(scalar_loss, metrics)`` where metrics contains
@@ -1288,6 +1345,7 @@ def create_iqlearn(
         """
         key_v = key
 
+        mask_kw = {"mask": next_mask} if is_discrete else {}
         next_v = get_v(
             actor_target,
             critic_target,
@@ -1296,6 +1354,7 @@ def create_iqlearn(
             target_latents,
             key_v,
             include_entropy=True,
+            **mask_kw,
         )
         target_q = jax.lax.stop_gradient(
             rewards + params.gamma * (1.0 - terminated) * next_v
@@ -1448,6 +1507,11 @@ def create_iqlearn(
         )
         _BL = params.burn_in_length
 
+        # Strip the part of the stored observation the network must not see
+        # (e.g. a packed action mask) before it reaches the FE.  ``obs_fn``
+        # defaults to the identity.
+        observations = obs_fn(observations)
+
         # Sample layout is (B, T, ...); lax.scan iterates leading axis, so move
         # the time axis to the front for the per-step inputs.
         observations = jnp.swapaxes(observations, 0, 1)
@@ -1497,6 +1561,7 @@ def create_iqlearn(
         latents: jax.Array,
         target_latents: jax.Array,
         key: jax.Array,
+        masks: jax.Array | None = None,
     ):
         """V-trace λ-return Huber loss for one λ-critic over a time-major sequence.
 
@@ -1533,6 +1598,9 @@ def create_iqlearn(
             target_latents: Target-FE features, shape ``(T', B, feature_dim)``.
             key: JAX PRNG key, threaded through the inner scan for sampled
                 ``V(s)`` (unused on the discrete path).
+            masks: Optional time-major action masks, shape
+                ``(T', B, action_dim)``; aligned with ``latents``.  ``None``
+                disables masking.
 
         Returns:
             ``(scalar_loss, metrics)``.
@@ -1543,10 +1611,18 @@ def create_iqlearn(
             "which are not currently wired through."
         )
 
+        # Per-step masks are scanned alongside the latents.  When masking is
+        # disabled, feed a zero placeholder and pass ``mask=None`` through.
+        if masks is None:
+            masks_scan = jnp.zeros(latents.shape[:-1] + (0,))
+        else:
+            masks_scan = masks
+
         def scan_v_q(scan_carry, x):
             key = scan_carry
             key, key_next = jax.random.split(key)
-            x, target_x, action, beh_prob = x
+            x, target_x, action, beh_prob, mask_step = x
+            mask_step = None if masks is None else mask_step
             v = get_v(
                 target_actor_state,
                 q_target_state,
@@ -1556,13 +1632,14 @@ def create_iqlearn(
                 key,
                 False,
                 False,
+                mask=mask_step,
             )
             q = get_q(q_state, q_graph, x, action)
             if params.fake_onpolicy_loss:
                 ratio = jnp.ones_like(beh_prob)
             else:
                 ratio = get_importance_ratios(
-                    target_actor_state, target_x, action, beh_prob
+                    target_actor_state, target_x, action, beh_prob, mask_step
                 )
             new_scan_carry = key_next
 
@@ -1586,6 +1663,7 @@ def create_iqlearn(
                 target_latents,
                 actions,
                 behaviour_probs,
+                masks_scan,
             ),
         )
 
@@ -1661,6 +1739,11 @@ def create_iqlearn(
         terminated = sample.this_info[terminated_key]
         behaviour = sample.this_info[behaviour_key]
 
+        # Action masks are derived from the *full* stored observation (the FE
+        # never sees them — see ``calculate_latent``).  ``None`` when masking
+        # is disabled.
+        masks = mask_fn(observations) if (is_discrete and mask_fn is not None) else None
+
         latent, target_latent = calculate_latent(
             feature_extractor_state,
             target_feature_extractor_state,
@@ -1676,6 +1759,7 @@ def create_iqlearn(
         rewards_tm = jnp.swapaxes(rewards, 0, 1)[_BL:]
         terminated_tm = jnp.swapaxes(terminated, 0, 1)[_BL:]
         behaviour_tm = jnp.swapaxes(behaviour, 0, 1)[_BL:]
+        masks_tm = jnp.swapaxes(masks, 0, 1)[_BL:] if masks is not None else None
 
         def _flat(x):
             # (T', B, ...) -> (T' * B, ...)
@@ -1691,6 +1775,7 @@ def create_iqlearn(
             _flat(latent),
             alpha,
             key_actor,
+            mask=_flat(masks_tm) if masks_tm is not None else None,
         )
 
         # Critic: pair (latent[t], target_latent[t+1]) so V(s') is computed at
@@ -1706,6 +1791,7 @@ def create_iqlearn(
             terminated_tm[:-1].reshape(-1),
             alpha,
             key_critic,
+            next_mask=_flat(masks_tm[1:]) if masks_tm is not None else None,
         )
         metrics.update(metrics_critic)
 
@@ -1724,6 +1810,7 @@ def create_iqlearn(
                 latent,
                 target_latent,
                 key_lambda_critic1,
+                masks=masks_tm,
             )
             metrics.update(metrics_lambda1_critic)
             l_lambda2, metrics_lambda2_critic = loss_vtrace_lambda_sequence(
@@ -1739,6 +1826,7 @@ def create_iqlearn(
                 latent,
                 target_latent,
                 key_lambda_critic2,
+                masks=masks_tm,
             )
             metrics.update(metrics_lambda2_critic)
 
@@ -2019,9 +2107,18 @@ def create_iqlearn(
             key, key_act, key_step = jax.random.split(key, 3)
             obs = env.get_obs(env_state, env_params)
             if is_discrete:
-                action_idx = jax.random.randint(key_act, (), 0, action_dim)
+                if mask_fn is not None:
+                    # Uniform over *legal* actions only, so the behaviour policy
+                    # (and its stored probability) is consistent with the masked
+                    # target policy used in the V-trace importance ratios.
+                    mask = mask_fn(obs).astype(bool)
+                    legal_logits = jnp.where(mask, 0.0, -jnp.inf)
+                    action_idx = jax.random.categorical(key_act, legal_logits)
+                    prob = 1.0 / jnp.maximum(jnp.sum(mask), 1).astype(jnp.float32)
+                else:
+                    action_idx = jax.random.randint(key_act, (), 0, action_dim)
+                    prob = jnp.float32(1.0 / action_dim)
                 action = action_idx.astype(jnp.float32)
-                prob = jnp.float32(1.0 / action_dim)
                 env_action = action_idx
             else:
                 u = jax.random.normal(key_act, (action_dim,))

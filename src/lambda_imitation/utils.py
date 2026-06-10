@@ -38,7 +38,7 @@ Typical usage (gymnax, GRU memory)::
 """
 
 import math
-from typing import Literal, NamedTuple, Tuple
+from typing import Callable, Literal, NamedTuple, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -477,6 +477,8 @@ def create_iqlearn_from_env(
     obs_key: str = "observations",
     action_key: str = "actions",
     approximate_lambda: bool = False,
+    obs_fn: Callable[[jax.Array], jax.Array] = lambda obs: obs,
+    mask_fn: Callable[[jax.Array], jax.Array] | None = None,
     debug: bool = False,
     seed: int = 0,
 ) -> (
@@ -533,6 +535,16 @@ def create_iqlearn_from_env(
             and in the buffer.
         action_key: Key under which actions are stored.
         approximate_lambda: If True, enable the λ-discrepancy critic branches.
+        obs_fn: Pure function mapping the raw observation to the part fed to
+            the feature extractor (defaults to the identity).  The FE is sized
+            from ``obs_fn``'s output; the full raw observation is still stored
+            in the buffer.  Use together with ``mask_fn`` to keep an
+            action-mask channel out of the network's observation.
+        mask_fn: Optional pure function mapping the raw observation to a boolean
+            action mask (discrete only).  When given, illegal actions are
+            removed from the policy everywhere (action selection, soft value,
+            entropy, importance ratios, random pre-fill).  ``None`` disables
+            masking.  Forwarded verbatim to :func:`create_iqlearn`.
         debug: If True, return a 3-tuple whose last element is a
             :class:`DebugFunctions` named tuple.
         seed: Integer seed for the ``nnx.Rngs`` used to initialise the
@@ -590,7 +602,13 @@ def create_iqlearn_from_env(
         terminated = bool(i == n_transitions - 1)
         buffer = buf_fns.add(buffer, step, terminated)
 
-    input_dim = math.prod(env_spec.obs_shape)
+    # Size the FE from the (possibly reduced) observation ``obs_fn`` produces,
+    # not the raw obs — when ``obs_fn`` strips an action-mask channel the FE
+    # must only see the remaining features.
+    fe_obs_shape = jax.eval_shape(
+        obs_fn, jax.ShapeDtypeStruct(env_spec.obs_shape, jnp.float32)
+    ).shape
+    input_dim = math.prod(fe_obs_shape)
     key = jax.random.key(seed)
     key_fe, key_heads = jax.random.split(key)
     feature_extractor = RecurrentFeatureExtractor(
@@ -618,5 +636,7 @@ def create_iqlearn_from_env(
         lambda2_critic_dims=lambda2_critic_dims,
         is_discrete=env_spec.is_discrete,
         approximate_lambda=approximate_lambda,
+        obs_fn=obs_fn,
+        mask_fn=mask_fn,
         debug=debug,
     )
