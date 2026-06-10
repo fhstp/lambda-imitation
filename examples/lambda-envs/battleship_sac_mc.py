@@ -24,7 +24,10 @@ split it at the agent boundary:
 
 The feature extractor is configurable via ``--memory-type`` (identity, rnn,
 gru, lstm), ``--memory-hidden-dim`` and ``--projection-dim``; layout is
-``obs_fn(obs) -> Linear(projection_dim) -> memory cell``.
+``[obs_fn(obs) | prev-action one-hot] -> Linear(projection_dim) -> memory
+cell``.  The prev-action input is ON by default (mirroring
+``action_concat=True`` in the original lambda-discrepancy battleship
+experiments); disable with ``--no-use-prev-action``.
 
 Requirements
 ------------
@@ -159,6 +162,23 @@ parser.add_argument(
         "(default: 128; pass 0 to disable the projection and feed raw obs)"
     ),
 )
+parser.add_argument(
+    "--use-prev-action",
+    dest="use_prev_action",
+    action="store_true",
+    help=(
+        "feed the previous action (one-hot) into the feature extractor "
+        "alongside the observation, mirroring action_concat=True in the "
+        "original lambda-discrepancy battleship experiments (default)"
+    ),
+)
+parser.add_argument(
+    "--no-use-prev-action",
+    dest="use_prev_action",
+    action="store_false",
+    help="disable the prev-action input to the feature extractor",
+)
+parser.set_defaults(use_prev_action=True)
 parser.add_argument(
     "--approximate-lambda",
     dest="approximate_lambda",
@@ -411,6 +431,10 @@ elif args.memory_type == "lstm":
     CARRY_DIM = 2 * args.memory_hidden_dim
 else:
     CARRY_DIM = args.memory_hidden_dim
+if args.use_prev_action:
+    # The carry tail holds the prev-action one-hot (see
+    # RecurrentFeatureExtractor.prev_action_dim).
+    CARRY_DIM += spec.action_dim
 
 projection_dim = args.projection_dim if args.projection_dim > 0 else None
 
@@ -471,6 +495,7 @@ _AGENT_KWARGS = dict(
     projection_dim=projection_dim,
     memory_type=args.memory_type,
     memory_hidden_dim=args.memory_hidden_dim,
+    use_prev_action=args.use_prev_action,
     critic_dims=(128,),
     lambda1_critic_dims=(128,),
     lambda2_critic_dims=(128,),
@@ -526,6 +551,7 @@ _WANDB_BASE_CFG = {
     "memory_type": args.memory_type,
     "memory_hidden_dim": args.memory_hidden_dim,
     "projection_dim": projection_dim,
+    "use_prev_action": args.use_prev_action,
     "rounds": args.rounds,
     "train_steps": args.train_steps,
     "num_seeds": args.num_seeds,

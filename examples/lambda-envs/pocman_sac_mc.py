@@ -129,6 +129,15 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--use-prev-action",
+    action="store_true",
+    help=(
+        "feed the previous action (one-hot) into the feature extractor "
+        "alongside the observation, mirroring action_concat=True in the "
+        "original lambda-discrepancy pocman experiments"
+    ),
+)
+parser.add_argument(
     "--approximate-lambda",
     dest="approximate_lambda",
     action="store_true",
@@ -428,6 +437,10 @@ elif args.memory_type == "lstm":
     CARRY_DIM = 2 * args.memory_hidden_dim
 else:
     CARRY_DIM = args.memory_hidden_dim
+if args.use_prev_action:
+    # The carry tail holds the prev-action one-hot (see
+    # RecurrentFeatureExtractor.prev_action_dim).
+    CARRY_DIM += spec.action_dim
 
 projection_dim = args.projection_dim if args.projection_dim > 0 else None
 
@@ -487,6 +500,7 @@ _AGENT_KWARGS = dict(
     projection_dim=projection_dim,
     memory_type=args.memory_type,
     memory_hidden_dim=args.memory_hidden_dim,
+    use_prev_action=args.use_prev_action,
     critic_dims=(128,),
     lambda1_critic_dims=(128,),
     lambda2_critic_dims=(128,),
@@ -542,6 +556,7 @@ if _wandb is not None and not args.wandb_sweep:
             "memory_type": args.memory_type,
             "memory_hidden_dim": args.memory_hidden_dim,
             "projection_dim": projection_dim,
+            "use_prev_action": args.use_prev_action,
             "rounds": args.rounds,
             "train_steps": args.train_steps,
             "num_seeds": args.num_seeds,

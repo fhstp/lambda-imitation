@@ -2,10 +2,11 @@
 
 Battleship analogue of ``pocman_pellet_probe.py``.  The agent only ever observes
 a single bit per step — did the last shot hit — so to localise ships at all its
-recurrent memory must integrate the *action–observation history*.  We therefore
-feed ``[last_hit_miss, previous-action one-hot]`` to the feature extractor (the
-legal-action mask stays out of the network, used only to mask the policy).  A
-probe then tests whether the memory has reconstructed the hidden board.
+recurrent memory must integrate the *action–observation history*.  The previous
+action therefore reaches the feature extractor via ``use_prev_action=True``
+(packed-carry prev-action input; the legal-action mask stays out of the
+network, used only to mask the policy).  A probe then tests whether the memory
+has reconstructed the hidden board.
 
 Pipeline:
   1. Train a Battleship SAC(+LD) agent (action-masked)
@@ -130,8 +131,6 @@ probe_path = os.path.join(args.output_dir, "probe.pkl")
 
 if not args.vis_only:
     import optax
-    from flax import struct
-    from gymnax.environments import spaces
     from tqdm.rich import tqdm
 
     try:
@@ -142,60 +141,20 @@ if not args.vis_only:
     from lambda_imitation.iqlearn import Hyperparameters
     from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
-    # ── action-history wrapper ────────────────────────────────────────────────
-    #
-    # The training loop reads observations via ``env.get_obs(state)`` (not the
-    # obs returned by ``step``), so the previous action must be recoverable from
-    # the state.  We store it and append its one-hot inside ``get_obs``:
-    #     obs = [ last_hit_miss(1) | valid_mask(N) | prev_action_onehot(N) ]
-    # The memory then sees *which* cell was fired and *whether* it hit, which is
-    # exactly what it needs to reconstruct the hidden board.
-
-    @struct.dataclass
-    class ActionHistState:
-        env_state: object
-        last_action: jnp.ndarray  # (N,) one-hot; zeros at episode start
-
-    class ActionHistoryWrapper:
-        def __init__(self, env):
-            self._env = env
-            self.n = env.num_actions
-
-        def __getattr__(self, name):
-            return getattr(self._env, name)
-
-        def observation_space(self, params):
-            base = self._env.observation_space(params)
-            return spaces.Box(0.0, 1.0, (base.shape[0] + self.n,), base.dtype)
-
-        def reset(self, key, params):
-            _obs, st = self._env.reset(key, params)
-            wst = ActionHistState(env_state=st, last_action=jnp.zeros(self.n))
-            return self.get_obs(wst, params), wst
-
-        def step(self, key, state, action, params):
-            _obs, nst, r, d, info = self._env.step(
-                key, state.env_state, action, params
-            )
-            onehot = jax.nn.one_hot(jnp.asarray(action).reshape(()), self.n)
-            # Reset the action memory across the auto-reset episode boundary.
-            onehot = jnp.where(d, jnp.zeros_like(onehot), onehot)
-            wst = ActionHistState(env_state=nst, last_action=onehot)
-            return self.get_obs(wst, params), wst, r, d, info
-
-        def get_obs(self, state, params=None):
-            raw = self._env.get_obs(state.env_state, params)
-            return jnp.concatenate([raw, state.last_action], axis=-1)
-
     # ── env setup ──────────────────────────────────────────────────────────────
+    #
+    # The previous action reaches the feature extractor via
+    # ``use_prev_action=True`` (its one-hot lives in the carry tail; see
+    # RecurrentFeatureExtractor), so the env is used unwrapped.  The memory
+    # then sees *which* cell was fired and *whether* it hit, which is exactly
+    # what it needs to reconstruct the hidden board.
 
-    base_env = Battleship(rows=args.rows, cols=args.cols, dense_reward=args.dense_reward)
-    env = ActionHistoryWrapper(base_env)
+    env = Battleship(rows=args.rows, cols=args.cols, dense_reward=args.dense_reward)
     env_params = env.default_params
     spec = env_spec_from_gymnax(env, env_params)
     N = args.rows * args.cols  # number of actions / board cells
-    # obs layout: [last_hit_miss(1) | mask(N) | prev_action(N)]
-    obs_fn = lambda o: jnp.concatenate([o[..., 0:1], o[..., 1 + N:1 + 2 * N]], axis=-1)
+    # obs layout: [last_hit_miss(1) | mask(N)]
+    obs_fn = lambda o: o[..., 0:1]
     mask_fn = lambda o: o[..., 1:1 + N]
 
     expert_data = {
@@ -204,6 +163,10 @@ if not args.vis_only:
     }
 
     # ── carry helper ─────────────────────────────────────────────────────────
+    #
+    # CARRY_DIM is the *memory* part (the probe input, as before).  The agent
+    # carry additionally holds the prev-action one-hot in its tail
+    # (use_prev_action=True), so the full carry is CARRY_DIM + N wide.
 
     if args.memory_type == "identity":
         CARRY_DIM = 0
@@ -215,10 +178,12 @@ if not args.vis_only:
     if CARRY_DIM == 0:
         sys.exit("Probe needs recurrent memory (--memory-type rnn/gru/lstm), not identity.")
 
+    AGENT_CARRY_DIM = CARRY_DIM + N  # memory + prev-action tail
+
     projection_dim = args.projection_dim if args.projection_dim > 0 else None
 
     def zero_carry():
-        return jnp.zeros((CARRY_DIM,), dtype=jnp.float32)
+        return jnp.zeros((AGENT_CARRY_DIM,), dtype=jnp.float32)
 
     # ── hyperparameters ──────────────────────────────────────────────────────
 
@@ -250,6 +215,7 @@ if not args.vis_only:
             lambda2_critic_dims=(128,),
             train_steps=args.train_steps,
             approximate_lambda=args.approximate_lambda,
+            use_prev_action=True,
             obs_fn=obs_fn, mask_fn=mask_fn,
             debug=True, seed=seed_val,
         )
@@ -333,8 +299,8 @@ if not args.vis_only:
 
             def step_fn(scan_carry, _):
                 obs, env_st, carry, key = scan_carry
-                board = env_st.env_state.board.reshape(-1)        # true ships
-                hits_misses = env_st.env_state.hits_misses.reshape(-1)  # shots so far
+                board = env_st.board.reshape(-1)        # true ships
+                hits_misses = env_st.hits_misses.reshape(-1)  # shots so far
 
                 key, sk, ek, eps_key = jax.random.split(key, 4)
                 raw, new_carry = fns.predict(
@@ -348,13 +314,19 @@ if not args.vis_only:
                 ).astype(jnp.int32)
                 use_random = jax.random.uniform(eps_key) < args.collect_epsilon
                 action = jnp.where(use_random, random_action, policy_action)
+                # predict wrote *its* action into the carry tail; on an
+                # epsilon override the executed action differs, so rewrite the
+                # tail (cf. RecurrentFeatureExtractor.write_prev_action).
+                new_carry = new_carry.at[-N:].set(jax.nn.one_hot(action, N))
 
                 next_obs, next_st, _, done, _ = env.step(
                     ek, env_st, action, env_params
                 )
                 carry_out = jnp.where(done, zero_carry(), new_carry)
                 return (next_obs, next_st, carry_out, key), {
-                    "carries": new_carry,
+                    # Probe the *memory* part only — the prev-action tail is
+                    # an input encoding, not learned state.
+                    "carries": new_carry[:CARRY_DIM],
                     "board_masks": board.astype(jnp.float32),
                     "hits_misses": hits_misses.astype(jnp.float32),
                     "dones": done.astype(jnp.float32),
@@ -880,9 +852,11 @@ if args.mp4:
                 valid = alive  # 1 up to and including the terminal step, 0 after
                 new_alive = alive * (1.0 - d.astype(jnp.float32))
                 frame = {
-                    "carries": nc,  # post-step carry, aligned with post-step board state
-                    "board": nst.env_state.board.reshape(-1).astype(jnp.float32),
-                    "hits": nst.env_state.hits_misses.reshape(-1).astype(jnp.float32),
+                    # post-step carry (memory part only — the probe's input),
+                    # aligned with the post-step board state
+                    "carries": nc[:CARRY_DIM],
+                    "board": nst.board.reshape(-1).astype(jnp.float32),
+                    "hits": nst.hits_misses.reshape(-1).astype(jnp.float32),
                     "valid": valid,
                 }
                 return (_nobs, nst, nc, key, new_alive), frame
