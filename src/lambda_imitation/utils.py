@@ -549,6 +549,7 @@ def create_iqlearn_from_env(
     obs_key: str = "observations",
     action_key: str = "actions",
     approximate_lambda: bool = False,
+    critic_layer_norm: bool = False,
     obs_fn: Callable[[jax.Array], jax.Array] = lambda obs: obs,
     mask_fn: Callable[[jax.Array], jax.Array] | None = None,
     debug: bool = False,
@@ -613,6 +614,11 @@ def create_iqlearn_from_env(
             and in the buffer.
         action_key: Key under which actions are stored.
         approximate_lambda: If True, enable the λ-discrepancy critic branches.
+        critic_layer_norm: If True, apply LayerNorm in the hidden layers of
+            all critic heads (SAC twin + λ-critics).  Recommended whenever
+            ``approximate_lambda=True``: the λ-discrepancy regulariser trains
+            the shared FE only, and the resulting representation drift can
+            otherwise blow up the one-step-bootstrap SAC critic.
         obs_fn: Pure function mapping the raw observation to the part fed to
             the feature extractor (defaults to the identity).  The FE is sized
             from ``obs_fn``'s output; the full raw observation is still stored
@@ -716,6 +722,7 @@ def create_iqlearn_from_env(
         is_discrete=env_spec.is_discrete,
         approximate_lambda=approximate_lambda,
         use_prev_action=use_prev_action,
+        critic_layer_norm=critic_layer_norm,
         obs_fn=obs_fn,
         mask_fn=mask_fn,
         debug=debug,

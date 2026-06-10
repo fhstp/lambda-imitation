@@ -84,6 +84,8 @@ class Head(nnx.Module):
         hidden_dims: Widths of optional hidden layers.  Use ``()`` for a
             direct linear projection from features to output.
         output_dim: Dimensionality of the output.
+        layer_norm: If True, apply LayerNorm between each hidden Linear and
+            its ReLU (RLPD-style).  No effect with ``hidden_dims=()``.
         rngs: Flax NNX RNG container used to initialise parameters.
     """
 
@@ -93,11 +95,15 @@ class Head(nnx.Module):
         hidden_dims: tuple[int, ...],
         output_dim: int,
         *,
+        layer_norm: bool = False,
         rngs: nnx.Rngs,
     ):
         dims = [feature_dim] + list(hidden_dims) + [output_dim]
         self.layers = nnx.data(
             [nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)]
+        )
+        self.norms = nnx.data(
+            [nnx.LayerNorm(d, rngs=rngs) for d in hidden_dims] if layer_norm else []
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -109,8 +115,11 @@ class Head(nnx.Module):
         Returns:
             Output array of shape ``(batch, output_dim)``.
         """
-        for layer in self.layers[:-1]:
-            x = nnx.relu(layer(x))
+        for i, layer in enumerate(self.layers[:-1]):
+            x = layer(x)
+            if self.norms:
+                x = self.norms[i](x)
+            x = nnx.relu(x)
         return self.layers[-1](x)
 
 
@@ -445,6 +454,7 @@ def create_iqlearn(
     is_discrete: bool = False,
     approximate_lambda: bool = False,
     use_prev_action: bool = False,
+    critic_layer_norm: bool = False,
     obs_fn: Callable[[jax.Array], jax.Array] = lambda obs: obs,
     mask_fn: Callable[[jax.Array], jax.Array] | None = None,
     debug: bool = False,
@@ -514,6 +524,12 @@ def create_iqlearn(
             carry reset also resets the action input.  Callers that execute
             a different action than ``predict`` returned must rewrite the
             tail via ``RecurrentFeatureExtractor.write_prev_action``.
+        critic_layer_norm: If True, apply LayerNorm before the ReLU in every
+            hidden layer of all critic heads (SAC twin + λ-critics; the actor
+            is untouched).  Stabilises the one-step bootstrap against
+            representation drift in the shared FE — without it, the
+            λ-discrepancy term (which trains the FE only, since the λ-heads
+            are frozen in ``loss_ld``) can drive unbounded Q growth.
         obs_fn: Pure function mapping the raw stored observation to the
             observation actually fed to the feature extractor.  Defaults to
             the identity.  Use it to hide part of the observation from the
@@ -642,12 +658,14 @@ def create_iqlearn(
             feature_dim,
             critic_dims,
             action_dim,
+            layer_norm=critic_layer_norm,
             rngs=nnx.Rngs(k_cq1),
         )
         critic_q2_model = Head(
             feature_dim,
             critic_dims,
             action_dim,
+            layer_norm=critic_layer_norm,
             rngs=nnx.Rngs(k_cq2),
         )
         if approximate_lambda:
@@ -655,24 +673,28 @@ def create_iqlearn(
                 feature_dim,
                 lambda1_critic_dims,
                 action_dim,
+                layer_norm=critic_layer_norm,
                 rngs=nnx.Rngs(k_l1q1),
             )
             lambda1_q2_critic_model = Head(
                 feature_dim,
                 lambda1_critic_dims,
                 action_dim,
+                layer_norm=critic_layer_norm,
                 rngs=nnx.Rngs(k_l1q2),
             )
             lambda2_q1_critic_model = Head(
                 feature_dim,
                 lambda2_critic_dims,
                 action_dim,
+                layer_norm=critic_layer_norm,
                 rngs=nnx.Rngs(k_l2q1),
             )
             lambda2_q2_critic_model = Head(
                 feature_dim,
                 lambda2_critic_dims,
                 action_dim,
+                layer_norm=critic_layer_norm,
                 rngs=nnx.Rngs(k_l2q2),
             )
     else:
@@ -688,12 +710,14 @@ def create_iqlearn(
             feature_dim + action_dim,
             critic_dims,
             1,
+            layer_norm=critic_layer_norm,
             rngs=nnx.Rngs(k_cq1),
         )
         critic_q2_model = Head(
             feature_dim + action_dim,
             critic_dims,
             1,
+            layer_norm=critic_layer_norm,
             rngs=nnx.Rngs(k_cq2),
         )
         if approximate_lambda:
@@ -701,24 +725,28 @@ def create_iqlearn(
                 feature_dim + action_dim,
                 lambda1_critic_dims,
                 1,
+                layer_norm=critic_layer_norm,
                 rngs=nnx.Rngs(k_l1q1),
             )
             lambda1_q2_critic_model = Head(
                 feature_dim + action_dim,
                 lambda1_critic_dims,
                 1,
+                layer_norm=critic_layer_norm,
                 rngs=nnx.Rngs(k_l1q2),
             )
             lambda2_q1_critic_model = Head(
                 feature_dim + action_dim,
                 lambda2_critic_dims,
                 1,
+                layer_norm=critic_layer_norm,
                 rngs=nnx.Rngs(k_l2q1),
             )
             lambda2_q2_critic_model = Head(
                 feature_dim + action_dim,
                 lambda2_critic_dims,
                 1,
+                layer_norm=critic_layer_norm,
                 rngs=nnx.Rngs(k_l2q2),
             )
 

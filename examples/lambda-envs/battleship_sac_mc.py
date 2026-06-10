@@ -51,7 +51,7 @@ import argparse
 import sys
 from functools import partial
 
-from tqdm.rich import tqdm
+from tqdm import tqdm
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -501,6 +501,7 @@ _AGENT_KWARGS = dict(
     lambda2_critic_dims=(128,),
     train_steps=args.train_steps,
     approximate_lambda=args.approximate_lambda,
+    critic_layer_norm=True,
     obs_fn=obs_fn,
     mask_fn=mask_fn,
     debug=True,

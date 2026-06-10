@@ -216,6 +216,7 @@ if not args.vis_only:
             train_steps=args.train_steps,
             approximate_lambda=args.approximate_lambda,
             use_prev_action=True,
+            critic_layer_norm=True,
             obs_fn=obs_fn, mask_fn=mask_fn,
             debug=True, seed=seed_val,
         )
@@ -497,7 +498,8 @@ WATER_COLOR = np.array([0.06, 0.12, 0.28])
 SHIP_COLOR = np.array([0.15, 0.85, 0.35])
 MISS_COLOR = np.array([0.55, 0.60, 0.70])
 HIT_COLOR = np.array([0.95, 0.20, 0.20])
-FIRE_PRED_COLOR = np.array([1.0, 0.82, 0.10])  # amber: probe's predicted-fired cells
+PRED_HIT_COLOR = np.array([1.0, 0.45, 0.10])   # orange: predicted fired + hit
+PRED_MISS_COLOR = np.array([0.35, 0.65, 0.95])  # light blue: predicted fired + miss
 
 # Colormaps for the colorbars: water→ship for P(ship), red→green for accuracy.
 SHIP_CMAP = LinearSegmentedColormap.from_list("ship", [WATER_COLOR, SHIP_COLOR])
@@ -516,10 +518,12 @@ def _board_legend(fig):
         mpatches.Patch(color=SHIP_COLOR, label="fill: ship (P≈1)"),
         mpatches.Patch(facecolor="none", edgecolor=MISS_COLOR, lw=1.6, label="truth outline: miss"),
         mpatches.Patch(facecolor="none", edgecolor=HIT_COLOR, lw=1.6, label="truth outline: hit"),
-        mpatches.Patch(facecolor="none", edgecolor=FIRE_PRED_COLOR, lw=1.6,
-                       label="probe outline: predicted fired"),
+        mpatches.Patch(facecolor="none", edgecolor=PRED_HIT_COLOR, lw=1.6, ls="--",
+                       label="probe outline (dashed): pred. fired, hit"),
+        mpatches.Patch(facecolor="none", edgecolor=PRED_MISS_COLOR, lw=1.6, ls="--",
+                       label="probe outline (dashed): pred. fired, miss"),
     ]
-    fig.legend(handles=handles, loc="lower center", ncol=5, fontsize=8,
+    fig.legend(handles=handles, loc="lower center", ncol=3, fontsize=8,
                frameon=False, bbox_to_anchor=(0.5, -0.01))
 
 
@@ -536,10 +540,13 @@ def render(ax, ship_grid, fired_grid, title="", pred_fired=False):
     (e.g. green fill under a 'fired' outline = correctly recalled hit).
 
     ``pred_fired=False`` (truth panel): ``fired_grid`` holds the true hit/miss
-    code (1=miss, 2=hit) and outlines are coloured grey/red accordingly.
-    ``pred_fired=True`` (probe panel): ``fired_grid`` holds P(fired) and any cell
-    with P>0.5 gets an amber outline — the probe's reconstruction of *which*
-    cells were fired at.
+    code (1=miss, 2=hit) and outlines are coloured grey/red accordingly (solid).
+    ``pred_fired=True`` (probe panel): ``fired_grid`` holds P(fired); any cell
+    with P>0.5 gets a DASHED outline — the probe's reconstruction of *which*
+    cells were fired at — coloured by the predicted shot result.  A fired cell
+    is a hit iff a ship occupies it, so the probe's own P(ship) at that cell IS
+    its hit/miss prediction: orange = predicted hit (P(ship)>0.5), light blue =
+    predicted miss.
     """
     img = np.empty((ROWS, COLS, 3))
     for r in range(ROWS):
@@ -550,9 +557,12 @@ def render(ax, ship_grid, fired_grid, title="", pred_fired=False):
     for r in range(ROWS):
         for c in range(COLS):
             fv = fired_grid[r, c]
+            ls = "solid"
             if pred_fired:
                 if fv > 0.5:
-                    edge = FIRE_PRED_COLOR
+                    hit_pred = float(np.nan_to_num(ship_grid[r, c])) > 0.5
+                    edge = PRED_HIT_COLOR if hit_pred else PRED_MISS_COLOR
+                    ls = (0, (3, 1.5))  # dashed: prediction, not ground truth
                 else:
                     continue
             else:
@@ -562,7 +572,8 @@ def render(ax, ship_grid, fired_grid, title="", pred_fired=False):
                     continue
             # inset slightly so adjacent fired cells don't double their borders
             ax.add_patch(mpatches.Rectangle(
-                (c - 0.38, r - 0.38), 0.76, 0.76, fill=False, edgecolor=edge, lw=1.3
+                (c - 0.38, r - 0.38), 0.76, 0.76, fill=False, edgecolor=edge,
+                lw=1.3, linestyle=ls,
             ))
     ax.set_title(title, fontsize=7)
     ax.set_xticks([])
