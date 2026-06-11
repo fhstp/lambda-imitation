@@ -55,6 +55,19 @@ g.add_argument("--projection-dim", type=int, default=128)
 g.add_argument("--approximate-lambda", dest="approximate_lambda", action="store_true")
 g.add_argument("--no-approximate-lambda", dest="approximate_lambda", action="store_false")
 parser.set_defaults(approximate_lambda=True)
+g.add_argument("--gvd", dest="gvd", action="store_true",
+               help="enable the GVD successor-feature branches (reward-free "
+                    "memory pressure; an agent trained with --gvd must be "
+                    "reloaded with --gvd)")
+g.add_argument("--no-gvd", dest="gvd", action="store_false")
+parser.set_defaults(gvd=False)
+g.add_argument("--gvd-coef", type=float, default=1.0, help="GVD discrepancy coefficient (default 1.0)")
+g.add_argument("--gvd-features", type=int, default=16,
+               help="random-projection width of the GVD feature map; total dim "
+                    "is 1 (hit bit) + N (default 16)")
+g.add_argument("--gvd-lambda1", type=float, default=0.0)
+g.add_argument("--gvd-lambda2", type=float, default=1.0)
+g.add_argument("--gvd-sf-lr", type=float, default=1.8e-4)
 g.add_argument("--batch-size", type=int, default=512)
 g.add_argument("--sequence-length", type=int, default=20)
 g.add_argument("--burn-in-length", type=int, default=32)
@@ -162,6 +175,20 @@ if not args.vis_only:
         "actions": jnp.zeros((1, 1), dtype=jnp.float32),
     }
 
+    # GVD feature map φ = [hit bit | P·obs] over the FULL raw observation —
+    # identical construction to battleship_sac_mc.py (fixed jax.random.key(0)
+    # projection, independent of --seed) so agents trained there probe the
+    # same way here.
+    if args.gvd:
+        _GVD_P = jax.random.normal(
+            jax.random.key(0), (1 + N, args.gvd_features)
+        ) / jnp.sqrt(1 + N)
+
+        def gvd_feature_fn(o):
+            return jnp.concatenate([o[..., :1], o @ _GVD_P], axis=-1)
+    else:
+        gvd_feature_fn = None
+
     # ── carry helper ─────────────────────────────────────────────────────────
     #
     # CARRY_DIM is the *memory* part (the probe input, as before).  The agent
@@ -200,6 +227,10 @@ if not args.vis_only:
         sequence_length=args.sequence_length,
         burn_in_length=args.burn_in_length,
         lambda_coef=1.0, fake_onpolicy_loss=False,
+        gvd_coef=args.gvd_coef,
+        gvd_lambda1=args.gvd_lambda1,
+        gvd_lambda2=args.gvd_lambda2,
+        gvd_sf_lr=args.gvd_sf_lr,
     )
 
     _MAX_STEPS = int(env_params.max_steps_in_episode)
@@ -218,6 +249,8 @@ if not args.vis_only:
             use_prev_action=True,
             critic_layer_norm=True,
             obs_fn=obs_fn, mask_fn=mask_fn,
+            use_gvd=args.gvd, gvd_feature_fn=gvd_feature_fn,
+            gvd_sf_dims=(128,),
             debug=True, seed=seed_val,
         )
 
@@ -248,7 +281,9 @@ if not args.vis_only:
 
     # ── Phase 1 — Train / load agent ─────────────────────────────────────────
 
-    tag = "SAC+LD" if args.approximate_lambda else "SAC"
+    tag = ("SAC+LD" if args.approximate_lambda else "SAC") + (
+        "+GVD" if args.gvd else ""
+    )
     print(f"Building {tag} agent for Battleship {args.rows}x{args.cols} "
           f"(memory={args.memory_type}, hidden={args.memory_hidden_dim})…")
     state, fns, debug_fns = _build_agent(args.seed)

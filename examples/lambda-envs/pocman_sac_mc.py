@@ -138,6 +138,56 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--gvd",
+    dest="gvd",
+    action="store_true",
+    help="enable the General Value Discrepancy branches (two successor-"
+    "feature V-heads on observable-feature cumulants + squared discrepancy "
+    "regulariser on the FE; reward-free memory pressure)",
+)
+parser.add_argument(
+    "--no-gvd",
+    dest="gvd",
+    action="store_false",
+    help="disable GVD (default)",
+)
+parser.set_defaults(gvd=False)
+parser.add_argument(
+    "--gvd-coef",
+    type=float,
+    default=1.0,
+    metavar="GC",
+    help="GVD discrepancy coefficient (default: 1.0)",
+)
+parser.add_argument(
+    "--gvd-features",
+    type=int,
+    default=0,
+    metavar="N",
+    help="width of the random obs projection in the GVD feature map; 0 "
+    "(default) uses the identity over the 11 binary obs features",
+)
+parser.add_argument(
+    "--gvd-lambda1",
+    type=float,
+    default=0.0,
+    metavar="L",
+    help="λ of the first GVD successor-feature head (default: 0.0)",
+)
+parser.add_argument(
+    "--gvd-lambda2",
+    type=float,
+    default=1.0,
+    metavar="L",
+    help="λ of the second GVD successor-feature head (default: 1.0)",
+)
+parser.add_argument(
+    "--gvd-sf-lr",
+    type=float,
+    default=1.8e-4,
+    help="GVD successor-feature head learning rate (default: 1.8e-4)",
+)
+parser.add_argument(
     "--approximate-lambda",
     dest="approximate_lambda",
     action="store_true",
@@ -376,6 +426,8 @@ if args.wandb_sweep:
     args.lambda_coef = sc.get("lambda_coef", args.lambda_coef)
     args.num_seeds = sc.get("num_seeds", 10)
     args.concurrent_seeds = sc.get("concurrent_seeds", args.concurrent_seeds)
+    args.gvd = _sweep_bool(sc.get("gvd", args.gvd))
+    args.gvd_coef = sc.get("gvd_coef", args.gvd_coef)
 
     hp = Hyperparameters(
         online_batch_size=128,
@@ -402,6 +454,10 @@ if args.wandb_sweep:
         fake_onpolicy_loss=_sweep_bool(
             sc.get("fake_onpolicy_loss", args.fake_onpolicy_loss)
         ),
+        gvd_coef=args.gvd_coef,
+        gvd_lambda1=sc.get("gvd_lambda1", args.gvd_lambda1),
+        gvd_lambda2=sc.get("gvd_lambda2", args.gvd_lambda2),
+        gvd_sf_lr=sc.get("gvd_sf_lr", args.gvd_sf_lr),
     )
 else:
     hp = Hyperparameters(
@@ -427,7 +483,30 @@ else:
         burn_in_length=args.burn_in_length,
         lambda_coef=args.lambda_coef,
         fake_onpolicy_loss=args.fake_onpolicy_loss,
+        gvd_coef=args.gvd_coef,
+        gvd_lambda1=args.gvd_lambda1,
+        gvd_lambda2=args.gvd_lambda2,
+        gvd_sf_lr=args.gvd_sf_lr,
     )
+
+# GVD feature map φ over the raw 11-binary-feature observation.  Identity by
+# default (the obs is already a compact feature vector; its differences are
+# an informative cumulant); ``--gvd-features N>0`` swaps in a fixed random
+# projection (seed independent of --seed so it is one constant shared across
+# all vmapped seeds).  Built after the sweep branch so a sweep-set ``gvd``
+# flag is honoured.
+if args.gvd:
+    if args.gvd_features > 0:
+        _GVD_P = jax.random.normal(
+            jax.random.key(0), (spec.obs_shape[0], args.gvd_features)
+        ) / jnp.sqrt(spec.obs_shape[0])
+
+        def gvd_feature_fn(o):
+            return o @ _GVD_P
+    else:
+        gvd_feature_fn = lambda o: o
+else:
+    gvd_feature_fn = None
 
 # ── carry helper ──────────────────────────────────────────────────────────────
 
@@ -506,6 +585,9 @@ _AGENT_KWARGS = dict(
     lambda2_critic_dims=(128,),
     train_steps=args.train_steps,
     approximate_lambda=args.approximate_lambda,
+    use_gvd=args.gvd,
+    gvd_feature_fn=gvd_feature_fn,
+    gvd_sf_dims=(128,),
     debug=True,
 )
 
@@ -550,9 +632,13 @@ if _wandb is not None and not args.wandb_sweep:
         name=args.wandb_run_name,
         config={
             "env": "PocMan",
-            "algo": "SAC+lambda" if args.approximate_lambda else "SAC",
+            "algo": "SAC"
+            + ("+lambda" if args.approximate_lambda else "")
+            + ("+gvd" if args.gvd else ""),
             "action_space": "discrete",
             "approximate_lambda": args.approximate_lambda,
+            "use_gvd": args.gvd,
+            "gvd_features": args.gvd_features,
             "memory_type": args.memory_type,
             "memory_hidden_dim": args.memory_hidden_dim,
             "projection_dim": projection_dim,

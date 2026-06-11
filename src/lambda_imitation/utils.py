@@ -552,6 +552,9 @@ def create_iqlearn_from_env(
     critic_layer_norm: bool = False,
     obs_fn: Callable[[jax.Array], jax.Array] = lambda obs: obs,
     mask_fn: Callable[[jax.Array], jax.Array] | None = None,
+    use_gvd: bool = False,
+    gvd_feature_fn: Callable[[jax.Array], jax.Array] | None = None,
+    gvd_sf_dims: tuple[int, ...] = (128,),
     debug: bool = False,
     seed: int = 0,
 ) -> (
@@ -629,6 +632,15 @@ def create_iqlearn_from_env(
             removed from the policy everywhere (action selection, soft value,
             entropy, importance ratios, random pre-fill).  ``None`` disables
             masking.  Forwarded verbatim to :func:`create_iqlearn`.
+        use_gvd: If True, enable the General Value Discrepancy branches: two
+            successor-feature V-heads trained on ``gvd_feature_fn``-difference
+            cumulants whose squared discrepancy regularises the shared FE
+            (reward-free).  Discrete-only.  Forwarded verbatim to
+            :func:`create_iqlearn`.
+        gvd_feature_fn: Pure function mapping the **raw** observation (before
+            ``obs_fn`` — same convention as ``mask_fn``) to a feature vector
+            ``(*batch, n_features)``.  Required when ``use_gvd=True``.
+        gvd_sf_dims: Hidden widths of each SF head.
         debug: If True, return a 3-tuple whose last element is a
             :class:`DebugFunctions` named tuple.
         seed: Integer seed for the ``nnx.Rngs`` used to initialise the
@@ -725,5 +737,8 @@ def create_iqlearn_from_env(
         critic_layer_norm=critic_layer_norm,
         obs_fn=obs_fn,
         mask_fn=mask_fn,
+        use_gvd=use_gvd,
+        gvd_feature_fn=gvd_feature_fn,
+        gvd_sf_dims=gvd_sf_dims,
         debug=debug,
     )
