@@ -340,6 +340,40 @@ class TestCreateSequenceSample:
         diffs = jnp.diff(seq_indices, axis=1)
         assert jnp.all(diffs == 1)
 
+    def test_sequence_sample_wraps_around_ring(self, shapes):
+        # a window starting near the end of the ring must wrap to slot 0,
+        # not clamp out-of-bounds gathers to the last slot.
+        buffer, fns = create_buffer(
+            shapes=shapes,
+            size=8,
+            sampling_size=16,
+            this_step_infos=["obs"],
+            next_step_infos=["obs"],
+        )
+        for i in range(8):
+            buffer = fns.add(buffer, _step(i, shapes), terminated=True)
+        # only slot 6 starts an all-valid window (needs 6,7,0,1 valid with
+        # sequence_size=3 -> reduce-window length 4)
+        forced = jnp.array(
+            [True, True, False, False, False, False, True, True]
+        )
+        buffer = buffer._replace(sampling_ok=forced)
+        sample_fn = create_sequence_sample(
+            buffer_size=8,
+            sampling_size=16,
+            sequence_size=3,
+            keys=["obs"],
+        )
+        out, seq_indices = sample_fn(buffer, jax.random.key(0))
+        assert jnp.all(seq_indices[:, 0] == 6)
+        assert jnp.all(seq_indices < 8)
+        # row layout [6, 7, 0] — content must match the wrapped slots
+        assert jnp.all(seq_indices == jnp.array([6, 7, 0]))
+        for t, slot in enumerate((6, 7, 0)):
+            assert jnp.allclose(
+                out.this_info["obs"][0, t], buffer.info["obs"][slot]
+            )
+
     def test_sequence_sample_respects_window_validity(self, shapes):
         # only an unbroken run of length sequence_size+1 starting at some slot
         # may be drawn. force a single valid run starting at slot 2.

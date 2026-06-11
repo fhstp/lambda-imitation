@@ -160,7 +160,10 @@ def create_sequence_sample(
         probs = sampling_ok.astype(jnp.float32)
         probs = probs / probs.sum()
         indices = jax.random.choice(key, buffer_size, (sampling_size, 1), p=probs)
-        sequence_indices = indices + base_indices
+        # Wrap around the ring: a window may legitimately start near the end
+        # (the validity check above already padded circularly).  Without the
+        # modulo, out-of-bounds gathers clamp to the last slot under jit.
+        sequence_indices = (indices + base_indices) % buffer_size
 
         return (
             BufferSample(
