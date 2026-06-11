@@ -506,9 +506,25 @@ def sf_vtrace_targets(
         them and drop the trailing ``lambda_truncation`` steps before the
         regression loss.
     """
-    raise NotImplementedError(
-        "user-implemented: see ~/.claude/plans/cosmic-drifting-dusk.md §1.6"
+
+    def scan_target(scan_carry, x):
+        v_sp1, V_sp1 = scan_carry
+        V_s, done, f, ratio = x
+        # ratios / dones are per-step scalars shared across the n features.
+        rho = jnp.minimum(rho_bar, ratio)[..., None]
+        c = (lam * jnp.minimum(c_bar, ratio))[..., None]
+        nd = (1.0 - done)[..., None]
+        delta_V = f + nd * gamma * V_sp1 - V_s
+        v_s = V_s + rho * delta_V + nd * gamma * c * (v_sp1 - V_sp1)
+        return (v_s, V_s), v_s
+
+    _carry, targets = jax.lax.scan(
+        scan_target,
+        (jnp.zeros_like(V[0]), jnp.zeros_like(V[0])),
+        (V, dones, cumulants, ratios),
+        reverse=True,
     )
+    return targets
 
 
 # ---------------------------------------------------------------------------
@@ -641,9 +657,9 @@ def create_iqlearn(
             are frozen inside the discrepancy term.  Discrete-only.
         gvd_feature_fn: Pure function mapping the **raw stored observation**
             (before ``obs_fn`` — same convention as ``mask_fn``) to a feature
-            vector ``(*batch, n_features)``.  The per-step SF cumulant is the
-            feature difference ``φ(o_{t+1}) − φ(o_t)``.  Required when
-            ``use_gvd=True``.
+            vector ``(*batch, n_features)``.  ``φ(o_t)`` is used directly as
+            the per-step SF cumulant (paper pseudo-return ``Σ γ^t f(ω_t)``).
+            Required when ``use_gvd=True``.
         gvd_sf_dims: Hidden layer widths for each SF head.
         debug: If True, additionally return a :class:`DebugFunctions` named
             tuple exposing internal helpers (``get_q``, ``get_entropy``).
@@ -822,17 +838,20 @@ def create_iqlearn(
             # fold_in keeps the existing split(key, 7) stream untouched so
             # use_gvd=False initialisation stays bit-identical to before.
             k_sf1, k_sf2 = jax.random.split(jax.random.fold_in(key, 0x6FD), 2)
+            # Q-style per-action SF heads: one n_gvd_features-vector per
+            # action, flat output reshaped to (batch, action_dim, n) in
+            # run_sf (mirrors the all-actions layout of the λ-critics).
             gvd_sf1_model = Head(
                 feature_dim,
                 gvd_sf_dims,
-                n_gvd_features,
+                action_dim * n_gvd_features,
                 layer_norm=critic_layer_norm,
                 rngs=nnx.Rngs(k_sf1),
             )
             gvd_sf2_model = Head(
                 feature_dim,
                 gvd_sf_dims,
-                n_gvd_features,
+                action_dim * n_gvd_features,
                 layer_norm=critic_layer_norm,
                 rngs=nnx.Rngs(k_sf2),
             )
@@ -1973,17 +1992,44 @@ def create_iqlearn(
 
     if use_gvd:
         def run_sf(sf_state: nnx.GraphState, sf_graph, x: jax.Array) -> jax.Array:
-            """Run one SF head on pre-extracted features.
+            """Run one SF head: per-action successor features.
+
+            The head's flat output is reshaped to one feature vector per
+            action (all-actions layout, like the discrete λ-critics).
 
             Args:
                 sf_state: SF head parameter state.
                 sf_graph: Matching graph def (``gvd_sf{1,2}_graph``).
-                x: Features ``(..., feature_dim)``.
+                x: Features ``(batch, feature_dim)``.
 
             Returns:
-                SF values ``(..., n_gvd_features)``.
+                SF values ``(batch, action_dim, n_gvd_features)``.
             """
-            return nnx.merge(sf_graph, sf_state)(x)
+            out = nnx.merge(sf_graph, sf_state)(x)
+            return out.reshape(*out.shape[:-1], action_dim, n_gvd_features)
+
+        def run_sf_q(sf_state: nnx.GraphState, sf_graph, x: jax.Array, actions: jax.Array) -> jax.Array:
+            """SF analogue of Q(s, a): gather the executed action's row.
+
+            Returns ``(batch, n_gvd_features)``.
+            """
+            sf_q = run_sf(sf_state, sf_graph, x)  # (batch, A, n)
+            indices = jnp.round(actions.reshape(-1)).astype(jnp.int32)
+            batch = sf_q.shape[0]
+            return sf_q[jnp.arange(batch), indices]
+
+        def run_sf_v(actor, sf_state: nnx.GraphState, sf_graph, x: jax.Array, mask: jax.Array) -> jax.Array:
+            """SF analogue of V(s): policy expectation over per-action SFs.
+
+            No minimum over twins (features have no max objective attached),
+            no entropy term — a plain expectation under the (masked) policy.
+
+            Returns ``(batch, n_gvd_features)``.
+            """
+            logits = _apply_mask(run_actor(actor, x), mask)  # (batch, A)
+            probs = jax.nn.softmax(logits)                   # (batch, A)
+            sf_q = run_sf(sf_state, sf_graph, x)             # (batch, A, n)
+            return jnp.sum(probs[..., None] * sf_q, axis=-2)  # (batch, n)
 
         def loss_vtrace_sf_sequence(
             sf_state: nnx.GraphState,
@@ -2002,59 +2048,125 @@ def create_iqlearn(
         ) -> Tuple[jax.Array, dict]:
             """V-trace TD loss for one SF head over a time-major sequence.
 
-            Spec (user-implemented):
-            - ``V = run_sf(sf_target_state, sf_graph, target_latents)`` —
-              bootstrap values from the EMA TARGET head, ``(T', B, n)``.
-            - ``v_pred = run_sf(sf_state, sf_graph, latents)`` — online head
-              predictions to be regressed, ``(T', B, n)``.
-            - Ratios: ``jnp.ones_like(behaviour_probs)`` when
-              ``params.fake_onpolicy_loss``; else ``get_importance_ratios(
-              target_actor_state, target_latents, actions, behaviour_probs,
-              masks)`` — supports ``(T', B)`` leading dims (verify; fall back
-              to a vmap over time if not).
-            - ``targets = sf_vtrace_targets(V, cumulants, dones, ratios,
-              params.gamma, lam, params.rho_bar, params.c_bar)``.
-            - Loss: ``0.5 * mean((v_pred[:-trunc] −
-              stop_gradient(targets)[:-trunc])**2)`` with
-              ``trunc = params.lambda_truncation``.  MSE, not Huber —
-              paper-faithful (Eq. 8); cumulants are bounded.
-            - Metrics: ``{f"{tag}_loss", f"{tag}_pred", f"{tag}_target"}``
-              (means over the retained window; no bare "loss" key).
+            Q-style port of ``loss_vtrace_lambda_sequence`` to vector
+            (per-feature) values: per step, ``V(s)`` is the policy
+            expectation over the TARGET head's per-action SFs (``run_sf_v``,
+            no twin minimum — features have no max objective attached) and
+            the online head's SF at the executed action (``run_sf_q``) is
+            regressed onto the V-trace λ-return targets built from the
+            ``cumulants`` (which occupy the reward slot of the recursion;
+            see :func:`sf_vtrace_targets`).  Huber per feature, summed over
+            features, mean elsewhere; last ``params.lambda_truncation``
+            steps dropped.
+
+            Metrics: ``gvd_{tag}_loss``, ``gvd_{tag}_critic:``,
+            ``gvd_{tag}_target:`` (colon convention matching the scalar
+            λ-critic metrics).
 
             Returns:
                 ``(scalar_loss, metrics_dict)``.
             """
-            raise NotImplementedError(
-                "user-implemented: see ~/.claude/plans/cosmic-drifting-dusk.md §1.7"
+            assert is_discrete, (
+                "loss_vtrace_sf_sequence does not yet support continuous action "
+                "spaces: importance ratios would require unsquashed (pre-tanh) actions, "
+                "which are not currently wired through."
             )
+
+            # Per-step masks are scanned alongside the latents.  When masking is
+            # disabled, feed a zero placeholder and pass ``mask=None`` through.
+            if masks is None:
+                masks_scan = jnp.zeros(latents.shape[:-1] + (0,))
+            else:
+                masks_scan = masks
+
+            def scan_v_q(scan_carry, x):
+                # Nothing random in the SF path — empty carry.
+                x, target_x, action, beh_prob, mask_step = x
+                mask_step = None if masks is None else mask_step
+                v = run_sf_v(
+                    target_actor_state,
+                    sf_target_state,
+                    sf_graph,
+                    target_x,
+                    mask_step,
+                )
+                q = run_sf_q(sf_state, sf_graph, x, action)
+                if params.fake_onpolicy_loss:
+                    ratio = jnp.ones_like(beh_prob)
+                else:
+                    ratio = get_importance_ratios(
+                        target_actor_state, target_x, action, beh_prob, mask_step
+                    )
+                return scan_carry, (v, q, ratio)
+
+            _carry, (v, q, ratios) = jax.lax.scan(
+                scan_v_q,
+                None,
+                (
+                    latents,
+                    target_latents,
+                    actions,
+                    behaviour_probs,
+                    masks_scan,
+                ),
+            )
+
+            # Backward V-trace recursion over (T', B, n) — shared,
+            # module-level kernel (unit-tested against a hand-rolled
+            # reference in tests/test_gvd.py).
+            targets = sf_vtrace_targets(
+                v,
+                cumulants,
+                dones,
+                ratios,
+                params.gamma,
+                lam,
+                params.rho_bar,
+                params.c_bar,
+            )
+
+            loss = optax.losses.huber_loss(
+                q[: -params.lambda_truncation],
+                jax.lax.stop_gradient(targets)[: -params.lambda_truncation],
+            ).sum(-1).mean()
+            metrics = {
+                f"gvd_{tag}_loss": loss,
+                f"gvd_{tag}_critic:": q[: -params.lambda_truncation].mean(),
+                f"gvd_{tag}_target:": targets[: -params.lambda_truncation].mean(),
+            }
+
+            return loss, metrics
 
         def loss_gvd(
             gvd_sf1_state: nnx.GraphState,
             gvd_sf2_state: nnx.GraphState,
             latents_flat: jax.Array,
+            actions_flat: jax.Array
         ) -> Tuple[jax.Array, dict]:
-            """GVD discrepancy between the two SF heads (paper Eq. 9).
+            """GVD discrepancy between the two SF heads at the stored actions.
 
-            Spec (user-implemented):
-            - Evaluate BOTH heads under ``jax.lax.stop_gradient`` on their
-              parameter states (mirror ``loss_ld``): the discrepancy gradient
-              must reach only the shared FE via ``latents_flat``.
-            - ``loss = jnp.mean((v0 − v1) ** 2)`` — squared, not Huber
-              (intentional divergence from ``loss_ld``; paper Eq. 9).
-            - Metrics: ``{"gvd_loss": loss}``.
+            Both head parameter states are frozen via
+            ``jax.lax.stop_gradient`` (mirror of ``loss_ld``): the
+            discrepancy gradient reaches only the shared FE via
+            ``latents_flat``.  Huber between the per-action SFs of the two
+            λ heads — the SF analogue of the Q-based λ-discrepancy.
 
             Args:
                 gvd_sf1_state: Online SF1 head state.
                 gvd_sf2_state: Online SF2 head state.
                 latents_flat: ``(T'·B, feature_dim)`` flattened online-FE
                     features (caller passes ``_flat(latent[:-1])``).
+                actions_flat: ``(T'·B, 1)`` executed actions at those states.
 
             Returns:
                 ``(scalar_loss, {"gvd_loss": loss})``.
             """
-            raise NotImplementedError(
-                "user-implemented: see ~/.claude/plans/cosmic-drifting-dusk.md §1.7"
-            )
+            sf_q1 = run_sf_q(jax.lax.stop_gradient(gvd_sf1_state), gvd_sf1_graph, latents_flat, actions_flat)
+            sf_q2 = run_sf_q(jax.lax.stop_gradient(gvd_sf2_state), gvd_sf2_graph, latents_flat, actions_flat)
+            loss = optax.losses.huber_loss(sf_q1, sf_q2).mean()
+            # NB: "gvd_loss", not "ld_loss" — the λ-discrepancy already emits
+            # ld_loss and metrics.update would silently collide.
+            return loss, {"gvd_loss": loss}
 
     def loss_combined(
         feature_extractor_state,
@@ -2224,18 +2336,13 @@ def create_iqlearn(
             # φ over the RAW stored obs (B, T, obs) — fixed map, no params.
             phi = gvd_feature_fn(observations)               # (B, T, n)
             phi_tm = jnp.swapaxes(phi, 0, 1)[_BL:]           # (T', B, n)
-            # Cumulant f_t = φ(o_{t+1}) − φ(o_t): zeroed across episode
-            # boundaries via (1 − done_t) and zero-padded at the windowless
-            # last step — both absorbed by the [:-lambda_truncation] slice
-            # inside the SF loss.  cumulants[t] occupies exactly the slot
-            # rewards_tm[t] (transition o_t → o_{t+1}) has in the scalar
-            # V-trace recursion.
-            diffs = (phi_tm[1:] - phi_tm[:-1]) * (
-                1.0 - terminated_tm[:-1]
-            )[..., None]
-            cumulants = jnp.concatenate(
-                [diffs, jnp.zeros_like(diffs[:1])], axis=0
-            )                                                # (T', B, n)
+            # Cumulant f_t = φ(o_t): the paper's pseudo-return is
+            # Σ γ^t f(ω_t) directly (Eq. 4/6), so raw features go into the
+            # reward slot of the V-trace recursion.  The alternative
+            # f_t = φ(o_{t+1}) − φ(o_t) (Jaderberg-style differences, used in
+            # the paper's deep-RL section as an SF-collapse remedy) was
+            # deliberately NOT adopted here — revisit if SF collapse shows up.
+            cumulants = phi_tm
 
             l_sf1, m_sf1 = loss_vtrace_sf_sequence(
                 gvd_sf1_state,
@@ -2243,7 +2350,7 @@ def create_iqlearn(
                 gvd_sf1_graph,
                 actor_target_state,
                 params.gvd_lambda1,
-                "gvd_sf1",
+                "sf1",
                 actions_tm,
                 cumulants,
                 terminated_tm,
@@ -2259,7 +2366,7 @@ def create_iqlearn(
                 gvd_sf2_graph,
                 actor_target_state,
                 params.gvd_lambda2,
-                "gvd_sf2",
+                "sf2",
                 actions_tm,
                 cumulants,
                 terminated_tm,
@@ -2274,6 +2381,7 @@ def create_iqlearn(
                 gvd_sf1_state,
                 gvd_sf2_state,
                 _flat(latent[:-1]),
+                _flat(actions_tm[:-1])
             )
             metrics.update(m_gvd)
             loss += l_sf1 + l_sf2 + params.gvd_coef * l_gvd

@@ -266,10 +266,10 @@ class TestEndToEnd:
         "gvd_loss",
         "gvd_sf1_loss",
         "gvd_sf2_loss",
-        "gvd_sf1_pred",
-        "gvd_sf2_pred",
-        "gvd_sf1_target",
-        "gvd_sf2_target",
+        "gvd_sf1_critic:",
+        "gvd_sf2_critic:",
+        "gvd_sf1_target:",
+        "gvd_sf2_target:",
     )
 
     def test_train_round_finite_metrics_gvd(self, gvd_agent):
@@ -296,12 +296,17 @@ class TestEndToEnd:
         for name, value in metrics.items():
             assert jnp.isfinite(value).all(), f"non-finite metric {name}"
 
-    def test_gvd_loss_zero_for_identical_heads(self, gvd_agent):
-        # With SF2 ≡ SF1 (same params, same target), V0 ≡ V1 on the first
-        # update, so the discrepancy must be exactly zero there.  Use a
-        # single update step (train_steps in the fixture is 4; metrics are
-        # means, so run one step via train_unrolled).
-        env, env_params, spec, state, fns, _ = gvd_agent
+    def test_gvd_loss_zero_for_identical_heads(self):
+        # With SF2 ≡ SF1 AND equal λs the two heads receive bitwise-identical
+        # targets and gradients every step, so they stay equal across the
+        # whole scan and the mean discrepancy is exactly 0.  (With the
+        # default λ1=0 ≠ λ2=1 the heads diverge after the first update —
+        # different V-trace targets — so exact zero only holds for equal λ.)
+        env, env_params, spec, state, fns, _ = _make_agent(
+            use_gvd=True,
+            approximate_lambda=False,
+            hp=_tiny_hp(gvd_lambda1=0.5, gvd_lambda2=0.5),
+        )
         state_eq = state._replace(
             gvd_sf2=state.gvd_sf1,
             gvd_sf2_target=state.gvd_sf1_target,
