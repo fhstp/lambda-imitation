@@ -180,6 +180,56 @@ parser.add_argument(
 )
 parser.set_defaults(use_prev_action=True)
 parser.add_argument(
+    "--gvd",
+    dest="gvd",
+    action="store_true",
+    help="enable the General Value Discrepancy branches (two successor-"
+    "feature V-heads on observable-feature cumulants + squared discrepancy "
+    "regulariser on the FE; reward-free memory pressure)",
+)
+parser.add_argument(
+    "--no-gvd",
+    dest="gvd",
+    action="store_false",
+    help="disable GVD (default)",
+)
+parser.set_defaults(gvd=False)
+parser.add_argument(
+    "--gvd-coef",
+    type=float,
+    default=1.0,
+    metavar="GC",
+    help="GVD discrepancy coefficient (default: 1.0)",
+)
+parser.add_argument(
+    "--gvd-features",
+    type=int,
+    default=16,
+    metavar="N",
+    help="width of the random obs projection in the GVD feature map; total "
+    "feature dim is 1 (explicit hit bit) + N (default: 16)",
+)
+parser.add_argument(
+    "--gvd-lambda1",
+    type=float,
+    default=0.0,
+    metavar="L",
+    help="λ of the first GVD successor-feature head (default: 0.0)",
+)
+parser.add_argument(
+    "--gvd-lambda2",
+    type=float,
+    default=1.0,
+    metavar="L",
+    help="λ of the second GVD successor-feature head (default: 1.0)",
+)
+parser.add_argument(
+    "--gvd-sf-lr",
+    type=float,
+    default=1.8e-4,
+    help="GVD successor-feature head learning rate (default: 1.8e-4)",
+)
+parser.add_argument(
     "--approximate-lambda",
     dest="approximate_lambda",
     action="store_true",
@@ -398,6 +448,24 @@ spec = env_spec_from_gymnax(env, env_params)
 obs_fn = lambda o: o[..., :1]
 mask_fn = lambda o: o[..., 1:]
 
+# GVD feature map φ over the FULL raw observation (hit bit + action mask):
+# an explicit hit-bit feature (1 of 1+rows*cols dims — pure random mixing
+# would dilute the only stochastic-but-predictable signal) plus a fixed
+# random projection.  Built once at module level with a seed independent of
+# --seed, so the projection is one constant shared across all vmapped seeds
+# and identical between training and probing runs.  The library diffs φ, so
+# the SF cumulant is [Δhit | P·Δobs].
+if args.gvd:
+    _RAW_OBS_DIM = 1 + args.rows * args.cols
+    _GVD_P = jax.random.normal(
+        jax.random.key(0), (_RAW_OBS_DIM, args.gvd_features)
+    ) / jnp.sqrt(_RAW_OBS_DIM)
+
+    def gvd_feature_fn(o):
+        return jnp.concatenate([o[..., :1], o @ _GVD_P], axis=-1)
+else:
+    gvd_feature_fn = None
+
 # ── placeholder expert buffer (never sampled — SAC only) ──────────────────────
 
 expert_data = {
@@ -439,6 +507,10 @@ hp = Hyperparameters(
     burn_in_length=args.burn_in_length,
     lambda_coef=args.lambda_coef,
     fake_onpolicy_loss=args.fake_onpolicy_loss,
+    gvd_coef=args.gvd_coef,
+    gvd_lambda1=args.gvd_lambda1,
+    gvd_lambda2=args.gvd_lambda2,
+    gvd_sf_lr=args.gvd_sf_lr,
 )
 
 # ── carry helper ──────────────────────────────────────────────────────────────
@@ -464,7 +536,13 @@ def zero_carry() -> jax.Array:
 # ── evaluation helper ─────────────────────────────────────────────────────────
 
 
-_MAX_STEPS = int(env_params.max_steps_in_episode)
+# Battleship episodes end after at most rows*cols shots — the legal-action
+# mask exhausts the board and the last ship cell must be hit by then — far
+# below max_steps_in_episode (1000).  Scanning further wastes ~10x eval time
+# on done-frozen steps.
+_MAX_STEPS = min(
+    int(env_params.max_steps_in_episode), args.rows * args.cols + 1
+)
 
 
 def _make_evaluate(fns):
@@ -523,6 +601,9 @@ _AGENT_KWARGS = dict(
     obs_fn=obs_fn,
     mask_fn=mask_fn,
     burn_in_from_stored_carry=args.burn_in_from_stored_carry,
+    use_gvd=args.gvd,
+    gvd_feature_fn=gvd_feature_fn,
+    gvd_sf_dims=(128,),
     debug=True,
 )
 
@@ -561,9 +642,13 @@ def _split_each(keys):
 
 _WANDB_BASE_CFG = {
     "env": "Battleship",
-    "algo": "SAC+lambda" if args.approximate_lambda else "SAC",
+    "algo": "SAC"
+    + ("+lambda" if args.approximate_lambda else "")
+    + ("+gvd" if args.gvd else ""),
     "action_space": "discrete",
     "action_masked": True,
+    "use_gvd": args.gvd,
+    "gvd_features": args.gvd_features,
     "rows": args.rows,
     "cols": args.cols,
     "dense_reward": args.dense_reward,
@@ -646,18 +731,24 @@ state_0, fns, debug_fns = _build_agent(seeds[0])
 evaluate = _make_evaluate(fns)
 
 # vmapped + jitted env reset / prefill / train over the leading seed axis.
+# donate_argnums hands the (large: replay buffer ~100MB/seed) input agent
+# state and env state buffers to XLA for in-place reuse — the caller rebinds
+# both to the outputs every call, so the stale inputs are never read again.
+# The zero carry (arg 2 of _train_v) is reused across rounds: NOT donated.
 _reset_v = jax.jit(jax.vmap(lambda k: env.reset(k, env_params)))
 _prefill_v = jax.jit(
     jax.vmap(
         lambda s, es, k: fns.prefill_buffer(s, env, env_params, es, PREFILL_STEPS, k),
         in_axes=(0, 0, 0),
-    )
+    ),
+    donate_argnums=(0, 1),
 )
 _train_v = jax.jit(
     jax.vmap(
         lambda s, es, ec, k: fns.train_unrolled(s, env, env_params, es, ec, k),
         in_axes=(0, 0, 0, 0),
-    )
+    ),
+    donate_argnums=(0, 1),
 )
 
 

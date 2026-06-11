@@ -553,6 +553,9 @@ def create_iqlearn_from_env(
     obs_fn: Callable[[jax.Array], jax.Array] = lambda obs: obs,
     mask_fn: Callable[[jax.Array], jax.Array] | None = None,
     burn_in_from_stored_carry: bool = False,
+    use_gvd: bool = False,
+    gvd_feature_fn: Callable[[jax.Array], jax.Array] | None = None,
+    gvd_sf_dims: tuple[int, ...] = (128,),
     debug: bool = False,
     seed: int = 0,
 ) -> (
@@ -637,6 +640,15 @@ def create_iqlearn_from_env(
             ``burn_in_length``).  Costs ``carry_dim * online_buffer_size *
             4`` bytes of extra buffer memory per agent.  Forwarded verbatim
             to :func:`create_iqlearn`.
+        use_gvd: If True, enable the General Value Discrepancy branches: two
+            successor-feature V-heads trained on ``gvd_feature_fn``-difference
+            cumulants whose squared discrepancy regularises the shared FE
+            (reward-free).  Discrete-only.  Forwarded verbatim to
+            :func:`create_iqlearn`.
+        gvd_feature_fn: Pure function mapping the **raw** observation (before
+            ``obs_fn`` — same convention as ``mask_fn``) to a feature vector
+            ``(*batch, n_features)``.  Required when ``use_gvd=True``.
+        gvd_sf_dims: Hidden widths of each SF head.
         debug: If True, return a 3-tuple whose last element is a
             :class:`DebugFunctions` named tuple.
         seed: Integer seed for the ``nnx.Rngs`` used to initialise the
@@ -734,5 +746,8 @@ def create_iqlearn_from_env(
         obs_fn=obs_fn,
         mask_fn=mask_fn,
         burn_in_from_stored_carry=burn_in_from_stored_carry,
+        use_gvd=use_gvd,
+        gvd_feature_fn=gvd_feature_fn,
+        gvd_sf_dims=gvd_sf_dims,
         debug=debug,
     )
