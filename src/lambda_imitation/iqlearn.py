@@ -1896,8 +1896,8 @@ def create_iqlearn(
                 (or densities), shape ``(T', B)``.
             latents: Online-FE features, shape ``(T', B, feature_dim)``.
             target_latents: Target-FE features, shape ``(T', B, feature_dim)``.
-            key: JAX PRNG key, threaded through the inner scan for sampled
-                ``V(s)`` (unused on the discrete path).
+            key: JAX PRNG key (unused on the discrete path; kept for API
+                compatibility).
             masks: Optional time-major action masks, shape
                 ``(T', B, action_dim)``; aligned with ``latents``.  ``None``
                 disables masking.
@@ -1911,41 +1911,41 @@ def create_iqlearn(
             "which are not currently wired through."
         )
 
-        # Per-step masks are scanned alongside the latents.  When masking is
-        # disabled, feed a zero placeholder and pass ``mask=None`` through.
-        if masks is None:
-            masks_scan = jnp.zeros(latents.shape[:-1] + (0,))
+        # Forward pass has no time recurrence — evaluate all T' steps as one
+        # big batch (one matmul per head instead of T' sequential scan
+        # iterations; the GPU-relevant de-scan).  ``get_q`` assumes a single
+        # leading batch dim, so flatten (T', B) -> (T'·B) and reshape back.
+        Tp, B = latents.shape[:2]
+
+        def _tb(a):
+            return a.reshape((Tp * B,) + a.shape[2:])
+
+        mask_flat = _tb(masks) if masks is not None else None
+        v = get_v(
+            target_actor_state,
+            q_target_state,
+            q_graph,
+            jnp.array(0.0),
+            _tb(target_latents),
+            key,
+            False,
+            False,
+            mask=mask_flat,
+        ).reshape(Tp, B)
+        q = get_q(q_state, q_graph, _tb(latents), _tb(actions)).reshape(Tp, B)
+        if params.fake_onpolicy_loss:
+            ratios = jnp.ones_like(behaviour_probs)
         else:
-            masks_scan = masks
-
-        def scan_v_q(scan_carry, x):
-            key = scan_carry
-            key, key_next = jax.random.split(key)
-            x, target_x, action, beh_prob, mask_step = x
-            mask_step = None if masks is None else mask_step
-            v = get_v(
+            ratios = get_importance_ratios(
                 target_actor_state,
-                q_target_state,
-                q_graph,
-                jnp.array(0.0),
-                target_x,
-                key,
-                False,
-                False,
-                mask=mask_step,
-            )
-            q = get_q(q_state, q_graph, x, action)
-            if params.fake_onpolicy_loss:
-                ratio = jnp.ones_like(beh_prob)
-            else:
-                ratio = get_importance_ratios(
-                    target_actor_state, target_x, action, beh_prob, mask_step
-                )
-            new_scan_carry = key_next
+                _tb(target_latents),
+                _tb(actions),
+                _tb(behaviour_probs),
+                mask_flat,
+            ).reshape(Tp, B)
 
-            return new_scan_carry, (v, q, ratio)
-
-        # other way round for recursive definition of V-trace targets
+        # Backward V-trace recursion — inherently sequential (recursive in
+        # time) but elementwise-cheap; stays a scan.
         def scan_target(scan_carry, x):
             v_sp1, V_sp1 = scan_carry
             V_s, done, reward, ratio = x
@@ -1954,18 +1954,6 @@ def create_iqlearn(
             delta_V = reward + (1 - done) * params.gamma * V_sp1 - V_s
             v_s = V_s + rho * delta_V + (1 - done) * params.gamma * c * (v_sp1 - V_sp1)
             return (v_s, V_s), v_s
-
-        _carry, (v, q, ratios) = jax.lax.scan(
-            scan_v_q,
-            key,
-            (
-                latents,
-                target_latents,
-                actions,
-                behaviour_probs,
-                masks_scan,
-            ),
-        )
 
         _carry, targets = jax.lax.scan(
             scan_target,
@@ -2072,44 +2060,36 @@ def create_iqlearn(
                 "which are not currently wired through."
             )
 
-            # Per-step masks are scanned alongside the latents.  When masking is
-            # disabled, feed a zero placeholder and pass ``mask=None`` through.
-            if masks is None:
-                masks_scan = jnp.zeros(latents.shape[:-1] + (0,))
+            # Forward pass has no time recurrence — evaluate all T' steps as
+            # one big batch (de-scan; see loss_vtrace_lambda_sequence).
+            # ``run_sf_q`` assumes a single leading batch dim, so flatten
+            # (T', B) -> (T'·B) and reshape back.
+            Tp, B = latents.shape[:2]
+
+            def _tb(a):
+                return a.reshape((Tp * B,) + a.shape[2:])
+
+            mask_flat = _tb(masks) if masks is not None else None
+            v = run_sf_v(
+                target_actor_state,
+                sf_target_state,
+                sf_graph,
+                _tb(target_latents),
+                mask_flat,
+            ).reshape(Tp, B, -1)
+            q = run_sf_q(
+                sf_state, sf_graph, _tb(latents), _tb(actions)
+            ).reshape(Tp, B, -1)
+            if params.fake_onpolicy_loss:
+                ratios = jnp.ones_like(behaviour_probs)
             else:
-                masks_scan = masks
-
-            def scan_v_q(scan_carry, x):
-                # Nothing random in the SF path — empty carry.
-                x, target_x, action, beh_prob, mask_step = x
-                mask_step = None if masks is None else mask_step
-                v = run_sf_v(
+                ratios = get_importance_ratios(
                     target_actor_state,
-                    sf_target_state,
-                    sf_graph,
-                    target_x,
-                    mask_step,
-                )
-                q = run_sf_q(sf_state, sf_graph, x, action)
-                if params.fake_onpolicy_loss:
-                    ratio = jnp.ones_like(beh_prob)
-                else:
-                    ratio = get_importance_ratios(
-                        target_actor_state, target_x, action, beh_prob, mask_step
-                    )
-                return scan_carry, (v, q, ratio)
-
-            _carry, (v, q, ratios) = jax.lax.scan(
-                scan_v_q,
-                None,
-                (
-                    latents,
-                    target_latents,
-                    actions,
-                    behaviour_probs,
-                    masks_scan,
-                ),
-            )
+                    _tb(target_latents),
+                    _tb(actions),
+                    _tb(behaviour_probs),
+                    mask_flat,
+                ).reshape(Tp, B)
 
             # Backward V-trace recursion over (T', B, n) — shared,
             # module-level kernel (unit-tested against a hand-rolled

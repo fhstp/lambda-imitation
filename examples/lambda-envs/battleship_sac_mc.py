@@ -518,7 +518,13 @@ def zero_carry() -> jax.Array:
 # ── evaluation helper ─────────────────────────────────────────────────────────
 
 
-_MAX_STEPS = int(env_params.max_steps_in_episode)
+# Battleship episodes end after at most rows*cols shots — the legal-action
+# mask exhausts the board and the last ship cell must be hit by then — far
+# below max_steps_in_episode (1000).  Scanning further wastes ~10x eval time
+# on done-frozen steps.
+_MAX_STEPS = min(
+    int(env_params.max_steps_in_episode), args.rows * args.cols + 1
+)
 
 
 def _make_evaluate(fns):
@@ -705,18 +711,24 @@ state_0, fns, debug_fns = _build_agent(seeds[0])
 evaluate = _make_evaluate(fns)
 
 # vmapped + jitted env reset / prefill / train over the leading seed axis.
+# donate_argnums hands the (large: replay buffer ~100MB/seed) input agent
+# state and env state buffers to XLA for in-place reuse — the caller rebinds
+# both to the outputs every call, so the stale inputs are never read again.
+# The zero carry (arg 2 of _train_v) is reused across rounds: NOT donated.
 _reset_v = jax.jit(jax.vmap(lambda k: env.reset(k, env_params)))
 _prefill_v = jax.jit(
     jax.vmap(
         lambda s, es, k: fns.prefill_buffer(s, env, env_params, es, PREFILL_STEPS, k),
         in_axes=(0, 0, 0),
-    )
+    ),
+    donate_argnums=(0, 1),
 )
 _train_v = jax.jit(
     jax.vmap(
         lambda s, es, ec, k: fns.train_unrolled(s, env, env_params, es, ec, k),
         in_axes=(0, 0, 0, 0),
-    )
+    ),
+    donate_argnums=(0, 1),
 )
 
 

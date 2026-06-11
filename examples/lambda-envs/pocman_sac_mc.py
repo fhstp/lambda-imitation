@@ -687,18 +687,24 @@ evaluate = _make_evaluate(fns)
 
 # vmapped + jitted env reset / prefill / train over the leading seed axis.
 # env / env_params are captured as closure constants (static), not vmapped.
+# donate_argnums hands the (large: replay buffer) input agent state and env
+# state buffers to XLA for in-place reuse — the caller rebinds both to the
+# outputs every call.  The zero carry (arg 2 of _train_v) is reused across
+# rounds: NOT donated.
 _reset_v = jax.jit(jax.vmap(lambda k: env.reset(k, env_params)))
 _prefill_v = jax.jit(
     jax.vmap(
         lambda s, es, k: fns.prefill_buffer(s, env, env_params, es, PREFILL_STEPS, k),
         in_axes=(0, 0, 0),
-    )
+    ),
+    donate_argnums=(0, 1),
 )
 _train_v = jax.jit(
     jax.vmap(
         lambda s, es, ec, k: fns.train_unrolled(s, env, env_params, es, ec, k),
         in_axes=(0, 0, 0, 0),
-    )
+    ),
+    donate_argnums=(0, 1),
 )
 
 

@@ -233,7 +233,11 @@ if not args.vis_only:
         gvd_sf_lr=args.gvd_sf_lr,
     )
 
-    _MAX_STEPS = int(env_params.max_steps_in_episode)
+    # Battleship episodes end after at most rows*cols shots (legal-action
+    # mask exhausts the board) — scan only that far, not the env's 1000.
+    _MAX_STEPS = min(
+        int(env_params.max_steps_in_episode), args.rows * args.cols + 1
+    )
 
     def _build_agent(seed_val):
         return create_iqlearn_from_env(
