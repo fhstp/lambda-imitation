@@ -434,6 +434,7 @@ unsquashed_action_key = "unsquashed_actions"
 reward_key = "rewards"
 terminated_key = "terminated"
 behaviour_key = "behaviour_weight"
+carry_key = "carries"
 
 
 def create_iqlearn(
@@ -457,6 +458,7 @@ def create_iqlearn(
     critic_layer_norm: bool = False,
     obs_fn: Callable[[jax.Array], jax.Array] = lambda obs: obs,
     mask_fn: Callable[[jax.Array], jax.Array] | None = None,
+    burn_in_from_stored_carry: bool = False,
     debug: bool = False,
 ) -> (
     "Tuple[SACState, SACFunctions] | "
@@ -544,6 +546,19 @@ def create_iqlearn(
             (action selection, soft value, entropy, importance ratios, and the
             random pre-fill policy).  ``None`` (default) disables masking and
             leaves behaviour identical to before.
+        burn_in_from_stored_carry: If True, store the FULL recurrent carry
+            (memory state plus, with ``use_prev_action``, the prev-action
+            tail — the tail is not reconstructable inside a sampled window)
+            that the online policy consumed at every step, and initialise
+            the burn-in of each sampled training sequence from the stored
+            carry of its first step instead of zeros (R2D2's "stored state"
+            strategy).  Stored carries are stale with respect to the
+            current FE weights — the burn-in refreshes them — but typically
+            allow a much shorter ``params.burn_in_length``.  Costs
+            ``carry_dim * online_buffer_size * 4`` bytes of extra buffer
+            memory.  Pre-fill transitions keep zero carries (the random
+            pre-fill policy threads no memory); zeros mean "episode start",
+            which the burn-in absorbs.
         debug: If True, additionally return a :class:`DebugFunctions` named
             tuple exposing internal helpers (``get_q``, ``get_entropy``).
 
@@ -598,6 +613,10 @@ def create_iqlearn(
     }
     if not is_discrete:
         online_shapes[unsquashed_action_key] = online_shapes[action_key]
+    if burn_in_from_stored_carry:
+        # Full carry (memory + optional prev-action tail) consumed by the
+        # policy at each step; used to initialise the training burn-in.
+        online_shapes[carry_key] = (feature_extractor.carry_dim,)
     online_this_keys = [obs_key, action_key, reward_key, terminated_key]
     online_next_keys = [obs_key]
     online_buffer, online_buffer_functions = create_buffer(
@@ -614,6 +633,8 @@ def create_iqlearn(
         terminated_key,
         behaviour_key,
     ]
+    if burn_in_from_stored_carry:
+        online_mc_this_keys.append(carry_key)
     online_buffer_lambda_sample = create_sequence_sample(
         online_buffer.size,
         params.online_batch_size,
@@ -1557,6 +1578,11 @@ def create_iqlearn(
             transition[behaviour_key] = prob
             if not is_discrete:
                 transition[unsquashed_action_key] = jnp.atleast_1d(unsquashed_action)  # type: ignore
+        if burn_in_from_stored_carry:
+            # The PRE-step carry that ``predict`` consumed at this step.
+            # After a terminal the threaded carry is zeroed below, so the
+            # next slot stores zeros = episode start — correct for free.
+            transition[carry_key] = env_carry
         new_online_buffer = online_buffer_functions.add(
             sac.online_buffer, transition, terminated=done
         )
@@ -1853,7 +1879,17 @@ def create_iqlearn(
             jax.random.split(key, 5)
         )
         sample, indices = online_buffer_lambda_sample(buffer, key_sample)
-        init_carries = feature_extractor.initialize_carry(params.online_batch_size)
+        if burn_in_from_stored_carry:
+            # R2D2 "stored state": start the burn-in from the carry the
+            # online policy actually consumed at the window's first step.
+            # Stale w.r.t. the current FE weights — the burn-in refreshes
+            # it.  Pre-fill / never-written slots hold zeros (episode-start
+            # semantics), matching the zero-init fallback below.
+            init_carries = sample.this_info[carry_key][:, 0]
+        else:
+            init_carries = feature_extractor.initialize_carry(
+                params.online_batch_size
+            )
 
         observations = sample.this_info[obs_key]
         actions = sample.this_info[action_key]
@@ -2268,6 +2304,9 @@ def create_iqlearn(
                 transition[behaviour_key] = prob
                 if not is_discrete:
                     transition[unsquashed_action_key] = jnp.atleast_1d(u)
+            # With burn_in_from_stored_carry the carry slot is deliberately
+            # NOT written here: the random pre-fill policy threads no
+            # memory, and the buffer-init zeros mean "episode start".
             sac = sac._replace(
                 online_buffer=online_buffer_functions.add(
                     sac.online_buffer, transition, terminated=terminated

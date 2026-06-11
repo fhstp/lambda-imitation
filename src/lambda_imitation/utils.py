@@ -552,6 +552,7 @@ def create_iqlearn_from_env(
     critic_layer_norm: bool = False,
     obs_fn: Callable[[jax.Array], jax.Array] = lambda obs: obs,
     mask_fn: Callable[[jax.Array], jax.Array] | None = None,
+    burn_in_from_stored_carry: bool = False,
     debug: bool = False,
     seed: int = 0,
 ) -> (
@@ -629,6 +630,13 @@ def create_iqlearn_from_env(
             removed from the policy everywhere (action selection, soft value,
             entropy, importance ratios, random pre-fill).  ``None`` disables
             masking.  Forwarded verbatim to :func:`create_iqlearn`.
+        burn_in_from_stored_carry: If True, store the recurrent carry the
+            online policy consumed at every step in the online buffer and
+            initialise the burn-in of each sampled training sequence from it
+            instead of zeros (R2D2 "stored state"; allows a much shorter
+            ``burn_in_length``).  Costs ``carry_dim * online_buffer_size *
+            4`` bytes of extra buffer memory per agent.  Forwarded verbatim
+            to :func:`create_iqlearn`.
         debug: If True, return a 3-tuple whose last element is a
             :class:`DebugFunctions` named tuple.
         seed: Integer seed for the ``nnx.Rngs`` used to initialise the
@@ -725,5 +733,6 @@ def create_iqlearn_from_env(
         critic_layer_norm=critic_layer_norm,
         obs_fn=obs_fn,
         mask_fn=mask_fn,
+        burn_in_from_stored_carry=burn_in_from_stored_carry,
         debug=debug,
     )

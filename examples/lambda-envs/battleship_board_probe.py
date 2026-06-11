@@ -58,6 +58,15 @@ parser.set_defaults(approximate_lambda=True)
 g.add_argument("--batch-size", type=int, default=512)
 g.add_argument("--sequence-length", type=int, default=20)
 g.add_argument("--burn-in-length", type=int, default=32)
+g.add_argument("--burn-in-from-stored-carry", dest="burn_in_from_stored_carry",
+               action="store_true",
+               help="store the online carry per transition and initialise the "
+                    "training burn-in from it instead of zeros (R2D2 "
+                    "stored-state; enables shorter --burn-in-length; costs "
+                    "carry_dim x buffer_size x 4 bytes extra)")
+g.add_argument("--no-burn-in-from-stored-carry", dest="burn_in_from_stored_carry",
+               action="store_false")
+parser.set_defaults(burn_in_from_stored_carry=False)
 g.add_argument("--online-buffer-size", type=int, default=200_000)
 
 g = parser.add_argument_group("data collection")
@@ -218,6 +227,7 @@ if not args.vis_only:
             use_prev_action=True,
             critic_layer_norm=True,
             obs_fn=obs_fn, mask_fn=mask_fn,
+            burn_in_from_stored_carry=args.burn_in_from_stored_carry,
             debug=True, seed=seed_val,
         )
 

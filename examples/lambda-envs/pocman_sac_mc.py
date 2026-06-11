@@ -243,6 +243,24 @@ parser.add_argument(
     help="burn-in steps for recurrent state (default: 32)",
 )
 parser.add_argument(
+    "--burn-in-from-stored-carry",
+    dest="burn_in_from_stored_carry",
+    action="store_true",
+    help=(
+        "store the online recurrent carry per transition and initialise the "
+        "training burn-in from it instead of zeros (R2D2 stored-state; "
+        "enables a much shorter --burn-in-length).  Costs carry_dim x "
+        "buffer_size x 4 bytes extra memory per seed"
+    ),
+)
+parser.add_argument(
+    "--no-burn-in-from-stored-carry",
+    dest="burn_in_from_stored_carry",
+    action="store_false",
+    help="initialise the training burn-in from zeros (default)",
+)
+parser.set_defaults(burn_in_from_stored_carry=False)
+parser.add_argument(
     "--c-bar",
     type=float,
     default=1.17,
@@ -376,6 +394,9 @@ if args.wandb_sweep:
     args.lambda_coef = sc.get("lambda_coef", args.lambda_coef)
     args.num_seeds = sc.get("num_seeds", 10)
     args.concurrent_seeds = sc.get("concurrent_seeds", args.concurrent_seeds)
+    args.burn_in_from_stored_carry = _sweep_bool(
+        sc.get("burn_in_from_stored_carry", args.burn_in_from_stored_carry)
+    )
 
     hp = Hyperparameters(
         online_batch_size=128,
@@ -506,6 +527,7 @@ _AGENT_KWARGS = dict(
     lambda2_critic_dims=(128,),
     train_steps=args.train_steps,
     approximate_lambda=args.approximate_lambda,
+    burn_in_from_stored_carry=args.burn_in_from_stored_carry,
     debug=True,
 )
 
@@ -557,6 +579,7 @@ if _wandb is not None and not args.wandb_sweep:
             "memory_hidden_dim": args.memory_hidden_dim,
             "projection_dim": projection_dim,
             "use_prev_action": args.use_prev_action,
+            "burn_in_from_stored_carry": args.burn_in_from_stored_carry,
             "rounds": args.rounds,
             "train_steps": args.train_steps,
             "num_seeds": args.num_seeds,

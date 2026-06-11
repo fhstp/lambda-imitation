@@ -285,6 +285,24 @@ parser.add_argument(
     help="burn-in steps for recurrent state (default: 32)",
 )
 parser.add_argument(
+    "--burn-in-from-stored-carry",
+    dest="burn_in_from_stored_carry",
+    action="store_true",
+    help=(
+        "store the online recurrent carry per transition and initialise the "
+        "training burn-in from it instead of zeros (R2D2 stored-state; "
+        "enables a much shorter --burn-in-length).  Costs carry_dim x "
+        "buffer_size x 4 bytes extra memory per seed"
+    ),
+)
+parser.add_argument(
+    "--no-burn-in-from-stored-carry",
+    dest="burn_in_from_stored_carry",
+    action="store_false",
+    help="initialise the training burn-in from zeros (default)",
+)
+parser.set_defaults(burn_in_from_stored_carry=False)
+parser.add_argument(
     "--c-bar",
     type=float,
     default=1.17,
@@ -504,6 +522,7 @@ _AGENT_KWARGS = dict(
     critic_layer_norm=True,
     obs_fn=obs_fn,
     mask_fn=mask_fn,
+    burn_in_from_stored_carry=args.burn_in_from_stored_carry,
     debug=True,
 )
 
@@ -548,6 +567,7 @@ _WANDB_BASE_CFG = {
     "rows": args.rows,
     "cols": args.cols,
     "dense_reward": args.dense_reward,
+    "burn_in_from_stored_carry": args.burn_in_from_stored_carry,
     "approximate_lambda": args.approximate_lambda,
     "memory_type": args.memory_type,
     "memory_hidden_dim": args.memory_hidden_dim,
