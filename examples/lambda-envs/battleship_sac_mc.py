@@ -45,9 +45,15 @@ Usage
         --wandb --wandb-per-seed                             # 10 concurrent → 10 W&B runs
     python battleship_sac_mc.py --num-seeds 5                # 5 seeds, aggregate
     python battleship_sac_mc.py --help                       # full option list
+    wandb agent <entity>/<project>/<sweep_id>                # hyperparams come
+                                                             # from the sweep
+                                                             # config (see
+                                                             # "wandb sweep
+                                                             # support" below)
 """
 
 import argparse
+import os
 import sys
 from functools import partial
 
@@ -62,7 +68,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "--rounds",
     type=int,
-    default=20,
+    default=100,
     metavar="N",
     help="number of training rounds (default: 20)",
 )
@@ -125,7 +131,7 @@ parser.add_argument(
 parser.add_argument(
     "--num-seeds",
     type=int,
-    default=1,
+    default=10,
     metavar="N",
     help="number of seeds per parameter set (default: 1)",
 )
@@ -317,6 +323,12 @@ parser.add_argument(
     help="training batch size (default: 512)",
 )
 parser.add_argument(
+    "--online-batch-size",
+    type=int,
+    default=128,
+    help="online batch size (default: 128)",
+)
+parser.add_argument(
     "--online-buffer-size",
     type=int,
     default=200_000,
@@ -410,9 +422,40 @@ parser.add_argument(
     "(default: the run-name prefix, else auto)",
 )
 args, _ = parser.parse_known_args()
-if args.seed is None:
-    import os
 
+# ── wandb sweep support ───────────────────────────────────────────────────────
+#
+# Under ``wandb agent`` the hyperparameters arrive via the sweep config, not
+# the CLI: the agent passes underscore-style ``--name=value`` args that match
+# neither the dashed flags nor the store_true/store_false pairs above (they
+# are dropped by parse_known_args).  Attach to the run the agent pre-created
+# and override args from its config instead.
+
+_SWEEP_RUN = None
+if os.environ.get("WANDB_SWEEP_ID"):
+    import wandb as _wandb_mod
+
+    _SWEEP_RUN = _wandb_mod.init()
+    _SWEEP_ALIASES = {"use_gvd": "gvd"}
+    _SWEEP_IGNORED = {"action_masked", "buffer_size"}  # not script knobs
+    _ARG_TYPES = {a.dest: a.type for a in parser._actions if callable(a.type)}
+    for _k, _v in dict(_SWEEP_RUN.config).items():
+        _key = _SWEEP_ALIASES.get(_k, _k)
+        if _key in _SWEEP_IGNORED:
+            continue
+        if not hasattr(args, _key):
+            print(f"sweep config: ignoring unknown parameter {_k!r}")
+            continue
+        if isinstance(_v, str) and _v.lower() in ("true", "false"):
+            _v = _v.lower() == "true"
+        elif _key in _ARG_TYPES:
+            _v = _ARG_TYPES[_key](_v)
+        setattr(args, _key, _v)
+    # The agent owns exactly one run; log everything into it.
+    args.wandb = True
+    args.wandb_per_seed = False
+
+if args.seed is None:
     args.seed = int.from_bytes(os.urandom(4), "little")
     print(f"No --seed given, using random seed: {args.seed}")
 
@@ -485,7 +528,7 @@ if args.wandb:
         sys.exit("wandb not installed.  Install with:  pip install wandb")
 
 hp = Hyperparameters(
-    online_batch_size=128,
+    online_batch_size=args.online_batch_size,
     online_buffer_size=args.online_buffer_size,
     target_entropy=args.target_entropy,
     fe_lr=args.fe_lr,
@@ -668,11 +711,22 @@ _WANDB_BASE_CFG = {
 WANDB_RUNS = {}  # gi -> run handle, populated in --wandb-per-seed mode
 
 if _wandb is not None and not args.wandb_per_seed:
-    _wandb.init(
-        project=args.wandb_project,
-        name=args.wandb_run_name,
-        config={**_WANDB_BASE_CFG, "seed": args.seed},
-    )
+    if _SWEEP_RUN is None:
+        _wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config={**_WANDB_BASE_CFG, "seed": args.seed},
+        )
+    else:
+        # Already attached to the agent's run; only add the descriptive keys
+        # the sweep doesn't control (sweep keys are locked and can't change).
+        _SWEEP_RUN.config.update(
+            {
+                k: v
+                for k, v in {**_WANDB_BASE_CFG, "seed": args.seed}.items()
+                if k not in _SWEEP_RUN.config
+            }
+        )
     if args.num_seeds > 1:
         _wandb.define_metric("env_interactions")
         for i in range(args.num_seeds):
