@@ -523,6 +523,7 @@ def sf_vtrace_targets(
         (jnp.zeros_like(V[0]), jnp.zeros_like(V[0])),
         (V, dones, cumulants, ratios),
         reverse=True,
+        unroll=8,  # fuse across timesteps -> fewer tiny per-step kernels
     )
     return targets
 
@@ -1863,6 +1864,7 @@ def create_iqlearn(
             scan_carries,
             (init_carries, init_carries),
             (observations[:_BL], dones[:_BL], action_encs[:_BL]),
+            unroll=8,  # fuse across timesteps -> fewer tiny per-step kernels
         )
         burnt_in_carries = jax.lax.stop_gradient(burnt_in_carries)
 
@@ -1870,6 +1872,7 @@ def create_iqlearn(
             scan_carries,
             burnt_in_carries,
             (observations[_BL:], dones[_BL:], action_encs[_BL:]),
+            unroll=8,  # fuse across timesteps -> fewer tiny per-step kernels
         )
 
         return latent
@@ -1986,6 +1989,7 @@ def create_iqlearn(
             (jnp.zeros_like(v[0]), jnp.zeros_like(v[0])),
             (v, dones, rewards, ratios),
             reverse=True,
+            unroll=8,  # fuse across timesteps -> fewer tiny per-step kernels
         )
 
         loss = optax.losses.huber_loss(
