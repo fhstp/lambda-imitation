@@ -5,7 +5,7 @@ two additional V-trace λ-return critics (one per λ value) are trained
 alongside the standard SAC critic; their Huber discrepancy is added to the
 joint loss as a regulariser (the "λ-discrepancy" line of work).  When
 ``use_gvd=True``, two successor-feature V-heads are additionally trained on
-observable-feature cumulants (``gvd_feature_fn`` differences) at
+observable-feature cumulants (``gvd_feature_fn(obs, prev_action)``) at
 ``gvd_lambda{1,2}`` and their squared discrepancy is added as a reward-free
 representation regulariser (General Value Discrepancy; Koepernik et al.
 2025).
@@ -562,7 +562,7 @@ def create_iqlearn(
     mask_fn: Callable[[jax.Array], jax.Array] | None = None,
     burn_in_from_stored_carry: bool = False,
     use_gvd: bool = False,
-    gvd_feature_fn: Callable[[jax.Array], jax.Array] | None = None,
+    gvd_feature_fn: Callable[[jax.Array, jax.Array], jax.Array] | None = None,
     gvd_sf_dims: tuple[int, ...] = (128,),
     debug: bool = False,
 ) -> (
@@ -671,11 +671,21 @@ def create_iqlearn(
             Discrepancy; Koepernik et al. 2025).  Like ``loss_ld``, the
             discrepancy gradient reaches only the shared FE — the SF heads
             are frozen inside the discrepancy term.  Discrete-only.
-        gvd_feature_fn: Pure function mapping the **raw stored observation**
-            (before ``obs_fn`` — same convention as ``mask_fn``) to a feature
-            vector ``(*batch, n_features)``.  ``φ(o_t)`` is used directly as
-            the per-step SF cumulant (paper pseudo-return ``Σ γ^t f(ω_t)``).
-            Required when ``use_gvd=True``.
+        gvd_feature_fn: Pure function ``(obs, prev_action) -> features`` mapping
+            the **raw stored observation** ``o_t`` (before ``obs_fn`` — same
+            convention as ``mask_fn``) together with the **previous action**
+            ``a_{t-1}`` (float32 index, shape ``(*batch, 1)``) to a feature
+            vector ``(*batch, n_features)``.  ``φ(o_t, a_{t-1})`` is used
+            directly as the per-step SF cumulant (paper pseudo-return
+            ``Σ γ^t f(ω_t)``).  Passing ``a_{t-1}`` lets the cumulant localise
+            the per-step outcome ``o_t[hit_bit]`` (which is the result of
+            ``a_{t-1}``) to the cell that was fired — e.g. a spatial hit map —
+            so the SF discrepancy can pressure the FE to remember *where* past
+            hits occurred, not just aggregate counts.  ``a_{t-1}`` is zeroed at
+            the window start and across ``done`` resets; callers must gate any
+            action-localised term by the hit bit (which is 0 at episode starts)
+            so those placeholder actions contribute nothing.  Required when
+            ``use_gvd=True``.
         gvd_sf_dims: Hidden layer widths for each SF head.
         debug: If True, additionally return a :class:`DebugFunctions` named
             tuple exposing internal helpers (``get_q``, ``get_entropy``).
@@ -852,9 +862,11 @@ def create_iqlearn(
             )
         if use_gvd:
             # Infer the feature width from a dummy call on the RAW obs shape
-            # (gvd_feature_fn sees the full stored observation, like mask_fn).
+            # (gvd_feature_fn sees the full stored observation, like mask_fn)
+            # plus a dummy prev-action index.
             dummy_phi = gvd_feature_fn(
-                jnp.zeros((1,) + buffer.info[obs_key].shape[1:])
+                jnp.zeros((1,) + buffer.info[obs_key].shape[1:]),
+                jnp.zeros((1, 1), dtype=jnp.float32),
             )
             n_gvd_features = dummy_phi.shape[-1]
             # fold_in keeps the existing split(key, 7) stream untouched so
@@ -2354,10 +2366,19 @@ def create_iqlearn(
 
         if use_gvd:
             # φ over the RAW stored obs (B, T, obs) — fixed map, no params.
-            phi = gvd_feature_fn(observations)               # (B, T, n)
+            # The previous action a_{t-1} is paired with o_t so the cumulant
+            # can localise the per-step hit bit (= result of a_{t-1}) to the
+            # cell that was fired.  a_{t-1} is obtained by shifting the action
+            # stream one step along time; index 0 has no predecessor so it is
+            # zeroed (it falls in the dropped burn-in window, and at any
+            # episode boundary o_t[hit_bit]=0 gates the stale action to nothing).
+            prev_actions = jnp.concatenate(
+                [jnp.zeros_like(actions[:, :1]), actions[:, :-1]], axis=1
+            )
+            phi = gvd_feature_fn(observations, prev_actions)  # (B, T, n)
             phi_tm = jnp.swapaxes(phi, 0, 1)[_BL:]           # (T', B, n)
-            # Cumulant f_t = φ(o_t): the paper's pseudo-return is
-            # Σ γ^t f(ω_t) directly (Eq. 4/6), so raw features go into the
+            # Cumulant f_t = φ(o_t, a_{t-1}): the paper's pseudo-return is
+            # Σ γ^t f(ω_t) directly (Eq. 4/6), so the features go into the
             # reward slot of the V-trace recursion.  The alternative
             # f_t = φ(o_{t+1}) − φ(o_t) (Jaderberg-style differences, used in
             # the paper's deep-RL section as an SF-collapse remedy) was

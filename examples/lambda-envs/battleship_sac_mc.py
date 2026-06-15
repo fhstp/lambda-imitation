@@ -489,21 +489,35 @@ spec = env_spec_from_gymnax(env, env_params)
 obs_fn = lambda o: o[..., :1]
 mask_fn = lambda o: o[..., 1:]
 
-# GVD feature map φ over the FULL raw observation (hit bit + action mask):
-# an explicit hit-bit feature (1 of 1+rows*cols dims — pure random mixing
-# would dilute the only stochastic-but-predictable signal) plus a fixed
-# random projection.  Built once at module level with a seed independent of
-# --seed, so the projection is one constant shared across all vmapped seeds
-# and identical between training and probing runs.  The library diffs φ, so
-# the SF cumulant is [Δhit | P·Δobs].
+# GVD feature map φ(o_t, a_{t-1}) — an ACTION-LOCALISED hit cumulant.
+#
+# The per-step hit bit o_t[0] is the result of the *previous* action a_{t-1},
+# and that is the only hit/miss signal the observation ever carries (the mask
+# only encodes fired-vs-unfired, never hit-vs-miss, and forgets the outcome on
+# the next step).  So we localise the hit bit to the cell that produced it:
+#
+#     φ = [ hit_bit | (one_hot(a_{t-1}) * hit_bit) · P ]
+#
+# i.e. a hit-scaled random fingerprint of the fired cell.  The SF return
+# Σ γ^k φ(o_{t+k}, a_{t+k-1}) is then a discounted *spatial* hit map, whose
+# prediction requires a belief over the hidden board — so the λ-discrepancy
+# pressures the FE to remember *where* past hits were, not just how many.
+# (The earlier φ = [hit | P·obs] projected the fired MASK, which is trivially
+# observable and carries no per-cell hit/miss info → no location pressure.)
+#
+# P is built once at module level with a seed independent of --seed, so it is
+# one constant shared across all vmapped seeds and identical between training
+# and probing runs.  Total dim = 1 + gvd_features (unchanged, same head sizes).
 if args.gvd:
-    _RAW_OBS_DIM = 1 + args.rows * args.cols
+    _GVD_N = args.rows * args.cols
     _GVD_P = jax.random.normal(
-        jax.random.key(0), (_RAW_OBS_DIM, args.gvd_features)
-    ) / jnp.sqrt(_RAW_OBS_DIM)
+        jax.random.key(0), (_GVD_N, args.gvd_features)
+    ) / jnp.sqrt(args.gvd_features)
 
-    def gvd_feature_fn(o):
-        return jnp.concatenate([o[..., :1], o @ _GVD_P], axis=-1)
+    def gvd_feature_fn(o, a_prev):
+        hit = o[..., :1]  # result of a_prev (0 at episode starts)
+        loc = jax.nn.one_hot(a_prev[..., 0].astype(jnp.int32), _GVD_N)
+        return jnp.concatenate([hit, (loc * hit) @ _GVD_P], axis=-1)
 
 else:
     gvd_feature_fn = None

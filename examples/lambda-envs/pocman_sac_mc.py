@@ -522,10 +522,12 @@ if args.gvd:
             jax.random.key(0), (spec.obs_shape[0], args.gvd_features)
         ) / jnp.sqrt(spec.obs_shape[0])
 
-        def gvd_feature_fn(o):
+        # Pocman GVD probes the raw obs directly — it has no battleship-style
+        # hit bit to localise, so the prev-action arg is accepted and ignored.
+        def gvd_feature_fn(o, a_prev):
             return o @ _GVD_P
     else:
-        gvd_feature_fn = lambda o: o
+        gvd_feature_fn = lambda o, a_prev: o
 else:
     gvd_feature_fn = None
 

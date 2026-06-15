@@ -184,17 +184,20 @@ if not args.vis_only:
         "actions": jnp.zeros((1, 1), dtype=jnp.float32),
     }
 
-    # GVD feature map φ = [hit bit | P·obs] over the FULL raw observation —
-    # identical construction to battleship_sac_mc.py (fixed jax.random.key(0)
+    # GVD feature map φ(o_t, a_{t-1}) = [hit bit | (one_hot(a_{t-1})·hit)·P] —
+    # an action-localised *spatial* hit cumulant (see battleship_sac_mc.py for
+    # the rationale).  Identical construction (fixed jax.random.key(0)
     # projection, independent of --seed) so agents trained there probe the
     # same way here.
     if args.gvd:
         _GVD_P = jax.random.normal(
-            jax.random.key(0), (1 + N, args.gvd_features)
-        ) / jnp.sqrt(1 + N)
+            jax.random.key(0), (N, args.gvd_features)
+        ) / jnp.sqrt(args.gvd_features)
 
-        def gvd_feature_fn(o):
-            return jnp.concatenate([o[..., :1], o @ _GVD_P], axis=-1)
+        def gvd_feature_fn(o, a_prev):
+            hit = o[..., :1]  # result of a_prev (0 at episode starts)
+            loc = jax.nn.one_hot(a_prev[..., 0].astype(jnp.int32), N)
+            return jnp.concatenate([hit, (loc * hit) @ _GVD_P], axis=-1)
     else:
         gvd_feature_fn = None
 

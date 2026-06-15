@@ -554,7 +554,7 @@ def create_iqlearn_from_env(
     mask_fn: Callable[[jax.Array], jax.Array] | None = None,
     burn_in_from_stored_carry: bool = False,
     use_gvd: bool = False,
-    gvd_feature_fn: Callable[[jax.Array], jax.Array] | None = None,
+    gvd_feature_fn: Callable[[jax.Array, jax.Array], jax.Array] | None = None,
     gvd_sf_dims: tuple[int, ...] = (128,),
     debug: bool = False,
     seed: int = 0,
@@ -641,13 +641,16 @@ def create_iqlearn_from_env(
             4`` bytes of extra buffer memory per agent.  Forwarded verbatim
             to :func:`create_iqlearn`.
         use_gvd: If True, enable the General Value Discrepancy branches: two
-            successor-feature V-heads trained on ``gvd_feature_fn``-difference
-            cumulants whose squared discrepancy regularises the shared FE
-            (reward-free).  Discrete-only.  Forwarded verbatim to
+            successor-feature V-heads trained on ``gvd_feature_fn(obs,
+            prev_action)`` cumulants whose squared discrepancy regularises the
+            shared FE (reward-free).  Discrete-only.  Forwarded verbatim to
             :func:`create_iqlearn`.
-        gvd_feature_fn: Pure function mapping the **raw** observation (before
-            ``obs_fn`` — same convention as ``mask_fn``) to a feature vector
-            ``(*batch, n_features)``.  Required when ``use_gvd=True``.
+        gvd_feature_fn: Pure function ``(obs, prev_action) -> features`` mapping
+            the **raw** observation ``o_t`` (before ``obs_fn`` — same
+            convention as ``mask_fn``) and the previous action ``a_{t-1}``
+            (float32 index ``(*batch, 1)``) to a feature vector ``(*batch,
+            n_features)``.  Required when ``use_gvd=True``.  See
+            :func:`create_iqlearn` for the alignment / hit-gating contract.
         gvd_sf_dims: Hidden widths of each SF head.
         debug: If True, return a 3-tuple whose last element is a
             :class:`DebugFunctions` named tuple.

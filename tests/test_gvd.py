@@ -36,7 +36,9 @@ N_FEATURES = 3
 _P = jax.random.normal(jax.random.key(7), (4, N_FEATURES)) / 2.0
 
 
-def _feature_fn(obs):
+def _feature_fn(obs, prev_action):
+    # prev_action accepted for the (obs, a_{t-1}) cumulant API; this test's
+    # feature map is a plain obs projection and ignores it.
     return obs @ _P
 
 
