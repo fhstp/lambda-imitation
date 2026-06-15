@@ -46,31 +46,31 @@ g.add_argument("--dense-reward", dest="dense_reward", action="store_true",
 parser.set_defaults(dense_reward=False)
 
 g = parser.add_argument_group("agent training")
-g.add_argument("--rounds", type=int, default=8, help="training rounds (default 8)")
+g.add_argument("--rounds", type=int, default=100, help="training rounds (default 100)")
 g.add_argument("--train-steps", type=int, default=10_000, help="env steps per round (default 10 000)")
 g.add_argument("--seed", type=int, default=42)
 g.add_argument("--memory-type", choices=("identity", "rnn", "gru", "lstm"), default="gru")
-g.add_argument("--memory-hidden-dim", type=int, default=750)
+g.add_argument("--memory-hidden-dim", type=int, default=512)
 g.add_argument("--projection-dim", type=int, default=128)
 g.add_argument("--approximate-lambda", dest="approximate_lambda", action="store_true")
 g.add_argument("--no-approximate-lambda", dest="approximate_lambda", action="store_false")
-parser.set_defaults(approximate_lambda=True)
+parser.set_defaults(approximate_lambda=False)
 g.add_argument("--gvd", dest="gvd", action="store_true",
                help="enable the GVD successor-feature branches (reward-free "
                     "memory pressure; an agent trained with --gvd must be "
                     "reloaded with --gvd)")
 g.add_argument("--no-gvd", dest="gvd", action="store_false")
-parser.set_defaults(gvd=False)
+parser.set_defaults(gvd=True)
 g.add_argument("--gvd-coef", type=float, default=1.0, help="GVD discrepancy coefficient (default 1.0)")
 g.add_argument("--gvd-features", type=int, default=16,
                help="random-projection width of the GVD feature map; total dim "
                     "is 1 (hit bit) + N (default 16)")
-g.add_argument("--gvd-lambda1", type=float, default=0.0)
-g.add_argument("--gvd-lambda2", type=float, default=1.0)
+g.add_argument("--gvd-lambda1", type=float, default=0.05)
+g.add_argument("--gvd-lambda2", type=float, default=0.75)
 g.add_argument("--gvd-sf-lr", type=float, default=1.8e-4)
-g.add_argument("--batch-size", type=int, default=512)
-g.add_argument("--sequence-length", type=int, default=20)
-g.add_argument("--burn-in-length", type=int, default=32)
+g.add_argument("--batch-size", type=int, default=128)
+g.add_argument("--sequence-length", type=int, default=40)
+g.add_argument("--burn-in-length", type=int, default=5)
 g.add_argument("--burn-in-from-stored-carry", dest="burn_in_from_stored_carry",
                action="store_true",
                help="store the online carry per transition and initialise the "
@@ -79,7 +79,7 @@ g.add_argument("--burn-in-from-stored-carry", dest="burn_in_from_stored_carry",
                     "carry_dim x buffer_size x 4 bytes extra)")
 g.add_argument("--no-burn-in-from-stored-carry", dest="burn_in_from_stored_carry",
                action="store_false")
-parser.set_defaults(burn_in_from_stored_carry=False)
+parser.set_defaults(burn_in_from_stored_carry=True)
 g.add_argument("--online-buffer-size", type=int, default=200_000)
 
 g = parser.add_argument_group("data collection")
@@ -227,12 +227,12 @@ if not args.vis_only:
         online_batch_size=128,
         online_buffer_size=args.online_buffer_size,
         target_entropy=0.0,
-        fe_lr=7e-5, actor_lr=6e-5, critic_lr=2e-4,
-        lambda_critic_lr=1.8e-4, alpha_lr=1e-4,
+        fe_lr=1e-4, actor_lr=1e-4, critic_lr=2e-4,
+        lambda_critic_lr=1e-4, alpha_lr=1e-4,
         alpha=0.1, autotune_alpha=False,
-        batch_size=args.batch_size, gamma=0.99, tau=0.006,
-        lambda1=0.05, lambda2=0.8,
-        c_bar=1.17, rho_bar=1.15, lambda_truncation=17,
+        batch_size=args.batch_size, gamma=0.99, tau=0.005,
+        lambda1=0.05, lambda2=0.75,
+        c_bar=1.05, rho_bar=1.05, lambda_truncation=17,
         sequence_length=args.sequence_length,
         burn_in_length=args.burn_in_length,
         lambda_coef=1.0, fake_onpolicy_loss=False,
