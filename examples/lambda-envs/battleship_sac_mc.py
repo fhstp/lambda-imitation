@@ -154,7 +154,7 @@ parser.add_argument(
 parser.add_argument(
     "--memory-hidden-dim",
     type=int,
-    default=750,
+    default=512,
     metavar="N",
     help="hidden-state width of the recurrent cell (default: 750)",
 )
@@ -199,7 +199,7 @@ parser.add_argument(
     action="store_false",
     help="disable GVD (default)",
 )
-parser.set_defaults(gvd=False)
+parser.set_defaults(gvd=True)
 parser.add_argument(
     "--gvd-coef",
     type=float,
@@ -218,14 +218,14 @@ parser.add_argument(
 parser.add_argument(
     "--gvd-lambda1",
     type=float,
-    default=0.0,
+    default=0.05,
     metavar="L",
     help="λ of the first GVD successor-feature head (default: 0.0)",
 )
 parser.add_argument(
     "--gvd-lambda2",
     type=float,
-    default=1.0,
+    default=0.75,
     metavar="L",
     help="λ of the second GVD successor-feature head (default: 1.0)",
 )
@@ -247,7 +247,7 @@ parser.add_argument(
     action="store_false",
     help="disable the λ-critic branches and run pure SAC",
 )
-parser.set_defaults(approximate_lambda=True)
+parser.set_defaults(approximate_lambda=False)
 parser.add_argument(
     "--grad-clip-norm",
     type=float,
@@ -258,7 +258,7 @@ parser.add_argument(
 parser.add_argument(
     "--actor-lr",
     type=float,
-    default=6e-5,
+    default=1e-4,
     help="actor learning rate (default: 6e-5)",
 )
 parser.add_argument(
@@ -270,13 +270,13 @@ parser.add_argument(
 parser.add_argument(
     "--lambda-critic-lr",
     type=float,
-    default=1.8e-4,
+    default=1e-4,
     help="λ-critic learning rate (default: 1.8e-4)",
 )
 parser.add_argument(
     "--fe-lr",
     type=float,
-    default=7e-5,
+    default=1e-4,
     help="feature extractor learning rate (default: 7e-5)",
 )
 parser.add_argument(
@@ -307,7 +307,7 @@ parser.set_defaults(autotune_alpha=False)
 parser.add_argument(
     "--tau",
     type=float,
-    default=0.006,
+    default=0.005,
     help="target network EMA rate (default: 0.006)",
 )
 parser.add_argument(
@@ -319,7 +319,7 @@ parser.add_argument(
 parser.add_argument(
     "--batch-size",
     type=int,
-    default=512,
+    default=128,
     help="training batch size (default: 512)",
 )
 parser.add_argument(
@@ -337,14 +337,14 @@ parser.add_argument(
 parser.add_argument(
     "--sequence-length",
     type=int,
-    default=20,
-    help="sequence length for R2D2-style sampling (default: 20)",
+    default=40,
+    help="sequence length for R2D2-style sampling (default: 40)",
 )
 parser.add_argument(
     "--burn-in-length",
     type=int,
-    default=32,
-    help="burn-in steps for recurrent state (default: 32)",
+    default=5,
+    help="burn-in steps for recurrent state (default: 5)",
 )
 parser.add_argument(
     "--burn-in-from-stored-carry",
@@ -363,17 +363,17 @@ parser.add_argument(
     action="store_false",
     help="initialise the training burn-in from zeros (default)",
 )
-parser.set_defaults(burn_in_from_stored_carry=False)
+parser.set_defaults(burn_in_from_stored_carry=True)
 parser.add_argument(
     "--c-bar",
     type=float,
-    default=1.17,
+    default=1.05,
     help="V-trace IS clipping c̄ (default: 1.17)",
 )
 parser.add_argument(
     "--rho-bar",
     type=float,
-    default=1.15,
+    default=1.05,
     help="V-trace IS clipping ρ̄ (default: 1.15)",
 )
 parser.add_argument(
@@ -467,9 +467,7 @@ import jax.numpy as jnp
 try:
     from lambda_envs.envs.battleship import Battleship
 except ImportError:
-    sys.exit(
-        "lambda-envs is required.  Install with:  pip install lambda-envs"
-    )
+    sys.exit("lambda-envs is required.  Install with:  pip install lambda-envs")
 
 from lambda_imitation.iqlearn import Hyperparameters
 from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
@@ -506,6 +504,7 @@ if args.gvd:
 
     def gvd_feature_fn(o):
         return jnp.concatenate([o[..., :1], o @ _GVD_P], axis=-1)
+
 else:
     gvd_feature_fn = None
 
@@ -583,9 +582,7 @@ def zero_carry() -> jax.Array:
 # mask exhausts the board and the last ship cell must be hit by then — far
 # below max_steps_in_episode (1000).  Scanning further wastes ~10x eval time
 # on done-frozen steps.
-_MAX_STEPS = min(
-    int(env_params.max_steps_in_episode), args.rows * args.cols + 1
-)
+_MAX_STEPS = min(int(env_params.max_steps_in_episode), args.rows * args.cols + 1)
 
 
 def _make_evaluate(fns):
@@ -754,6 +751,7 @@ def _make_wandb_runs(seeds):
         r.define_metric("*", step_metric="env_interactions")
         WANDB_RUNS[gi] = r
 
+
 # ── main: run seeds (grouped, vmapped) and aggregate ──────────────────────────
 
 CONCURRENT = args.concurrent_seeds
@@ -840,10 +838,13 @@ def run_group(group_idx: int, group: list) -> list:
     zero_carry_b = jnp.zeros((CONCURRENT, CARRY_DIM), dtype=jnp.float32)
 
     for rnd in tqdm(range(1, args.rounds + 1), desc=f"Group {group_idx + 1}"):
+        if rnd == 2:
+            jax.profiler.start_trace("./jax-trace")
         keys, train_keys = _split_each(keys)
         batched, env_state, _carry, metrics = _train_v(
             batched, env_state, zero_carry_b, train_keys
         )
+        _carry.block_until_ready()
 
         keys, eval_keys = _split_each(keys)
         returns = _evaluate_v(batched, eval_keys, 10)  # (CONCURRENT,)
@@ -893,8 +894,7 @@ def run_group(group_idx: int, group: list) -> list:
                             "env_interactions": step,
                             f"{prefix}/mean_return": float(returns[j]),
                             **{
-                                f"{prefix}/{k}": float(v[j])
-                                for k, v in metrics.items()
+                                f"{prefix}/{k}": float(v[j]) for k, v in metrics.items()
                             },
                         }
                     )
@@ -906,13 +906,12 @@ def run_group(group_idx: int, group: list) -> list:
             f"Seed {gi + 1} (seed={svals[j]}) final evaluation (20 episodes): "
             f"mean_return={float(final_returns_b[j]):.1f}"
         )
+    jax.profiler.stop_trace()
     return [(gi, float(final_returns_b[j])) for j, gi in enumerate(idxs)]
 
 
 indexed_seeds = list(enumerate(seeds))
-groups = [
-    indexed_seeds[g * CONCURRENT : (g + 1) * CONCURRENT] for g in range(n_groups)
-]
+groups = [indexed_seeds[g * CONCURRENT : (g + 1) * CONCURRENT] for g in range(n_groups)]
 
 final_returns = [None] * args.num_seeds
 for g, group in enumerate(groups):
