@@ -591,6 +591,7 @@ def create_iqlearn_from_env(
     gvd_sf_dims: tuple[int, ...] = (128,),
     debug: bool = False,
     seed: int = 0,
+    use_sac: bool = True,
 ) -> (
     "Tuple[SACState, SACFunctions] | "
     "Tuple[SACState, SACFunctions, DebugFunctions]"
@@ -792,4 +793,5 @@ def create_iqlearn_from_env(
         gvd_feature_fn=gvd_feature_fn,
         gvd_sf_dims=gvd_sf_dims,
         debug=debug,
+        use_sac=use_sac,
     )

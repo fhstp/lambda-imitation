@@ -585,6 +585,7 @@ def create_iqlearn(
     gvd_feature_fn: Callable[[jax.Array, jax.Array], jax.Array] | None = None,
     gvd_sf_dims: tuple[int, ...] = (128,),
     debug: bool = False,
+    use_sac: bool = True,
 ) -> (
     "Tuple[SACState, SACFunctions] | "
     "Tuple[SACState, SACFunctions, DebugFunctions]"
@@ -1726,7 +1727,7 @@ def create_iqlearn(
             alpha,
             target_latents,
             key_v,
-            include_entropy=True,
+            include_entropy=use_sac,
             **mask_kw,
         )
         target_q = jax.lax.stop_gradient(
