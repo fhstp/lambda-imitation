@@ -358,11 +358,18 @@ class DebugFunctions(NamedTuple):
             done resets (and, with ``use_prev_action``, the per-step
             prev-action input ``enc(a_{t-1})``).  Returns time-major latents
             of shape ``(T - burn_in_length, B, feature_dim)``.
+        predict_qpi: ``(iqlearn, obs, carry, prev_action=None) ->
+            (q_values, probs, new_carry)`` -- per-action Q (min-twin, raw/
+            unmasked) and actor probabilities (masked softmax) for a single
+            observation, plus the post-FE memory carry.  Discrete-only
+            (``None`` for continuous action spaces).  Used for critic-Q /
+            actor-π introspection; reads the existing critic/actor only.
     """
 
     get_q: Callable
     get_entropy: Callable
     calculate_latent: Callable
+    predict_qpi: Callable | None = None
 
 
 class Hyperparameters(NamedTuple):
@@ -1294,6 +1301,40 @@ def create_iqlearn(
             )
 
         @jax.jit
+        def predict_qpi(
+            iqlearn: SACState,
+            obs: jax.Array,
+            carry: jax.Array,
+            prev_action: jax.Array | None = None,
+        ) -> Tuple[jax.Array, jax.Array, jax.Array]:
+            """Diagnostic: per-action Q (min-twin) and actor probabilities for
+            a single state, plus the post-FE carry.
+
+            Returns ``(q_values, probs, new_carry)`` where ``q_values`` and
+            ``probs`` are ``(num_actions,)`` (raw Q — NOT masked; probs are the
+            masked-softmax policy).  ``new_carry`` is the memory carry only —
+            the prev-action input is threaded separately (``prev_action``,
+            mirroring ``predict``); pass the previously executed action's
+            encoding to feed it into the FE (``None`` = zeros / episode start).
+            Used by the critic-Q / actor-π heatmaps; mirrors ``predict``'s FE
+            roll exactly and reads the existing critic/actor only.
+            """
+            obs_batch = jnp.expand_dims(obs_fn(obs), 0)
+            carry_batch = jnp.expand_dims(carry, 0)
+            prev_action_batch = (
+                jnp.expand_dims(prev_action, 0) if prev_action is not None else None
+            )
+            new_carry, x = nnx.merge(
+                feature_extractor_graph, iqlearn.feature_extractor
+            )(carry_batch, obs_batch, prev_action_batch)
+            mask = mask_fn(obs) if mask_fn is not None else None
+            logits = _apply_mask(run_actor(iqlearn.actor, x)[0], mask)
+            probs = jax.nn.softmax(logits)               # (num_actions,)
+            q_twin = run_critic(iqlearn.critic, critic_graph, x)  # (1, n, 2)
+            q_min = jnp.minimum(q_twin[..., 0], q_twin[..., 1])[0]  # (num_actions,)
+            return q_min, probs, new_carry[0]
+
+        @jax.jit
         def get_importance_ratios(
             actor: nnx.GraphState,
             x: jax.Array,
@@ -1563,6 +1604,9 @@ def create_iqlearn(
             if return_unsquashed:
                 return action[0], new_carry[0], unsquashed_action[0]
             return action[0], new_carry[0]
+
+        # Per-action Q/π diagnostic is discrete-only (all-actions critic).
+        predict_qpi = None
 
     # ------------------------------------------------------------------
     # Loss functions and other helpers which are structurally identical
@@ -2912,6 +2956,6 @@ def create_iqlearn(
         return (
             iqlearn,
             fns,
-            DebugFunctions(get_q, get_entropy, calculate_latent),
+            DebugFunctions(get_q, get_entropy, calculate_latent, predict_qpi),
         )
     return (iqlearn, fns)
