@@ -133,6 +133,11 @@ g.add_argument("--no-burn-in-from-stored-carry", dest="burn_in_from_stored_carry
                action="store_false")
 parser.set_defaults(burn_in_from_stored_carry=True)
 g.add_argument("--online-buffer-size", type=int, default=200_000)
+g.add_argument("--use-sac", dest="use_sac", action="store_true",
+               help="whether or not to use a SAC entropy term for update"
+                    "or just use entropy globally in loss")
+g.add_argument("--no-use-sac", dest="use_sac", action="store_false")
+parser.set_defaults(use_sac=False)
 
 g = parser.add_argument_group("data collection")
 g.add_argument("--collect-steps", type=int, default=100_000, help="total env steps to collect (default 100 000)")
@@ -249,6 +254,7 @@ if args.wandb and not args.vis_only:
             "probe_eval_interval": args.probe_eval_interval,
             "probe_eval_steps": args.probe_eval_steps,
             "probe_eval_collect_steps": args.probe_eval_collect_steps,
+            "use_sac": args.use_sac,
         },
     )
     _wandb.define_metric("env_interactions")
@@ -881,6 +887,7 @@ if not args.vis_only:
             use_gvd=args.gvd, gvd_feature_fn=gvd_feature_fn,
             gvd_sf_dims=(256, 256),
             debug=True, seed=seed_val,
+            use_sac=args.use_sac
         )
 
     # ── evaluation helper ────────────────────────────────────────────────────
