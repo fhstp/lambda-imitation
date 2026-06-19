@@ -233,7 +233,7 @@ state, fns, debug_fns = create_iqlearn_from_env(
     expert_data,
     buffer_size=1,  # expert buffer capacity; minimum valid size
     hp=hp,
-    projection_dim=projection_dim,
+    projection=projection_dim,
     memory_type=args.memory_type,
     memory_hidden_dim=args.memory_hidden_dim,
     critic_dims=(64,),

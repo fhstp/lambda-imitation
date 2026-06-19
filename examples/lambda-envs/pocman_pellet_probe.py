@@ -196,7 +196,7 @@ if not args.vis_only:
     def _build_agent(seed_val):
         return create_iqlearn_from_env(
             spec, expert_data, buffer_size=1, hp=hp,
-            projection_dim=projection_dim,
+            projection=projection_dim,
             memory_type=args.memory_type,
             memory_hidden_dim=args.memory_hidden_dim,
             critic_dims=(128,),

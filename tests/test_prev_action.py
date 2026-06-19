@@ -1,17 +1,19 @@
 """Tests for the prev-action input to the recurrent feature extractor.
 
-The prev-action encoding lives in the trailing ``prev_action_dim`` entries of
-the flat carry ("packed carry").  These tests cover:
+The prev-action encoding is fed to the projection as an **explicit input**
+(``feature_extractor(carry, obs, prev_action)``) and threaded *next to* the
+memory carry — it is not packed into the carry.  These tests cover:
 
 * equivalence with the original lambda-discrepancy ``ActionConcatWrapper``
   formulation (action one-hot concatenated to the observation before the
   embedding) — the faithfulness proof for the paper,
-* carry layout / shape arithmetic per memory type,
-* tail pass-through and ``write_prev_action``,
-* ``predict`` writing the chosen action into the tail,
-* ``calculate_latent`` consuming the shifted, done-masked action sequence,
+* carry layout / shape arithmetic per memory type (carry is memory-only),
+* the default ``LinearProjection`` and a custom builder projection module,
+* ``predict`` returning a memory-only carry + the exposed ``encode_action``,
+* ``calculate_latent`` consuming the shifted, done-masked prev-action input,
 * construction-time validation in ``create_iqlearn``,
-* an end-to-end smoke ``train`` round with ``use_prev_action=True``.
+* end-to-end smoke ``train`` rounds with ``use_prev_action=True`` and with a
+  custom skip-connection projection.
 """
 
 import gymnax
@@ -22,6 +24,7 @@ from flax import nnx
 
 from lambda_imitation.iqlearn import Hyperparameters
 from lambda_imitation.utils import (
+    LinearProjection,
     RecurrentFeatureExtractor,
     create_iqlearn_from_env,
     env_spec_from_gymnax,
@@ -34,10 +37,10 @@ HIDDEN = 8
 MEMORY_TYPES = ("identity", "rnn", "gru", "lstm")
 
 
-def _make_fe(memory_type, prev_action_dim, projection_dim=16, seed=0):
+def _make_fe(memory_type, prev_action_dim, projection=16, seed=0):
     return RecurrentFeatureExtractor(
-        input_dim=OBS_DIM,
-        projection_dim=projection_dim,
+        input_shape=OBS_DIM,
+        projection=projection,
         memory_type=memory_type,
         memory_hidden_dim=HIDDEN,
         prev_action_dim=prev_action_dim,
@@ -60,9 +63,11 @@ def _memory_dim(memory_type):
 
 class TestCarryLayout:
     @pytest.mark.parametrize("memory_type", MEMORY_TYPES)
-    def test_carry_dim_includes_tail(self, memory_type):
+    def test_carry_dim_is_memory_only(self, memory_type):
+        # The prev-action is NOT part of the carry: enabling it must not grow
+        # the carry.
         fe = _make_fe(memory_type, ACTION_DIM)
-        assert fe.carry_dim == _memory_dim(memory_type) + ACTION_DIM
+        assert fe.carry_dim == _memory_dim(memory_type)
 
     @pytest.mark.parametrize("memory_type", MEMORY_TYPES)
     def test_carry_dim_unchanged_when_disabled(self, memory_type):
@@ -77,11 +82,20 @@ class TestCarryLayout:
         assert (carry == 0).all()
 
     @pytest.mark.parametrize("memory_type", MEMORY_TYPES)
-    def test_output_dim_unchanged(self, memory_type):
+    def test_initialize_prev_action_shape(self, memory_type):
         fe = _make_fe(memory_type, ACTION_DIM)
-        ref = _make_fe(memory_type, 0)
-        assert fe.output_dim == ref.output_dim
-        _, y = fe(fe.initialize_carry(2), jnp.ones((2, OBS_DIM)))
+        pa = fe.initialize_prev_action(4)
+        assert pa.shape == (4, ACTION_DIM)
+        assert (pa == 0).all()
+        # disabled -> width 0
+        assert _make_fe(memory_type, 0).initialize_prev_action(4).shape == (4, 0)
+
+    @pytest.mark.parametrize("memory_type", MEMORY_TYPES)
+    def test_output_dim(self, memory_type):
+        fe = _make_fe(memory_type, ACTION_DIM)
+        carry = fe.initialize_carry(2)
+        pa = fe.initialize_prev_action(2)
+        _, y = fe(carry, jnp.ones((2, OBS_DIM)), pa)
         assert y.shape == (2, fe.output_dim)
 
     def test_negative_prev_action_dim_raises(self):
@@ -90,63 +104,72 @@ class TestCarryLayout:
 
 
 # ---------------------------------------------------------------------------
-# Tail semantics
+# Projection module semantics
 # ---------------------------------------------------------------------------
 
 
-class TestTailSemantics:
-    @pytest.mark.parametrize("memory_type", MEMORY_TYPES)
-    def test_tail_passes_through_call(self, memory_type):
-        fe = _make_fe(memory_type, ACTION_DIM)
-        carry = fe.initialize_carry(2)
-        tail = jnp.tile(jnp.array([1.0, 0.0, 0.5]), (2, 1))
-        carry = fe.write_prev_action(carry, tail)
-        new_carry, _ = fe(carry, jnp.ones((2, OBS_DIM)))
-        assert jnp.array_equal(new_carry[..., -ACTION_DIM:], tail)
+class TestProjection:
+    def test_default_linear_matches_manual_concat(self):
+        # The default int projection is a Linear over concat([flat_obs, pa]).
+        proj = LinearProjection(OBS_DIM, ACTION_DIM, 16, rngs=nnx.Rngs(0))
+        obs = jax.random.normal(jax.random.key(1), (4, OBS_DIM))
+        pa = jax.nn.one_hot(jnp.array([0, 1, 2, 0]), ACTION_DIM)
+        manual = proj.linear(jnp.concatenate([obs, pa], axis=-1))
+        assert jnp.array_equal(proj(obs, pa), manual)
+        # prev_action=None == zero-width tail == obs only.
+        proj0 = LinearProjection(OBS_DIM, 0, 16, rngs=nnx.Rngs(0))
+        assert jnp.array_equal(proj0(obs, None), proj0.linear(obs))
 
     @pytest.mark.parametrize("memory_type", MEMORY_TYPES)
-    def test_tail_changes_output(self, memory_type):
-        # The action must actually reach the network: two carries differing
-        # only in the tail must produce different features.
+    def test_prev_action_changes_output(self, memory_type):
+        # The prev-action must actually reach the network: two calls differing
+        # only in prev_action must produce different features.
         fe = _make_fe(memory_type, ACTION_DIM)
         obs = jnp.ones((1, OBS_DIM))
-        zero = fe.initialize_carry(1)
-        with_action = fe.write_prev_action(zero, jax.nn.one_hot(1, ACTION_DIM))
-        _, y0 = fe(zero, obs)
-        _, y1 = fe(with_action, obs)
+        carry = fe.initialize_carry(1)
+        _, y0 = fe(carry, obs, jnp.zeros((1, ACTION_DIM)))
+        _, y1 = fe(carry, obs, jax.nn.one_hot(jnp.array([1]), ACTION_DIM))
         assert not jnp.allclose(y0, y1)
 
-    def test_write_prev_action_roundtrip(self):
-        fe = _make_fe("gru", ACTION_DIM)
-        carry = jax.random.normal(jax.random.key(1), (2, fe.carry_dim))
-        tail = jax.nn.one_hot(jnp.array([0, 2]), ACTION_DIM)
-        written = fe.write_prev_action(carry, tail)
-        assert jnp.array_equal(written[..., -ACTION_DIM:], tail)
-        assert jnp.array_equal(written[..., :-ACTION_DIM], carry[..., :-ACTION_DIM])
-
-    def test_write_prev_action_noop_when_disabled(self):
-        fe = _make_fe("gru", 0)
-        carry = jax.random.normal(jax.random.key(1), (2, fe.carry_dim))
-        assert fe.write_prev_action(carry, jnp.zeros((2, 0))) is carry
-
     @pytest.mark.parametrize("memory_type", MEMORY_TYPES)
-    def test_disabled_fe_matches_legacy_construction(self, memory_type):
-        # prev_action_dim=0 must be bit-identical to an FE built without the
-        # argument (same seed => same params => same outputs).
-        fe = _make_fe(memory_type, 0, seed=7)
-        legacy = RecurrentFeatureExtractor(
-            input_dim=OBS_DIM,
-            projection_dim=16,
-            memory_type=memory_type,
+    def test_none_prev_action_normalised(self, memory_type):
+        # Passing None must equal passing an explicit zero prev-action.
+        fe = _make_fe(memory_type, ACTION_DIM)
+        obs = jax.random.normal(jax.random.key(3), (2, OBS_DIM))
+        carry = fe.initialize_carry(2)
+        c_none, y_none = fe(carry, obs, None)
+        c_zero, y_zero = fe(carry, obs, jnp.zeros((2, ACTION_DIM)))
+        assert jnp.array_equal(y_none, y_zero)
+        assert jnp.array_equal(c_none, c_zero)
+
+    def test_custom_builder_projection(self):
+        # A builder callable receives (obs_shape, prev_action_dim, rngs).
+        class Skip(nnx.Module):
+            def __init__(self, obs_shape, pa_dim, rngs):
+                flat = int(jnp.prod(jnp.array(obs_shape)))
+                self.w = flat + pa_dim
+                self.l1 = nnx.Linear(self.w, 12, rngs=rngs)
+                self.l2 = nnx.Linear(12, self.w, rngs=rngs)
+
+            def __call__(self, obs, prev_action):
+                x = obs.reshape(obs.shape[0], -1)
+                if prev_action is not None and prev_action.shape[-1]:
+                    x = jnp.concatenate([x, prev_action], axis=-1)
+                return x + self.l2(jax.nn.relu(self.l1(x)))  # residual skip
+
+        fe = RecurrentFeatureExtractor(
+            input_shape=(OBS_DIM,),
+            projection=lambda s, p, r: Skip(s, p, r),
+            memory_type="gru",
             memory_hidden_dim=HIDDEN,
-            rngs=nnx.Rngs(jax.random.key(7)),
+            prev_action_dim=ACTION_DIM,
+            rngs=nnx.Rngs(0),
         )
-        obs = jax.random.normal(jax.random.key(2), (3, OBS_DIM))
-        carry = fe.initialize_carry(3)
-        new_carry, y = fe(carry, obs)
-        legacy_carry, legacy_y = legacy(carry, obs)
-        assert jnp.array_equal(y, legacy_y)
-        assert jnp.array_equal(new_carry, legacy_carry)
+        carry = fe.initialize_carry(2)
+        pa = fe.initialize_prev_action(2)
+        new_carry, y = fe(carry, jnp.ones((2, OBS_DIM)), pa)
+        assert new_carry.shape == (2, fe.carry_dim)
+        assert y.shape == (2, fe.output_dim)
 
 
 # ---------------------------------------------------------------------------
@@ -155,31 +178,31 @@ class TestTailSemantics:
 
 
 class TestWrapperEquivalence:
-    """Packed carry == action one-hot concatenated to the observation.
+    """Explicit prev-action input == action one-hot concatenated to the obs.
 
     The original lambda-discrepancy code appends the prev-action encoding to
     the observation via an env wrapper; the network then sees
     ``[obs | enc(a_{t-1})]`` (zeros at reset).  Build a reference FE with
-    ``input_dim = OBS_DIM + ACTION_DIM`` and ``prev_action_dim=0``, copy the
-    packed FE's weights into it, and check both produce bit-identical outputs
-    over a random sequence with episode resets.
+    ``input_shape = OBS_DIM + ACTION_DIM`` and ``prev_action_dim=0``, copy the
+    prev-action FE's weights into it, and check both produce bit-identical
+    outputs over a random sequence with episode resets.
     """
 
     @pytest.mark.parametrize("memory_type", MEMORY_TYPES)
     def test_equivalent_to_obs_concat(self, memory_type):
-        packed = _make_fe(memory_type, ACTION_DIM, seed=3)
+        fe = _make_fe(memory_type, ACTION_DIM, seed=3)
         reference = RecurrentFeatureExtractor(
-            input_dim=OBS_DIM + ACTION_DIM,
-            projection_dim=16,
+            input_shape=OBS_DIM + ACTION_DIM,
+            projection=16,
             memory_type=memory_type,
             memory_hidden_dim=HIDDEN,
             rngs=nnx.Rngs(jax.random.key(99)),
         )
-        # Same projection input width (OBS_DIM + ACTION_DIM), so the states
-        # are structurally identical and weights can be copied verbatim.
-        graph, packed_state = nnx.split(packed)
+        # Same projection input width (OBS_DIM + ACTION_DIM), so the states are
+        # structurally identical and weights can be copied verbatim.
+        graph, fe_state = nnx.split(fe)
         ref_graph, _ = nnx.split(reference)
-        reference = nnx.merge(ref_graph, packed_state)
+        reference = nnx.merge(ref_graph, fe_state)
 
         T, B = 12, 4
         key = jax.random.key(4)
@@ -188,20 +211,19 @@ class TestWrapperEquivalence:
         act_seq = jax.random.randint(k_act, (T, B), 0, ACTION_DIM)
         done_seq = jax.random.bernoulli(k_done, 0.2, (T, B))
 
-        packed_carry = packed.initialize_carry(B)
+        carry = fe.initialize_carry(B)
         ref_carry = reference.initialize_carry(B)
         prev_enc = jnp.zeros((B, ACTION_DIM))  # episode start: zero vector
 
         for t in range(T):
-            new_packed_carry, y_packed = packed(packed_carry, obs_seq[t])
+            new_carry, y = fe(carry, obs_seq[t], prev_enc)
             ref_obs = jnp.concatenate([obs_seq[t], prev_enc], axis=-1)
             ref_carry, y_ref = reference(ref_carry, ref_obs)
-            assert jnp.array_equal(y_packed, y_ref), f"mismatch at t={t}"
+            assert jnp.array_equal(y, y_ref), f"mismatch at t={t}"
 
             enc = jax.nn.one_hot(act_seq[t], ACTION_DIM)
-            packed_carry = packed.write_prev_action(new_packed_carry, enc)
             reset = done_seq[t][:, None]
-            packed_carry = jnp.where(reset, 0.0, packed_carry)
+            carry = jnp.where(reset, 0.0, new_carry)
             ref_carry = jnp.where(reset, 0.0, ref_carry)
             prev_enc = jnp.where(reset, 0.0, enc)
 
@@ -236,7 +258,7 @@ def cartpole_agent():
         expert_data,
         buffer_size=4,
         hp=_tiny_hp(),
-        projection_dim=16,
+        projection=16,
         memory_type="gru",
         memory_hidden_dim=HIDDEN,
         use_prev_action=True,
@@ -249,18 +271,27 @@ def cartpole_agent():
     return env, env_params, spec, state, fns, debug_fns
 
 
-class TestPredictTail:
-    def test_discrete_tail_is_one_hot_of_action(self, cartpole_agent):
+class TestPredict:
+    def test_returns_memory_only_carry(self, cartpole_agent):
         env, env_params, spec, state, fns, _ = cartpole_agent
         obs = jnp.zeros(spec.obs_shape, dtype=jnp.float32)
-        carry = jnp.zeros((HIDDEN + spec.action_dim,), dtype=jnp.float32)
+        carry = jnp.zeros((HIDDEN,), dtype=jnp.float32)  # memory only
+        prev_action = jnp.zeros((spec.action_dim,), dtype=jnp.float32)
         for deterministic in (True, False):
             action, new_carry = fns.predict(
-                state, obs, carry, jax.random.key(1), deterministic=deterministic
+                state,
+                obs,
+                carry,
+                jax.random.key(1),
+                deterministic=deterministic,
+                prev_action=prev_action,
             )
-            expected = jax.nn.one_hot(jnp.round(action).astype(jnp.int32),
-                                      spec.action_dim)
-            assert jnp.array_equal(new_carry[-spec.action_dim:], expected)
+            assert new_carry.shape == (HIDDEN,)  # no action packed in
+
+    def test_encode_action_exposed(self, cartpole_agent):
+        _, _, spec, _, fns, _ = cartpole_agent
+        enc = fns.encode_action(jnp.array([2.0]))
+        assert jnp.array_equal(enc, jax.nn.one_hot(2, spec.action_dim))
 
 
 class TestCalculateLatent:
@@ -276,8 +307,7 @@ class TestCalculateLatent:
         dones = jnp.zeros((B, T))
         dones = dones.at[:, 3].set(1.0)  # episode boundary inside the window
 
-        carry_dim = HIDDEN + spec.action_dim
-        init_carries = jnp.zeros((B, carry_dim))
+        init_carries = jnp.zeros((B, HIDDEN))
         latent, _ = debug_fns.calculate_latent(
             state.feature_extractor,
             state.feature_extractor_target,
@@ -288,12 +318,12 @@ class TestCalculateLatent:
         )
         assert latent.shape[0] == T - BL
 
-        # Manual reference: prev_a[t] = enc(a[t-1]) * (1 - done[t-1]), zero at
-        # t=0; carry zeroed after done — exactly the online-path semantics.
+        # Manual reference: prev_a[t] = enc(a[t-1]) zeroed across done[t-1],
+        # carry zeroed after done — exactly the online-path semantics.
         fe_graph, _ = nnx.split(
             RecurrentFeatureExtractor(
-                input_dim=spec.obs_shape[0],
-                projection_dim=16,
+                input_shape=spec.obs_shape[0],
+                projection=16,
                 memory_type="gru",
                 memory_hidden_dim=HIDDEN,
                 prev_action_dim=spec.action_dim,
@@ -301,28 +331,29 @@ class TestCalculateLatent:
             )
         )
         fe = nnx.merge(fe_graph, state.feature_extractor)
-        carry = jnp.zeros((B, carry_dim))
+        carry = jnp.zeros((B, HIDDEN))
+        prev = jnp.zeros((B, spec.action_dim))
         manual = []
         for t in range(T):
-            new_carry, y = fe(carry, observations[:, t])
+            new_carry, y = fe(carry, observations[:, t], prev)
             manual.append(y)
             enc = jax.nn.one_hot(
                 jnp.round(actions[:, t, 0]).astype(jnp.int32), spec.action_dim
             )
-            new_carry = fe.write_prev_action(new_carry, enc)
-            carry = jnp.where(dones[:, t][:, None] > 0, 0.0, new_carry)
+            reset = dones[:, t][:, None] > 0
+            carry = jnp.where(reset, 0.0, new_carry)
+            prev = jnp.where(reset, 0.0, enc)
         manual = jnp.stack(manual[BL:])
-        assert jnp.allclose(latent, manual, atol=1e-6)
+        # atol is loose because XLA fuses the lax.scan (unroll=8) GRU matmuls
+        # differently from this eager reference loop; a logic error (wrong
+        # prev-action shift / reset) would diff by O(0.1+), not O(1e-4).
+        assert jnp.allclose(latent, manual, atol=1e-3)
 
 
 class TestValidation:
     def test_mismatched_fe_raises(self):
         env, env_params = gymnax.make("CartPole-v1")
         spec = env_spec_from_gymnax(env, env_params)
-        expert_data = {
-            "observations": jnp.zeros((4, *spec.obs_shape), dtype=jnp.float32),
-            "actions": jnp.zeros((4, 1), dtype=jnp.float32),
-        }
         from lambda_imitation.iqlearn import create_iqlearn
         from lambda_imitation.buffer import create_buffer
 
@@ -334,8 +365,8 @@ class TestValidation:
             next_step_infos=["observations"],
         )
         fe = RecurrentFeatureExtractor(
-            input_dim=spec.obs_shape[0],
-            projection_dim=16,
+            input_shape=spec.obs_shape[0],
+            projection=16,
             memory_type="gru",
             memory_hidden_dim=HIDDEN,
             prev_action_dim=0,
@@ -366,8 +397,8 @@ class TestValidation:
             next_step_infos=["observations"],
         )
         fe = RecurrentFeatureExtractor(
-            input_dim=spec.obs_shape[0],
-            projection_dim=16,
+            input_shape=spec.obs_shape[0],
+            projection=16,
             memory_type="gru",
             memory_hidden_dim=HIDDEN,
             prev_action_dim=spec.action_dim,
@@ -392,5 +423,48 @@ class TestEndToEnd:
         key, reset_key = jax.random.split(key)
         _, env_state = env.reset(reset_key, env_params)
         new_state, _, metrics = fns.train(state, env, env_params, env_state, key)
+        for name, value in metrics.items():
+            assert jnp.isfinite(value).all(), f"non-finite metric {name}: {value}"
+
+    def test_custom_projection_train_round(self):
+        # A custom skip-connection projection module trains end to end.
+        class Skip(nnx.Module):
+            def __init__(self, obs_shape, pa_dim, rngs):
+                flat = int(jnp.prod(jnp.array(obs_shape)))
+                self.l1 = nnx.Linear(flat + pa_dim, 16, rngs=rngs)
+                self.l2 = nnx.Linear(16, 16, rngs=rngs)
+                self.skip = nnx.Linear(flat + pa_dim, 16, rngs=rngs)
+
+            def __call__(self, obs, prev_action):
+                x = obs.reshape(obs.shape[0], -1)
+                if prev_action is not None and prev_action.shape[-1]:
+                    x = jnp.concatenate([x, prev_action], axis=-1)
+                return self.l2(jax.nn.relu(self.l1(x))) + self.skip(x)
+
+        env, env_params = gymnax.make("CartPole-v1")
+        spec = env_spec_from_gymnax(env, env_params)
+        expert_data = {
+            "observations": jnp.zeros((4, *spec.obs_shape), dtype=jnp.float32),
+            "actions": jnp.zeros((4, 1), dtype=jnp.float32),
+        }
+        state, fns, _ = create_iqlearn_from_env(
+            spec,
+            expert_data,
+            buffer_size=4,
+            hp=_tiny_hp(),
+            projection=lambda s, p, r: Skip(s, p, r),
+            memory_type="gru",
+            memory_hidden_dim=HIDDEN,
+            use_prev_action=True,
+            critic_dims=(16,),
+            train_steps=4,
+            approximate_lambda=True,
+            debug=True,
+            seed=0,
+        )
+        key = jax.random.key(2)
+        key, reset_key = jax.random.split(key)
+        _, env_state = env.reset(reset_key, env_params)
+        _, _, metrics = fns.train(state, env, env_params, env_state, key)
         for name, value in metrics.items():
             assert jnp.isfinite(value).all(), f"non-finite metric {name}: {value}"

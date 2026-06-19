@@ -7,10 +7,10 @@ convenience function :func:`create_iqlearn_from_env` that builds a ready-to-use
 IQ-Learn agent from an ``EnvSpec`` and a dict of expert transitions.
 
 Also exposes :class:`RecurrentFeatureExtractor`, an ``nnx.Module`` that
-combines an MLP backbone with an optional recurrent cell (identity, vanilla
-RNN, GRU or LSTM) and exposes the
-``feature_extractor(carry, obs) -> (new_carry, y)`` calling convention that
-:func:`lambda_imitation.iqlearn.create_iqlearn` expects.
+combines a configurable projection module with an optional recurrent cell
+(identity, vanilla RNN, GRU or LSTM) and exposes the
+``feature_extractor(carry, obs, prev_action=None) -> (new_carry, y)`` calling
+convention that :func:`lambda_imitation.iqlearn.create_iqlearn` expects.
 
 All three environment libraries are imported lazily, so only the library you
 actually use needs to be installed.
@@ -90,72 +90,117 @@ class EnvSpec(NamedTuple):
 MemoryType = Literal["identity", "rnn", "gru", "lstm"]
 
 
+class LinearProjection(nnx.Module):
+    """Default projection: flatten obs, concat the prev-action, single Linear.
+
+    Reproduces the embedding layer of standard recurrent baselines (R2D2,
+    DRQN): a plain ``nnx.Linear`` with **no activation**.  ``prev_action`` is
+    concatenated to the flattened observation before the linear map (matching
+    the ``ActionConcatWrapper`` of the original lambda-discrepancy code, where
+    the action enters through the embedding rather than the cell).  A ``None``
+    or zero-width ``prev_action`` is the observation-only case.
+
+    Args:
+        flat_in: Flattened observation width (product of ``obs_shape``).
+        prev_action_dim: Width of the prev-action encoding (``0`` = obs only).
+        out_dim: Output (embedding) width.
+        rngs: Flax NNX RNG container.
+    """
+
+    def __init__(
+        self, flat_in: int, prev_action_dim: int, out_dim: int, *, rngs: nnx.Rngs
+    ):
+        self.linear = nnx.Linear(flat_in + prev_action_dim, out_dim, rngs=rngs)
+
+    def __call__(self, obs: jax.Array, prev_action: jax.Array | None) -> jax.Array:
+        x = obs.reshape(obs.shape[0], -1)
+        if prev_action is not None and prev_action.shape[-1]:
+            x = jnp.concatenate([x, prev_action], axis=-1)
+        return self.linear(x)
+
+
+class _ConcatProjection(nnx.Module):
+    """Identity projection (``projection=None``): flatten + concat, no params.
+
+    Feeds ``concat([flatten(obs), prev_action])`` straight into the memory
+    cell (or out, for ``memory_type="identity"``).
+    """
+
+    def __call__(self, obs: jax.Array, prev_action: jax.Array | None) -> jax.Array:
+        x = obs.reshape(obs.shape[0], -1)
+        if prev_action is not None and prev_action.shape[-1]:
+            x = jnp.concatenate([x, prev_action], axis=-1)
+        return x
+
+
 class RecurrentFeatureExtractor(nnx.Module):
-    """Linear projection followed by an optional recurrent memory cell.
+    """Projection module followed by an optional recurrent memory cell.
 
     The module exposes the
-    ``feature_extractor(carry, obs) -> (new_carry, y)`` calling convention
-    required by :func:`lambda_imitation.iqlearn.calculate_latent`.
+    ``feature_extractor(carry, obs, prev_action=None) -> (new_carry, y)``
+    calling convention required by
+    :func:`lambda_imitation.iqlearn.calculate_latent`.
 
     Layout::
 
-        [obs | prev_action] --[ Linear(projection_dim) ]--> z --[ memory cell ]--> y
-                                                                       |
-                                                                       +---> new_carry
+        (obs, prev_action) --[ projection module ]--> z --[ memory cell ]--> y
+                                                                  |
+                                                                  +---> new_carry
 
-    The projection is a plain ``nnx.Linear`` with **no activation**, mirroring
-    the embedding layer used in standard recurrent baselines (e.g. R2D2,
-    DRQN).  Set ``projection_dim=None`` to skip it and feed the flattened raw
-    observation straight into the recurrent cell.  The cell, if any, is a
-    Flax NNX ``SimpleCell`` (vanilla RNN), ``GRUCell`` or ``LSTMCell`` with
-    ``hidden_features=memory_hidden_dim``.  For ``"identity"`` no cell is
-    used and the carry is passed through untouched.
+    The **carry is the memory state only** — the previous action is *not*
+    packed into it.  Instead ``prev_action`` (the encoding of the previously
+    executed action: one-hot for discrete, raw values for continuous) is an
+    explicit input to the projection module, threaded by the caller as a
+    sibling of the carry and reset to zeros at episode boundaries.  When the
+    prev-action input is disabled (``prev_action_dim == 0``) callers may pass
+    ``None``; it is normalised internally to a zero-width array so the
+    projection / scan structure is identical either way.
 
-    When ``prev_action_dim > 0`` the carry is the full agent recurrent state
+    The projection is configurable:
 
-        carry = [ memory_carry | prev_action_encoding ]
+    * ``int`` -> a :class:`LinearProjection` of that output width (the default,
+      reproduces the R2D2/DRQN embedding: flatten obs, concat prev-action,
+      one ``Linear`` with no activation).
+    * ``None`` -> a :class:`_ConcatProjection` (no embedding; feed
+      ``concat([flatten(obs), prev_action])`` straight to the cell).
+    * a builder callable ``(obs_shape, prev_action_dim, rngs) -> nnx.Module``
+      -> full control (skip connections, convolutions, separate encoders,
+      ...).  The returned module must implement
+      ``module(obs, prev_action) -> z`` and receives ``obs`` with its raw
+      (unflattened) shape, e.g. ``(B, 10, 10)`` for a battleship board.
 
-    where the tail holds the encoding of the previously executed action
-    (one-hot for discrete, raw values for continuous).  The tail is split off
-    on input, concatenated with the flattened observation *before* the
-    projection (matching the ``ActionConcatWrapper`` of the original
-    lambda-discrepancy code, where the action enters through the embedding
-    rather than the cell), and re-appended unchanged on output.  Writing the
-    new action into the tail is the caller's responsibility (see
-    :meth:`write_prev_action`); a zero tail means "no previous action", i.e.
-    episode start — so any code that zeroes the carry at resets also resets
-    the action input for free.
+    The cell, if any, is a Flax NNX ``SimpleCell`` (vanilla RNN), ``GRUCell``
+    or ``LSTMCell`` with ``hidden_features=memory_hidden_dim``.  For
+    ``"identity"`` no cell is used and the carry is passed through untouched.
 
     Attributes:
         output_dim: Width of the produced feature vector ``y``.  Equals
-            ``memory_hidden_dim`` for recurrent cells, otherwise
-            ``projection_dim`` (or ``input_dim + prev_action_dim`` when
-            ``projection_dim`` is ``None``).
+            ``memory_hidden_dim`` for recurrent cells, otherwise the
+            projection's output width.
         memory_type: One of ``"identity"``, ``"rnn"``, ``"gru"``, ``"lstm"``.
-        prev_action_dim: Width of the prev-action tail of the carry
-            (``0`` disables the action input entirely).
+        prev_action_dim: Width of the prev-action encoding fed to the
+            projection (``0`` disables the action input entirely).
+        input_shape: Raw (unflattened) observation shape the projection sees.
 
     Args:
-        input_dim: Flat size of a single observation (product of all dims).
-        projection_dim: Width of the linear embedding applied to the
-            flattened observation before the memory cell.  ``None`` skips
-            the projection.
+        input_shape: Shape of a single observation the projection receives
+            (post ``obs_fn``), e.g. ``(10, 10)`` or a flat ``int``.
+        projection: ``int`` (default ``256``) for a :class:`LinearProjection`,
+            ``None`` for the no-embedding concat projection, or a builder
+            callable ``(obs_shape, prev_action_dim, rngs) -> nnx.Module``.
         memory_type: ``"identity"`` (no recurrency), ``"rnn"``, ``"gru"`` or
             ``"lstm"``.
         memory_hidden_dim: Hidden-state width for the recurrent cell.
             Ignored when ``memory_type="identity"``.
-        prev_action_dim: If ``> 0``, the carry grows by this many trailing
-            entries holding the previous action's encoding, which is
-            concatenated with the flattened observation before the
-            projection.  ``0`` (default) reproduces the observation-only
-            behaviour exactly.
+        prev_action_dim: Width of the prev-action encoding.  ``0`` (default)
+            reproduces the observation-only behaviour exactly.
         rngs: Flax NNX RNG container used to initialise parameters.
     """
 
     def __init__(
         self,
-        input_dim: int,
-        projection_dim: int | None = 256,
+        input_shape: int | tuple[int, ...],
+        projection: int | None | Callable[..., nnx.Module] = 256,
         memory_type: MemoryType = "identity",
         memory_hidden_dim: int = 128,
         prev_action_dim: int = 0,
@@ -170,17 +215,29 @@ class RecurrentFeatureExtractor(nnx.Module):
         if prev_action_dim < 0:
             raise ValueError(f"prev_action_dim must be >= 0; got {prev_action_dim}.")
 
+        if isinstance(input_shape, int):
+            input_shape = (input_shape,)
+        self.input_shape = tuple(input_shape)
+        flat_in = math.prod(self.input_shape)
+
         self.memory_type = memory_type
         self._memory_hidden_dim = memory_hidden_dim
         self.prev_action_dim = prev_action_dim
 
-        net_in_dim = input_dim + prev_action_dim
-        if projection_dim is None:
-            self.projection = None
-            cell_in_dim = net_in_dim
-        else:
-            self.projection = nnx.Linear(net_in_dim, projection_dim, rngs=rngs)
-            cell_in_dim = projection_dim
+        if projection is None:
+            self.projection = _ConcatProjection()
+        elif isinstance(projection, int):
+            self.projection = LinearProjection(
+                flat_in, prev_action_dim, projection, rngs=rngs
+            )
+        else:  # builder callable (obs_shape, prev_action_dim, rngs) -> Module
+            self.projection = projection(self.input_shape, prev_action_dim, rngs)
+
+        # Infer the projection's output width (= cell input width) with one
+        # dummy forward, so custom modules need not expose an out_dim.
+        dummy_obs = jnp.zeros((1, *self.input_shape), dtype=jnp.float32)
+        dummy_pa = jnp.zeros((1, prev_action_dim), dtype=jnp.float32)
+        cell_in_dim = int(self.projection(dummy_obs, dummy_pa).shape[-1])
 
         if memory_type == "identity":
             self.cell = None
@@ -207,95 +264,65 @@ class RecurrentFeatureExtractor(nnx.Module):
             )
             self.output_dim = memory_hidden_dim
 
-    def __call__(self, carry: jax.Array, obs: jax.Array) -> Tuple[jax.Array, jax.Array]:
+    def __call__(
+        self,
+        carry: jax.Array,
+        obs: jax.Array,
+        prev_action: jax.Array | None = None,
+    ) -> Tuple[jax.Array, jax.Array]:
         """One recurrent step.
 
-        The carry is always a single flat array of shape
+        The carry is the memory state only, a single flat array of shape
         ``(batch, carry_dim)``.  For LSTM, the cell's ``(c, h)`` tuple is
         concatenated along the last axis on output and split back inside this
         method on input, so callers never see the tuple structure.
 
         Args:
-            carry: Hidden state from the previous step, shape
+            carry: Memory state from the previous step, shape
                 ``(batch, carry_dim)``.  Use :meth:`initialize_carry` to build
-                a zero carry of the right shape.  When ``prev_action_dim > 0``
-                the trailing ``prev_action_dim`` entries hold the previous
-                action's encoding (zeros = episode start); they are consumed
-                as network input and passed through to ``new_carry``
-                unchanged — overwriting them with the *new* action is the
-                caller's job (:meth:`write_prev_action`).
-            obs: Observation batch of shape ``(batch, *obs_shape)``.  Any
-                dims beyond the batch axis are flattened before the linear
-                projection.
+                a zero carry of the right shape.
+            obs: Observation batch of shape ``(batch, *obs_shape)``, passed to
+                the projection module with its raw shape (the default
+                projection flattens it internally).
+            prev_action: Encoding of the previously executed action, shape
+                ``(batch, prev_action_dim)`` (zeros = episode start).  ``None``
+                is allowed and normalised to a zero array; when
+                ``prev_action_dim == 0`` it is ignored entirely.
 
         Returns:
             ``(new_carry, y)`` where both are flat arrays;
             ``y`` has shape ``(batch, output_dim)``.
         """
-        x = obs.reshape(obs.shape[0], -1)
-        if self.prev_action_dim:
-            memory_carry = carry[..., : -self.prev_action_dim]
-            prev_action = carry[..., -self.prev_action_dim :]
-            x = jnp.concatenate([x, prev_action], axis=-1)
-        else:
-            memory_carry = carry
-        if self.projection is not None:
-            x = self.projection(x)
+        if self.prev_action_dim and prev_action is None:
+            prev_action = jnp.zeros(
+                (obs.shape[0], self.prev_action_dim), dtype=jnp.float32
+            )
+        z = self.projection(obs, prev_action)
         if self.cell is None:
-            return carry, x
+            return carry, z
         if self.memory_type == "lstm":
-            c, h = jnp.split(memory_carry, 2, axis=-1)
-            (new_c, new_h), out = self.cell((c, h), x)
-            new_memory_carry = jnp.concatenate([new_c, new_h], axis=-1)
-        else:
-            new_memory_carry, out = self.cell(memory_carry, x)
-        if self.prev_action_dim:
-            return jnp.concatenate([new_memory_carry, prev_action], axis=-1), out
-        return new_memory_carry, out
+            c, h = jnp.split(carry, 2, axis=-1)
+            (new_c, new_h), out = self.cell((c, h), z)
+            return jnp.concatenate([new_c, new_h], axis=-1), out
+        new_carry, out = self.cell(carry, z)
+        return new_carry, out
 
     @property
     def carry_dim(self) -> int:
-        """Width of the flat carry vector.
+        """Width of the flat memory carry vector.
 
         ``0`` for identity, ``memory_hidden_dim`` for RNN/GRU, and
-        ``2 * memory_hidden_dim`` for LSTM (concatenated ``[c, h]``), plus
-        ``prev_action_dim`` trailing entries for the prev-action encoding
-        when enabled.
+        ``2 * memory_hidden_dim`` for LSTM (concatenated ``[c, h]``).  The
+        prev-action encoding is *not* part of the carry.
         """
         if self.memory_type == "identity":
-            memory_dim = 0
-        elif self.memory_type == "lstm":
-            memory_dim = 2 * self._memory_hidden_dim
-        else:
-            memory_dim = self._memory_hidden_dim
-        return memory_dim + self.prev_action_dim
-
-    def write_prev_action(
-        self, carry: jax.Array, encoded_action: jax.Array
-    ) -> jax.Array:
-        """Overwrite the prev-action tail of a carry.
-
-        Use after every executed action so the next :meth:`__call__` sees it.
-        Callers that execute a *different* action than the one used to build
-        the carry (e.g. epsilon-greedy overrides on top of ``predict``) must
-        call this with the actually-executed action's encoding.
-
-        Args:
-            carry: Carry of shape ``(..., carry_dim)``.
-            encoded_action: Encoding of the executed action, shape
-                ``(..., prev_action_dim)`` (one-hot for discrete, raw values
-                for continuous).
-
-        Returns:
-            Carry with the trailing ``prev_action_dim`` entries replaced.
-            No-op when ``prev_action_dim == 0``.
-        """
-        if not self.prev_action_dim:
-            return carry
-        return carry.at[..., -self.prev_action_dim :].set(encoded_action)
+            return 0
+        if self.memory_type == "lstm":
+            return 2 * self._memory_hidden_dim
+        return self._memory_hidden_dim
 
     def initialize_carry(self, batch_size: int) -> jax.Array:
-        """Construct a zero carry matching this extractor's memory cell.
+        """Construct a zero memory carry matching this extractor's cell.
 
         Always returns a single flat array of shape
         ``(batch_size, carry_dim)``; LSTM's ``(c, h)`` split is handled
@@ -306,13 +333,19 @@ class RecurrentFeatureExtractor(nnx.Module):
                 a sample batch).
 
         Returns:
-            Zero array of shape ``(batch_size, carry_dim)``.
-            ``carry_dim`` is ``0`` for identity, ``memory_hidden_dim`` for
-            RNN/GRU, and ``2 * memory_hidden_dim`` for LSTM, plus
-            ``prev_action_dim`` when the prev-action input is enabled (the
-            zero tail encodes "no previous action").
+            Zero array of shape ``(batch_size, carry_dim)`` (``0``-width for
+            identity, ``memory_hidden_dim`` for RNN/GRU, ``2 *
+            memory_hidden_dim`` for LSTM).
         """
         return jnp.zeros((batch_size, self.carry_dim), dtype=jnp.float32)
+
+    def initialize_prev_action(self, batch_size: int) -> jax.Array:
+        """Construct a zero prev-action input (``"no previous action"``).
+
+        Returns a ``(batch_size, prev_action_dim)`` zero array — width ``0``
+        when the prev-action input is disabled.
+        """
+        return jnp.zeros((batch_size, self.prev_action_dim), dtype=jnp.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +570,7 @@ def create_iqlearn_from_env(
     expert_data: dict[str, jax.Array],
     buffer_size: int = 10_000,
     hp: Hyperparameters | None = None,
-    projection_dim: int | None = 256,
+    projection: int | None | Callable[..., nnx.Module] = 256,
     memory_type: MemoryType = "identity",
     memory_hidden_dim: int = 128,
     use_prev_action: bool = False,
@@ -590,21 +623,28 @@ def create_iqlearn_from_env(
         hp: :class:`Hyperparameters` instance.  When ``None``, defaults are
             used with ``target_entropy`` chosen automatically for the action
             space type.
-        projection_dim: Width of the linear embedding applied to the
-            flattened observation before the recurrent cell (no activation).
-            Pass ``None`` to skip the projection and feed the raw flattened
-            observation straight into the memory cell.
+        projection: Projection applied before the recurrent cell.  An ``int``
+            (default ``256``) builds a :class:`LinearProjection` of that width
+            (flatten obs, concat prev-action, one ``Linear``, no activation);
+            ``None`` skips the embedding and feeds
+            ``concat([flatten(obs), prev_action])`` straight into the memory
+            cell; a builder callable ``(obs_shape, prev_action_dim, rngs) ->
+            nnx.Module`` gives full control (skip connections, convolutions,
+            ...).  Custom modules receive ``obs`` with its raw (unflattened)
+            ``obs_fn`` shape and must implement
+            ``module(obs, prev_action) -> z``.
         memory_type: ``"identity"`` (no recurrency), ``"rnn"``, ``"gru"`` or
             ``"lstm"``.  Selects the recurrent cell that follows the linear
             projection.
         memory_hidden_dim: Hidden-state width for the recurrent cell.
             Ignored when ``memory_type="identity"``.
         use_prev_action: If True, feed the previously executed action into
-            the feature extractor alongside the observation (one-hot for
-            discrete, raw values for continuous), mirroring the
+            the feature extractor's projection alongside the observation
+            (one-hot for discrete, raw values for continuous), mirroring the
             ``ActionConcatWrapper`` of the original lambda-discrepancy code.
-            The carry grows by ``env_spec.action_dim`` trailing entries that
-            hold the action encoding (zeros at episode start).
+            The FE is built with ``prev_action_dim == env_spec.action_dim``;
+            the prev-action is threaded next to the carry (not packed into
+            it) and reset to zero at episode start.
         actor_dims: Hidden widths of the actor head.  ``()`` is a direct
             linear projection.
         critic_dims: Hidden widths of each SAC critic head.
@@ -715,12 +755,11 @@ def create_iqlearn_from_env(
     fe_obs_shape = jax.eval_shape(
         obs_fn, jax.ShapeDtypeStruct(env_spec.obs_shape, jnp.float32)
     ).shape
-    input_dim = math.prod(fe_obs_shape)
     key = jax.random.key(seed)
     key_fe, key_heads = jax.random.split(key)
     feature_extractor = RecurrentFeatureExtractor(
-        input_dim=input_dim,
-        projection_dim=projection_dim,
+        input_shape=fe_obs_shape,
+        projection=projection,
         memory_type=memory_type,
         memory_hidden_dim=memory_hidden_dim,
         prev_action_dim=env_spec.action_dim if use_prev_action else 0,

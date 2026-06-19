@@ -169,6 +169,15 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--skip-projection",
+    action="store_true",
+    help=(
+        "use the BattleshipProjection module (spatial board plane from the "
+        "prev-action one-hot + residual skip) instead of the plain linear "
+        "embedding — see the original paper's battleship architecture"
+    ),
+)
+parser.add_argument(
     "--use-prev-action",
     dest="use_prev_action",
     action="store_true",
@@ -463,6 +472,7 @@ if args.seed is None:
 
 import jax
 import jax.numpy as jnp
+from flax import nnx
 
 try:
     from lambda_envs.envs.battleship import Battleship
@@ -577,16 +587,66 @@ elif args.memory_type == "lstm":
     CARRY_DIM = 2 * args.memory_hidden_dim
 else:
     CARRY_DIM = args.memory_hidden_dim
-if args.use_prev_action:
-    # The carry tail holds the prev-action one-hot (see
-    # RecurrentFeatureExtractor.prev_action_dim).
-    CARRY_DIM += spec.action_dim
+# The carry is the memory state only; the prev-action is threaded separately
+# (see PREV_ACTION_DIM below), not packed into the carry.
+PREV_ACTION_DIM = spec.action_dim if args.use_prev_action else 0
 
 projection_dim = args.projection_dim if args.projection_dim > 0 else None
 
 
+class BattleshipProjection(nnx.Module):
+    """Spatial, skip-connection projection for battleship (full-module demo).
+
+    Shows the payoff of the configurable-projection API: instead of the plain
+    ``Linear([hit | prev_action_onehot])`` embedding, lay the prev-action
+    one-hot back onto the ``rows x cols`` board, scale it by the current hit
+    bit (so the plane marks *where the last shot landed and whether it hit*),
+    run a small per-cell MLP over that board plane, and add a **residual skip**
+    from the flat ``[hit | prev_action]`` input to the output.
+
+    The builder signature is ``(obs_shape, prev_action_dim, rngs)``; obs arrives
+    with its raw post-``obs_fn`` shape ``(B, 1)`` (the hit bit).  This is a
+    representative topology — adjust it to faithfully match the paper's net.
+    """
+
+    def __init__(self, obs_shape, prev_action_dim, rngs):
+        flat_obs = int(jnp.prod(jnp.array(obs_shape)))
+        self._board = prev_action_dim  # = rows * cols
+        self._flat_in = flat_obs + prev_action_dim
+        out_dim = projection_dim or self._flat_in
+        # Per-cell MLP over the (hit-scaled) board plane.
+        self.cell_mlp = nnx.Linear(1, 8, rngs=rngs)
+        self.board_out = nnx.Linear(prev_action_dim * 8, out_dim, rngs=rngs)
+        # Residual skip from the raw [hit | prev_action] features.
+        self.skip = nnx.Linear(self._flat_in, out_dim, rngs=rngs)
+
+    def __call__(self, obs, prev_action):
+        x = obs.reshape(obs.shape[0], -1)  # (B, 1) hit bit
+        if prev_action is None or prev_action.shape[-1] == 0:
+            # No prev-action: degenerate to the skip path on obs alone.
+            return self.skip(x)
+        hit = x[..., :1]
+        plane = (prev_action * hit)[..., None]  # (B, board, 1): where it hit
+        cells = jax.nn.relu(self.cell_mlp(plane))  # (B, board, 8)
+        board_feat = self.board_out(cells.reshape(cells.shape[0], -1))
+        skip = self.skip(jnp.concatenate([x, prev_action], axis=-1))
+        return jax.nn.relu(board_feat) + skip
+
+
+if args.skip_projection:
+    projection = lambda obs_shape, pa_dim, rngs: BattleshipProjection(
+        obs_shape, pa_dim, rngs
+    )
+else:
+    projection = projection_dim
+
+
 def zero_carry() -> jax.Array:
     return jnp.zeros((CARRY_DIM,), dtype=jnp.float32)
+
+
+def zero_prev_action() -> jax.Array:
+    return jnp.zeros((PREV_ACTION_DIM,), dtype=jnp.float32)
 
 
 # ── evaluation helper ─────────────────────────────────────────────────────────
@@ -608,24 +668,41 @@ def _make_evaluate(fns):
             key, rk = jax.random.split(key)
             obs, env_st = env.reset(rk, env_params)
             carry = zero_carry()
+            prev_action = zero_prev_action()
 
             def step_fn(state, _):
-                obs, env_st, carry, key, ret, done = state
+                obs, env_st, carry, prev_action, key, ret, done = state
                 key, sk, ek = jax.random.split(key, 3)
                 # predict masks invalid actions internally (via mask_fn).
+                # prev_action is the prev-action input (width-0 when disabled).
                 raw, new_carry = fns.predict(
-                    agent_state, obs, carry, sk, deterministic=True
+                    agent_state, obs, carry, sk, deterministic=True,
+                    prev_action=prev_action,
                 )
                 action = jnp.round(raw).astype(jnp.int32)
                 next_obs, next_st, reward, d, _ = env.step(
                     ek, env_st, action, env_params
                 )
+                # Encode the executed action for the next step; reset on done.
+                new_prev_action = (
+                    fns.encode_action(jnp.atleast_1d(raw))
+                    if args.use_prev_action
+                    else prev_action
+                )
                 ret = ret + reward * (1.0 - done)
                 done = jnp.maximum(done, d.astype(jnp.float32))
-                return (next_obs, next_st, new_carry, key, ret, done), None
+                new_prev_action = jnp.where(
+                    done > 0, jnp.zeros_like(new_prev_action), new_prev_action
+                )
+                return (
+                    next_obs, next_st, new_carry, new_prev_action, key, ret, done
+                ), None
 
-            init = (obs, env_st, carry, key, jnp.float32(0.0), jnp.float32(0.0))
-            (_, _, _, _, ep_return, _), _ = jax.lax.scan(
+            init = (
+                obs, env_st, carry, prev_action, key,
+                jnp.float32(0.0), jnp.float32(0.0),
+            )
+            (_, _, _, _, _, ep_return, _), _ = jax.lax.scan(
                 step_fn, init, length=_MAX_STEPS
             )
             return ep_return
@@ -642,7 +719,7 @@ def _make_evaluate(fns):
 _AGENT_KWARGS = dict(
     buffer_size=1,
     hp=hp,
-    projection_dim=projection_dim,
+    projection=projection,
     memory_type=args.memory_type,
     memory_hidden_dim=args.memory_hidden_dim,
     use_prev_action=args.use_prev_action,

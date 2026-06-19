@@ -539,16 +539,19 @@ elif args.memory_type == "lstm":
     CARRY_DIM = 2 * args.memory_hidden_dim
 else:
     CARRY_DIM = args.memory_hidden_dim
-if args.use_prev_action:
-    # The carry tail holds the prev-action one-hot (see
-    # RecurrentFeatureExtractor.prev_action_dim).
-    CARRY_DIM += spec.action_dim
+# The carry is the memory state only; the prev-action is threaded separately
+# (not packed into the carry).
+PREV_ACTION_DIM = spec.action_dim if args.use_prev_action else 0
 
 projection_dim = args.projection_dim if args.projection_dim > 0 else None
 
 
 def zero_carry() -> jax.Array:
     return jnp.zeros((CARRY_DIM,), dtype=jnp.float32)
+
+
+def zero_prev_action() -> jax.Array:
+    return jnp.zeros((PREV_ACTION_DIM,), dtype=jnp.float32)
 
 
 # ── evaluation helper ─────────────────────────────────────────────────────────
@@ -566,23 +569,38 @@ def _make_evaluate(fns):
             key, rk = jax.random.split(key)
             obs, env_st = env.reset(rk, env_params)
             carry = zero_carry()
+            prev_action = zero_prev_action()
 
             def step_fn(state, _):
-                obs, env_st, carry, key, ret, done = state
+                obs, env_st, carry, prev_action, key, ret, done = state
                 key, sk, ek = jax.random.split(key, 3)
                 raw, new_carry = fns.predict(
-                    agent_state, obs, carry, sk, deterministic=True
+                    agent_state, obs, carry, sk, deterministic=True,
+                    prev_action=prev_action,
                 )
                 action = jnp.round(raw).astype(jnp.int32)
                 next_obs, next_st, reward, d, _ = env.step(
                     ek, env_st, action, env_params
                 )
+                new_prev_action = (
+                    fns.encode_action(jnp.atleast_1d(raw))
+                    if args.use_prev_action
+                    else prev_action
+                )
                 ret = ret + reward * (1.0 - done)
                 done = jnp.maximum(done, d.astype(jnp.float32))
-                return (next_obs, next_st, new_carry, key, ret, done), None
+                new_prev_action = jnp.where(
+                    done > 0, jnp.zeros_like(new_prev_action), new_prev_action
+                )
+                return (
+                    next_obs, next_st, new_carry, new_prev_action, key, ret, done
+                ), None
 
-            init = (obs, env_st, carry, key, jnp.float32(0.0), jnp.float32(0.0))
-            (_, _, _, _, ep_return, _), _ = jax.lax.scan(
+            init = (
+                obs, env_st, carry, prev_action, key,
+                jnp.float32(0.0), jnp.float32(0.0),
+            )
+            (_, _, _, _, _, ep_return, _), _ = jax.lax.scan(
                 step_fn, init, length=_MAX_STEPS
             )
             return ep_return
@@ -599,7 +617,7 @@ def _make_evaluate(fns):
 _AGENT_KWARGS = dict(
     buffer_size=1,
     hp=hp,
-    projection_dim=projection_dim,
+    projection=projection_dim,
     memory_type=args.memory_type,
     memory_hidden_dim=args.memory_hidden_dim,
     use_prev_action=args.use_prev_action,

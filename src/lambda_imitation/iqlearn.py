@@ -32,7 +32,7 @@ Typical usage::
 
     key = jax.random.key(42)
     key_fe, key_heads = jax.random.split(key)
-    fe = RecurrentFeatureExtractor(obs_dim, projection_dim=128,
+    fe = RecurrentFeatureExtractor(obs_shape, projection=128,
                                    memory_type="gru", memory_hidden_dim=128,
                                    rngs=nnx.Rngs(key_fe))
     state, fns = create_iqlearn(
@@ -270,10 +270,13 @@ class SACFunctions(NamedTuple):
     """Pure functions returned by :func:`create_iqlearn`.
 
     Attributes:
-        predict: ``(state, obs, carry, key, deterministic, ...) ->
-            (action, new_carry[, extra])`` -- sample or compute a
-            deterministic action for a single observation while threading
-            the recurrent FE carry.  Discrete: returns a ``float32`` action
+        predict: ``(state, obs, carry, key, deterministic, ...,
+            prev_action=None) -> (action, new_carry[, extra])`` -- sample or
+            compute a deterministic action for a single observation while
+            threading the recurrent FE memory carry.  ``prev_action`` (optional,
+            keyword) is the prev-action input for ``use_prev_action`` rollouts —
+            ``None`` for the obs-only case; ``new_carry`` is the memory carry
+            only (no action packed in).  Discrete: returns a ``float32`` action
             index; ``return_prob=True`` additionally returns ``π(a|s)``.
             Continuous: returns a ``(action_dim,)`` action; ``return_unsquashed
             =True`` additionally returns the pre-tanh action.
@@ -310,7 +313,15 @@ class SACFunctions(NamedTuple):
             to ``jax.vmap`` over a leading seed axis to train many seeds
             concurrently in one kernel.  Unlike :attr:`train` it does **not**
             auto-prefill: the caller must warm the buffer first via
-            :attr:`prefill_buffer` and thread ``env_carry`` explicitly.
+            :attr:`prefill_buffer` and thread ``env_carry`` explicitly.  The
+            prev-action input is threaded internally and reset to zero per
+            call (mirroring the per-call carry reset of :attr:`train`).
+        encode_action: ``(action) -> encoding`` -- encode an executed action
+            into the prev-action input expected by :attr:`predict`
+            (``prev_action=``): a one-hot for discrete spaces, the squashed
+            action values for continuous spaces.  Manual rollout loops that
+            enable ``use_prev_action`` use this to thread the prev-action
+            across steps; obs-only callers never need it.
     """
 
     predict: Callable
@@ -318,6 +329,7 @@ class SACFunctions(NamedTuple):
     get_importance_ratios: Callable
     prefill_buffer: Callable
     train_unrolled: Callable
+    encode_action: Callable
 
 
 class DebugFunctions(NamedTuple):
@@ -340,12 +352,12 @@ class DebugFunctions(NamedTuple):
             entropy under the current actor.  Returns a float32 array of
             shape ``(batch,)``.
         calculate_latent: ``(fe_state, target_fe_state, observations,
-            actions, dones, init_carries) -> (latent, target_latent)`` --
-            roll the online and target FEs over batch-major ``(B, T, ...)``
-            sequences with burn-in and per-step done resets (and, with
-            ``use_prev_action``, prev-action carry-tail updates).  Returns
-            time-major latents of shape ``(T - burn_in_length, B,
-            feature_dim)``.
+            actions, dones, init_carries, init_prev_actions=None) ->
+            (latent, target_latent)`` -- roll the online and target FEs over
+            batch-major ``(B, T, ...)`` sequences with burn-in and per-step
+            done resets (and, with ``use_prev_action``, the per-step
+            prev-action input ``enc(a_{t-1})``).  Returns time-major latents
+            of shape ``(T - burn_in_length, B, feature_dim)``.
     """
 
     get_q: Callable
@@ -537,6 +549,7 @@ reward_key = "rewards"
 terminated_key = "terminated"
 behaviour_key = "behaviour_weight"
 carry_key = "carries"
+prev_action_key = "prev_actions"
 
 
 def create_iqlearn(
@@ -592,9 +605,10 @@ def create_iqlearn(
         action_dim: Number of continuous action dimensions, or number of
             discrete actions when ``is_discrete=True``.
         feature_extractor: Initialised ``nnx.Module`` exposing the
-            ``feature_extractor(carry, obs) -> (new_carry, y)`` calling
-            convention and an ``initialize_carry(batch_size)`` helper (see
-            ``utils.RecurrentFeatureExtractor``).  Ownership is transferred;
+            ``feature_extractor(carry, obs, prev_action=None) -> (new_carry,
+            y)`` calling convention and an ``initialize_carry(batch_size)``
+            helper (see ``utils.RecurrentFeatureExtractor``).  Ownership is
+            transferred;
             do not use the module directly after this call.
         key: JAX PRNGKey used to initialise actor / critic / λ-critic
             head parameters.  Split internally so each head gets a
@@ -622,15 +636,17 @@ def create_iqlearn(
             λ-return critics (one per ``lambda{1,2}``) and add their Huber
             discrepancy to the joint loss as a regulariser.
         use_prev_action: If True, the previously executed action is fed to
-            the feature extractor alongside the observation.  The FE must
-            have been built with ``prev_action_dim == action_dim``; the
-            encoding (one-hot for discrete, squashed values for continuous)
-            lives in the trailing ``action_dim`` entries of the carry and is
-            maintained by ``predict`` / the training scans.  A zero tail
-            means "no previous action" (episode start), so every existing
-            carry reset also resets the action input.  Callers that execute
-            a different action than ``predict`` returned must rewrite the
-            tail via ``RecurrentFeatureExtractor.write_prev_action``.
+            the feature extractor's projection alongside the observation
+            (encoded as a one-hot for discrete, squashed values for
+            continuous).  The FE must have been built with
+            ``prev_action_dim == action_dim``.  The prev-action input is
+            threaded *next to* the carry (not packed into it): ``run_env_step``
+            feeds the previously executed action back into ``predict`` and the
+            training scans thread ``enc(a_{t-1})`` per step, both reset to zero
+            at episode boundaries (= "no previous action").  Manual rollout
+            loops compute the next prev-action from the executed action via
+            ``fns.encode_action`` (so executing a different action than
+            ``predict`` returned is handled by encoding whatever was executed).
         critic_layer_norm: If True, apply LayerNorm before the ReLU in every
             hidden layer of all critic heads (SAC twin + λ-critics; the actor
             is untouched).  Stabilises the one-step bootstrap against
@@ -651,13 +667,12 @@ def create_iqlearn(
             (action selection, soft value, entropy, importance ratios, and the
             random pre-fill policy).  ``None`` (default) disables masking and
             leaves behaviour identical to before.
-        burn_in_from_stored_carry: If True, store the FULL recurrent carry
-            (memory state plus, with ``use_prev_action``, the prev-action
-            tail — the tail is not reconstructable inside a sampled window)
-            that the online policy consumed at every step, and initialise
-            the burn-in of each sampled training sequence from the stored
-            carry of its first step instead of zeros (R2D2's "stored state"
-            strategy).  Stored carries are stale with respect to the
+        burn_in_from_stored_carry: If True, store the memory carry (and, with
+            ``use_prev_action``, the prev-action input ``enc(a_{t-1})`` — not
+            reconstructable inside a sampled window) that the online policy
+            consumed at every step, and initialise the burn-in of each sampled
+            training sequence from the stored carry / prev-action of its first
+            step instead of zeros (R2D2's "stored state" strategy).  Stored carries are stale with respect to the
             current FE weights — the burn-in refreshes them — but typically
             allow a much shorter ``params.burn_in_length``.  Costs
             ``carry_dim * online_buffer_size * 4`` bytes of extra buffer
@@ -739,11 +754,6 @@ def create_iqlearn(
             # ActionConcatWrapper — not the unsquashed pre-tanh value.
             return action.reshape(*action.shape[:-1], action_dim)
 
-    def set_prev_action(carry: jax.Array, action: jax.Array) -> jax.Array:
-        if not use_prev_action:
-            return carry
-        return carry.at[..., -action_dim:].set(encode_action(action))
-
     # Online buffer: same obs/action shapes as the reference buffer, plus
     # scalar reward / terminated / (optionally) behaviour-prob fields written
     # by run_env_step.
@@ -756,9 +766,14 @@ def create_iqlearn(
     if not is_discrete:
         online_shapes[unsquashed_action_key] = online_shapes[action_key]
     if burn_in_from_stored_carry:
-        # Full carry (memory + optional prev-action tail) consumed by the
-        # policy at each step; used to initialise the training burn-in.
+        # Memory carry consumed by the policy at each step; used to initialise
+        # the training burn-in.
         online_shapes[carry_key] = (feature_extractor.carry_dim,)
+        if use_prev_action:
+            # The prev-action encoding consumed at each step (now threaded
+            # alongside the carry rather than packed into it); used to seed the
+            # burn-in's first-step prev-action input.
+            online_shapes[prev_action_key] = (action_dim,)
     online_this_keys = [obs_key, action_key, reward_key, terminated_key]
     online_next_keys = [obs_key]
     online_buffer, online_buffer_functions = create_buffer(
@@ -777,6 +792,8 @@ def create_iqlearn(
     ]
     if burn_in_from_stored_carry:
         online_mc_this_keys.append(carry_key)
+        if use_prev_action:
+            online_mc_this_keys.append(prev_action_key)
     online_buffer_lambda_sample = create_sequence_sample(
         online_buffer.size,
         params.online_batch_size,
@@ -1225,6 +1242,7 @@ def create_iqlearn(
             key: jax.Array = jnp.array(0),
             deterministic: bool = False,
             return_prob: bool = False,
+            prev_action: jax.Array | None = None,
         ) -> jax.Array | Tuple[jax.Array, jax.Array]:
             """Compute a discrete action for a single observation.
 
@@ -1232,11 +1250,13 @@ def create_iqlearn(
                 iqlearn: Current agent state.
                 obs: Single observation of shape ``(*obs_shape,)`` (no batch
                     dim).
-                carry: Recurrent FE carry of shape ``(carry_dim,)`` from the
-                    previous step (zero at episode start).  With
-                    ``use_prev_action`` the tail holds the prev-action
-                    encoding; the returned carry already contains the action
-                    chosen here.
+                carry: Recurrent FE memory carry of shape ``(carry_dim,)`` from
+                    the previous step (zero at episode start).
+                prev_action: Encoding of the previously executed action, shape
+                    ``(action_dim,)`` (zeros = episode start).  Optional —
+                    ``None`` (the obs-only / ``use_prev_action=False`` case) is
+                    treated as no previous action.  Compute the next step's
+                    value from the executed action via ``encode_action``.
                 key: JAX PRNG key, used only when ``deterministic=False``.
                 deterministic: If True, return the greedy (argmax) action.
                     If False, sample from the categorical policy.
@@ -1245,25 +1265,23 @@ def create_iqlearn(
 
             Returns:
                 ``(action, new_carry)``, or ``(action, new_carry, prob)`` when
-                ``return_prob=True``.  ``action`` is a ``float32`` index.
+                ``return_prob=True``.  ``action`` is a ``float32`` index;
+                ``new_carry`` is the memory carry only.
             """
             obs_batch = jnp.expand_dims(obs_fn(obs), 0)
             carry_batch = jnp.expand_dims(carry, 0)
+            prev_action_batch = (
+                jnp.expand_dims(prev_action, 0) if prev_action is not None else None
+            )
             new_carry, x = nnx.merge(
                 feature_extractor_graph, iqlearn.feature_extractor
-            )(carry_batch, obs_batch)
+            )(carry_batch, obs_batch, prev_action_batch)
             mask = mask_fn(obs) if mask_fn is not None else None
             logits = _apply_mask(run_actor(iqlearn.actor, x)[0], mask)  # (num_actions,)
             if deterministic:
                 action = jnp.argmax(logits)
             else:
                 action = jax.random.categorical(key, logits)
-            # Record the chosen action in the carry tail so the next step's
-            # FE call sees it.  Callers that execute a different action must
-            # rewrite the tail via write_prev_action.
-            new_carry = set_prev_action(
-                new_carry, jnp.atleast_1d(action.astype(jnp.float32))
-            )
             if return_prob:
                 return (
                     action.astype(jnp.float32),
@@ -1497,6 +1515,7 @@ def create_iqlearn(
             key: jax.Array = jnp.array(0),
             deterministic: bool = False,
             return_unsquashed: bool = False,
+            prev_action: jax.Array | None = None,
         ) -> jax.Array | Tuple[jax.Array, jax.Array]:
             """Compute a continuous action for a single observation.
 
@@ -1504,30 +1523,36 @@ def create_iqlearn(
                 iqlearn: Current agent state.
                 obs: Single observation of shape ``(*obs_shape,)`` (no batch
                     dim).
-                carry: Recurrent FE carry of shape ``(carry_dim,)`` from the
-                    previous step (zero at episode start).  With
-                    ``use_prev_action`` the tail holds the prev-action
-                    encoding; the returned carry already contains the action
-                    chosen here.
+                carry: Recurrent FE memory carry of shape ``(carry_dim,)`` from
+                    the previous step (zero at episode start).
                 key: JAX PRNG key, used only when ``deterministic=False``.
                 deterministic: If True, return the tanh-squashed policy mean
                     (no sampling noise).  If False, sample from the full
                     Gaussian policy.
                 return_unsquashed: If True, also return the pre-tanh action
                     (needed for stored behaviour probabilities).
+                prev_action: Encoding of the previously executed action, shape
+                    ``(action_dim,)`` (zeros = episode start).  Optional —
+                    ``None`` (the obs-only / ``use_prev_action=False`` case) is
+                    treated as no previous action.  For continuous spaces the
+                    encoding is the executed (squashed) action; compute the
+                    next step's value via ``encode_action``.
 
             Returns:
                 ``(action, new_carry)``, or
                 ``(action, new_carry, unsquashed_action)`` when
                 ``return_unsquashed=True``.  ``action`` has shape
                 ``(action_dim,)`` and is scaled / shifted by ``action_scale``
-                and ``action_bias``.
+                and ``action_bias``; ``new_carry`` is the memory carry only.
             """
             obs = jnp.expand_dims(obs, 0)
             carry = jnp.expand_dims(carry, 0)
+            prev_action_batch = (
+                jnp.expand_dims(prev_action, 0) if prev_action is not None else None
+            )
             new_carry, x = nnx.merge(
                 feature_extractor_graph, iqlearn.feature_extractor
-            )(carry, obs)
+            )(carry, obs, prev_action_batch)
             mean, std = get_dist_params(iqlearn.actor, x)
             if deterministic:
                 unsquashed_action = mean
@@ -1535,9 +1560,6 @@ def create_iqlearn(
                 unsquashed_action = jax.random.normal(key, mean.shape) * std + mean
             y_t = jnp.tanh(unsquashed_action)
             action = y_t * action_scale + action_bias
-            # Record the executed (squashed) action in the carry tail so the
-            # next step's FE call sees it.
-            new_carry = set_prev_action(new_carry, action)
             if return_unsquashed:
                 return action[0], new_carry[0], unsquashed_action[0]
             return action[0], new_carry[0]
@@ -1716,13 +1738,14 @@ def create_iqlearn(
     # ------------------------------------------------------------------
 
     def run_env_step(
-        sac: SACState, env, env_params, env_state, env_carry, key: jax.Array
+        sac: SACState, env, env_params, env_state, env_carry, env_prev_action, key: jax.Array
     ):
         """Collect one transition from a gymnax environment into the online buffer.
 
-        Threads the recurrent FE carry across env steps: the carry from the
-        previous call is fed back into ``predict`` so the policy sees the full
-        rollout history.  On episode termination the carry is reset to zero
+        Threads the recurrent FE state across env steps: the memory carry and
+        the prev-action encoding from the previous call are fed back into
+        ``predict`` so the policy sees the full rollout history.  On episode
+        termination both the carry and the prev-action are reset to zero
         (matching the per-episode reset performed during sequence training).
 
         Args:
@@ -1730,32 +1753,45 @@ def create_iqlearn(
             env: Gymnax environment object (static — not traced by JAX).
             env_params: Gymnax environment parameters pytree.
             env_state: Current gymnax environment state pytree.
-            env_carry: FE carry of shape ``(carry_dim,)`` from the previous
-                step (zero on the first step of an episode).
+            env_carry: FE memory carry of shape ``(carry_dim,)`` from the
+                previous step (zero on the first step of an episode).
+            env_prev_action: Encoding of the action executed at the previous
+                step, shape ``(action_dim,)`` (zero on the first step of an
+                episode).  Width-0 / inert when ``use_prev_action=False``.
             key: JAX PRNG key; split internally for action sampling and env step.
 
         Returns:
-            ``(new_sac, new_env_state, new_carry)`` where ``new_carry`` is the
-            post-step FE carry (reset to zero on episode termination).
+            ``(new_sac, new_env_state, new_carry, new_prev_action)`` where
+            ``new_carry`` / ``new_prev_action`` are the post-step FE state
+            (both reset to zero on episode termination).
         """
         key_act, key_step = jax.random.split(key, 2)
         obs = env.get_obs(env_state, env_params)
+        pa = env_prev_action if use_prev_action else None
         if is_discrete:
             action, new_carry, prob = predict(
-                sac, obs, env_carry, key_act, return_prob=True
+                sac, obs, env_carry, key_act, return_prob=True, prev_action=pa
             )
             env_action = jnp.round(action).astype(jnp.int32)
         else:
             if approximate_lambda:
                 action, new_carry, unsquashed_action = predict(
-                    sac, obs, env_carry, key_act, return_unsquashed=True
+                    sac, obs, env_carry, key_act, return_unsquashed=True, prev_action=pa
                 )
                 # behaviour probability density under the squashed Gaussian
                 _, logprob = sample_action_logprob(sac.actor, obs, key_act)[1:3]
                 prob = jnp.exp(logprob)
             else:
-                action, new_carry = predict(sac, obs, env_carry, key_act)
+                action, new_carry = predict(
+                    sac, obs, env_carry, key_act, prev_action=pa
+                )
             env_action = action
+        # Encode the executed action for the next step's prev-action input.
+        new_prev_action = (
+            encode_action(jnp.atleast_1d(action))
+            if use_prev_action
+            else env_prev_action
+        )
         _next_obs, new_env_state, reward, done, _ = env.step(
             key_step, env_state, env_action, env_params
         )
@@ -1770,18 +1806,26 @@ def create_iqlearn(
             if not is_discrete:
                 transition[unsquashed_action_key] = jnp.atleast_1d(unsquashed_action)  # type: ignore
         if burn_in_from_stored_carry:
-            # The PRE-step carry that ``predict`` consumed at this step.
+            # The PRE-step memory carry that ``predict`` consumed at this step.
             # After a terminal the threaded carry is zeroed below, so the
             # next slot stores zeros = episode start — correct for free.
             transition[carry_key] = env_carry
+            if use_prev_action:
+                # The PRE-step prev-action input (enc(a_{t-1})), zeroed by the
+                # done reset below so the next slot encodes "episode start".
+                transition[prev_action_key] = env_prev_action
         new_online_buffer = online_buffer_functions.add(
             sac.online_buffer, transition, terminated=done
         )
         new_carry = jax.lax.select(done, jnp.zeros_like(new_carry), new_carry)
+        new_prev_action = jax.lax.select(
+            done, jnp.zeros_like(new_prev_action), new_prev_action
+        )
         return (
             sac._replace(online_buffer=new_online_buffer),
             new_env_state,
             new_carry,
+            new_prev_action,
         )
 
     def calculate_latent(
@@ -1791,6 +1835,7 @@ def create_iqlearn(
         actions: jax.Array,
         dones: jax.Array,
         init_carries: jax.Array,
+        init_prev_actions: jax.Array | None = None,
     ):
         """Roll the online and target FEs over a sampled sequence.
 
@@ -1800,15 +1845,17 @@ def create_iqlearn(
         The carry is reset to zeros at any step where ``dones=True``.
 
         Online and target FEs share the same scan so they see the same carry
-        reset pattern; both carries are initialised from ``init_carries``.
+        reset pattern; both carries are initialised from ``init_carries`` and
+        both consume the same per-step prev-action input.
 
-        With ``use_prev_action`` the carry tail is overwritten with the
-        encoding of ``actions[t]`` after step ``t`` (and zeroed by the done
-        reset), so step ``t+1`` consumes ``enc(a_t)`` — matching the online
-        path where ``predict`` writes the chosen action into the carry.  At
-        the window start the tail is zero (slot ``t-1`` of a sampled window
-        is not available), the same approximation already made for the
-        memory carry and absorbed by the burn-in.
+        With ``use_prev_action`` the prev-action input is threaded inside the
+        scan: step ``t`` consumes ``enc(a_{t-1})`` and emits ``enc(a_t)`` for
+        ``t+1`` (zeroed by the done reset across episode boundaries) — matching
+        the online path where ``run_env_step`` feeds the previously executed
+        action back into ``predict``.  At the window start the prev-action is
+        ``init_prev_actions`` (the stored value under stored-carry burn-in,
+        else zero — the same approximation already made for the memory carry
+        and absorbed by the burn-in).
 
         Args:
             feature_extractor_state: Online FE state (FE + memory).
@@ -1819,6 +1866,9 @@ def create_iqlearn(
             dones: Per-step termination flags, shape ``(B, T)``.
             init_carries: Initial carries of shape ``(B, carry_dim)`` (zero
                 for the start of each train() call).
+            init_prev_actions: Initial prev-action input of shape
+                ``(B, action_dim)`` for the window's first step.  ``None``
+                defaults to zeros (no previous action).
 
         Returns:
             ``(latent, target_latent)``, both time-major with shape
@@ -1849,32 +1899,36 @@ def create_iqlearn(
                 (observations.shape[0], observations.shape[1], 0), dtype=jnp.float32
             )
 
+        if init_prev_actions is None:
+            init_prev_actions = jnp.zeros(
+                (observations.shape[1], action_encs.shape[-1]), dtype=jnp.float32
+            )
+
         carry_reset = jax.vmap(
             lambda done, carry: jax.lax.select(done, jnp.zeros_like(carry), carry)
         )
 
         def scan_carries(scan_carry, x):
-            carry, target_carry = scan_carry
+            carry, target_carry, prev_action = scan_carry
             obs, done_step, action_enc = x
             done_step = done_step.astype(jnp.bool_)
-            new_carry, y = feature_extractor(carry, obs)
-            new_target_carry, y_target = target_feature_extractor(target_carry, obs)
-            if use_prev_action:
-                # Write this step's action into the tail so step t+1 sees it;
-                # the done reset below zeroes it across episode boundaries.
-                new_carry = new_carry.at[..., -action_dim:].set(action_enc)
-                new_target_carry = new_target_carry.at[..., -action_dim:].set(
-                    action_enc
-                )
+            pa = prev_action if use_prev_action else None
+            new_carry, y = feature_extractor(carry, obs, pa)
+            new_target_carry, y_target = target_feature_extractor(
+                target_carry, obs, pa
+            )
+            # Step t emits enc(a_t) as the prev-action input for step t+1; the
+            # done reset zeroes it (and the carries) across episode boundaries.
             new_carry = carry_reset(done_step, new_carry)
             new_target_carry = carry_reset(done_step, new_target_carry)
+            next_prev_action = carry_reset(done_step, action_enc)
 
-            return (new_carry, new_target_carry), (y, y_target)
+            return (new_carry, new_target_carry, next_prev_action), (y, y_target)
 
         # Pair online + target carries; both start from the same zero tensor.
         burnt_in_carries, _ = jax.lax.scan(
             scan_carries,
-            (init_carries, init_carries),
+            (init_carries, init_carries, init_prev_actions),
             (observations[:_BL], dones[:_BL], action_encs[:_BL]),
             unroll=8,  # fuse across timesteps -> fewer tiny per-step kernels
         )
@@ -2250,10 +2304,17 @@ def create_iqlearn(
             # it.  Pre-fill / never-written slots hold zeros (episode-start
             # semantics), matching the zero-init fallback below.
             init_carries = sample.this_info[carry_key][:, 0]
+            # Prev-action consumed at the window's first step (zeros for
+            # never-written / episode-start slots); None when prev-action is
+            # disabled so calculate_latent falls back to its zero default.
+            init_prev_actions = (
+                sample.this_info[prev_action_key][:, 0] if use_prev_action else None
+            )
         else:
             init_carries = feature_extractor.initialize_carry(
                 params.online_batch_size
             )
+            init_prev_actions = None
 
         observations = sample.this_info[obs_key]
         actions = sample.this_info[action_key]
@@ -2273,6 +2334,7 @@ def create_iqlearn(
             actions,
             terminated,
             init_carries,
+            init_prev_actions,
         )
         # latent / target_latent shapes: (T - _BL, B, feat) -- time-major.
 
@@ -2625,6 +2687,8 @@ def create_iqlearn(
 
     # Single-row (unbatched) zero carry for the env-rollout policy queries.
     _env_zero_carry = feature_extractor.initialize_carry(1)[0]
+    # Zero prev-action input (width-0 / inert when use_prev_action=False).
+    _env_zero_prev_action = feature_extractor.initialize_prev_action(1)[0]
 
     def _train_unrolled(
         sac: SACState,
@@ -2642,19 +2706,26 @@ def create_iqlearn(
         concurrently in one kernel.  The caller is responsible for pre-filling
         the buffer first (see :func:`prefill_buffer`); :func:`train` wraps this
         with the automatic warm-up check, which is itself not vmap-safe.
+
+        The prev-action input (when ``use_prev_action`` is enabled) is threaded
+        internally and started from zero at each call, mirroring how the memory
+        carry is reset fresh per :func:`train` invocation; within the scan it is
+        threaded step-to-step and reset on episode boundaries.
         """
 
         def scan_fun(carry, _):
-            sac, env_state, env_carry, key = carry
+            sac, env_state, env_carry, env_prev_action, key = carry
             key, next_key, env_key, update_key = jax.random.split(key, 4)
-            sac, env_state, env_carry = run_env_step(
-                sac, env, env_params, env_state, env_carry, env_key
+            sac, env_state, env_carry, env_prev_action = run_env_step(
+                sac, env, env_params, env_state, env_carry, env_prev_action, env_key
             )
             sac, metrics = update_step(sac, update_key)
-            return (sac, env_state, env_carry, next_key), metrics
+            return (sac, env_state, env_carry, env_prev_action, next_key), metrics
 
-        (sac, env_state, env_carry, _), metrics = jax.lax.scan(
-            scan_fun, (sac, env_state, env_carry, key), length=train_steps
+        (sac, env_state, env_carry, _, _), metrics = jax.lax.scan(
+            scan_fun,
+            (sac, env_state, env_carry, _env_zero_prev_action, key),
+            length=train_steps,
         )
         metrics = jax.tree.map(lambda x: x.mean(), metrics)
         return sac, env_state, env_carry, metrics
@@ -2830,7 +2901,12 @@ def create_iqlearn(
         return _prefill_jit(sac, env, env_params, env_state, n_steps, key)
 
     fns = SACFunctions(
-        predict, train, get_importance_ratios, prefill_buffer, _train_unrolled
+        predict,
+        train,
+        get_importance_ratios,
+        prefill_buffer,
+        _train_unrolled,
+        encode_action,
     )
     if debug:
         return (

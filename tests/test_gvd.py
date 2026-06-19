@@ -68,7 +68,7 @@ def _make_agent(use_gvd, approximate_lambda=True, seed=0, hp=None):
         expert_data,
         buffer_size=4,
         hp=hp or _tiny_hp(),
-        projection_dim=16,
+        projection=16,
         memory_type="gru",
         memory_hidden_dim=HIDDEN,
         use_prev_action=True,
@@ -324,7 +324,7 @@ class TestEndToEnd:
         state_eq, env_state = fns.prefill_buffer(
             state_eq, env, env_params, env_state, prefill, prefill_key
         )
-        carry = jnp.zeros((HIDDEN + spec.action_dim,), dtype=jnp.float32)
+        carry = jnp.zeros((HIDDEN,), dtype=jnp.float32)  # memory-only carry
         # gvd_agent fixture uses train_steps=4 and metrics are means over the
         # scan.  Identical heads receive identical SF gradients, so they stay
         # equal across all 4 steps and the mean discrepancy must be exactly 0.
@@ -360,7 +360,7 @@ class TestEndToEnd:
 
         batched = jax.tree.map(lambda *xs: jnp.stack(xs), state_a, state_b)
         env_states = jax.tree.map(lambda *xs: jnp.stack(xs), env_state_a, env_state_b)
-        carries = jnp.zeros((2, HIDDEN + spec.action_dim), dtype=jnp.float32)
+        carries = jnp.zeros((2, HIDDEN), dtype=jnp.float32)  # memory-only carry
         run_keys = jnp.stack([ka, kb])
 
         train_v = jax.jit(

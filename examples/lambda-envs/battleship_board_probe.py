@@ -166,8 +166,9 @@ if not args.vis_only:
     # ── env setup ──────────────────────────────────────────────────────────────
     #
     # The previous action reaches the feature extractor via
-    # ``use_prev_action=True`` (its one-hot lives in the carry tail; see
-    # RecurrentFeatureExtractor), so the env is used unwrapped.  The memory
+    # ``use_prev_action=True`` (fed as an explicit input to the projection and
+    # threaded next to the carry; see RecurrentFeatureExtractor), so the env is
+    # used unwrapped.  The memory
     # then sees *which* cell was fired and *whether* it hit, which is exactly
     # what it needs to reconstruct the hidden board.
 
@@ -203,9 +204,9 @@ if not args.vis_only:
 
     # ── carry helper ─────────────────────────────────────────────────────────
     #
-    # CARRY_DIM is the *memory* part (the probe input, as before).  The agent
-    # carry additionally holds the prev-action one-hot in its tail
-    # (use_prev_action=True), so the full carry is CARRY_DIM + N wide.
+    # CARRY_DIM is the memory part (the probe input).  The prev-action one-hot
+    # (use_prev_action=True) is threaded separately, not packed into the carry,
+    # so the agent carry is exactly CARRY_DIM wide.
 
     if args.memory_type == "identity":
         CARRY_DIM = 0
@@ -217,12 +218,17 @@ if not args.vis_only:
     if CARRY_DIM == 0:
         sys.exit("Probe needs recurrent memory (--memory-type rnn/gru/lstm), not identity.")
 
-    AGENT_CARRY_DIM = CARRY_DIM + N  # memory + prev-action tail
+    # The carry is the memory state only; the prev-action one-hot is threaded
+    # separately (not packed into the carry).
+    AGENT_CARRY_DIM = CARRY_DIM
 
     projection_dim = args.projection_dim if args.projection_dim > 0 else None
 
     def zero_carry():
         return jnp.zeros((AGENT_CARRY_DIM,), dtype=jnp.float32)
+
+    def zero_prev_action():
+        return jnp.zeros((N,), dtype=jnp.float32)  # use_prev_action=True here
 
     # ── hyperparameters ──────────────────────────────────────────────────────
 
@@ -254,7 +260,7 @@ if not args.vis_only:
     def _build_agent(seed_val):
         return create_iqlearn_from_env(
             spec, expert_data, buffer_size=1, hp=hp,
-            projection_dim=projection_dim,
+            projection=projection_dim,
             memory_type=args.memory_type,
             memory_hidden_dim=args.memory_hidden_dim,
             critic_dims=(128,),
@@ -280,17 +286,28 @@ if not args.vis_only:
                 key, rk = jax.random.split(key)
                 obs, env_st = env.reset(rk, env_params)
                 carry = zero_carry()
+                prev_action = zero_prev_action()
                 def step_fn(s, _):
-                    obs, env_st, carry, key, ret, done = s
+                    obs, env_st, carry, prev_action, key, ret, done = s
                     key, sk, ek = jax.random.split(key, 3)
-                    raw, nc = fns.predict(agent_state, obs, carry, sk, deterministic=True)
+                    raw, nc = fns.predict(
+                        agent_state, obs, carry, sk, deterministic=True,
+                        prev_action=prev_action,
+                    )
                     action = jnp.round(raw).astype(jnp.int32)
                     nobs, nst, rew, d, _ = env.step(ek, env_st, action, env_params)
+                    npa = fns.encode_action(jnp.atleast_1d(raw))
                     ret = ret + rew * (1.0 - done)
                     done = jnp.maximum(done, d.astype(jnp.float32))
-                    return (nobs, nst, nc, key, ret, done), None
-                init = (obs, env_st, carry, key, jnp.float32(0.0), jnp.float32(0.0))
-                (_, _, _, _, ep_ret, _), _ = jax.lax.scan(step_fn, init, length=_MAX_STEPS)
+                    npa = jnp.where(done > 0, jnp.zeros_like(npa), npa)
+                    return (nobs, nst, nc, npa, key, ret, done), None
+                init = (
+                    obs, env_st, carry, prev_action, key,
+                    jnp.float32(0.0), jnp.float32(0.0),
+                )
+                (_, _, _, _, _, ep_ret, _), _ = jax.lax.scan(
+                    step_fn, init, length=_MAX_STEPS
+                )
                 return ep_ret
             keys = jax.random.split(rng_key, n_episodes)
             return jnp.mean(jax.vmap(run_episode)(keys))
@@ -349,15 +366,17 @@ if not args.vis_only:
             key, rk = jax.random.split(key)
             obs, env_st = env.reset(rk, env_params)
             carry = zero_carry()
+            prev_action = zero_prev_action()
 
             def step_fn(scan_carry, _):
-                obs, env_st, carry, key = scan_carry
+                obs, env_st, carry, prev_action, key = scan_carry
                 board = env_st.board.reshape(-1)        # true ships
                 hits_misses = env_st.hits_misses.reshape(-1)  # shots so far
 
                 key, sk, ek, eps_key = jax.random.split(key, 4)
                 raw, new_carry = fns.predict(
-                    agent_state, obs, carry, sk, deterministic=False
+                    agent_state, obs, carry, sk, deterministic=False,
+                    prev_action=prev_action,
                 )
                 policy_action = jnp.round(raw).astype(jnp.int32)
                 # epsilon-greedy over *legal* actions (illegal shots are wasted)
@@ -367,25 +386,27 @@ if not args.vis_only:
                 ).astype(jnp.int32)
                 use_random = jax.random.uniform(eps_key) < args.collect_epsilon
                 action = jnp.where(use_random, random_action, policy_action)
-                # predict wrote *its* action into the carry tail; on an
-                # epsilon override the executed action differs, so rewrite the
-                # tail (cf. RecurrentFeatureExtractor.write_prev_action).
-                new_carry = new_carry.at[-N:].set(jax.nn.one_hot(action, N))
+                # The next prev-action input is the *executed* action's one-hot
+                # (handles the epsilon override transparently — encode whatever
+                # was executed, not what predict proposed).
+                new_prev_action = jax.nn.one_hot(action, N)
 
                 next_obs, next_st, _, done, _ = env.step(
                     ek, env_st, action, env_params
                 )
                 carry_out = jnp.where(done, zero_carry(), new_carry)
-                return (next_obs, next_st, carry_out, key), {
-                    # Probe the *memory* part only — the prev-action tail is
-                    # an input encoding, not learned state.
+                prev_out = jnp.where(done, zero_prev_action(), new_prev_action)
+                return (next_obs, next_st, carry_out, prev_out, key), {
+                    # The carry is the memory state (the probe's input).
                     "carries": new_carry[:CARRY_DIM],
                     "board_masks": board.astype(jnp.float32),
                     "hits_misses": hits_misses.astype(jnp.float32),
                     "dones": done.astype(jnp.float32),
                 }
 
-            _, data = jax.lax.scan(step_fn, (obs, env_st, carry, key), length=n_steps)
+            _, data = jax.lax.scan(
+                step_fn, (obs, env_st, carry, prev_action, key), length=n_steps
+            )
             return data
 
         def _collect_and_parse(seed_offset):
@@ -905,26 +926,32 @@ if args.mp4:
             key, rk = jax.random.split(key)
             obs, est = env.reset(rk, env_params)
             carry = zero_carry()
+            prev_action = zero_prev_action()
 
             def step_fn(s, _):
-                obs, est, carry, key, alive = s
+                obs, est, carry, prev_action, key, alive = s
                 key, sk, ek = jax.random.split(key, 3)
-                raw, nc = fns.predict(agent_state, obs, carry, sk, deterministic=True)
+                raw, nc = fns.predict(
+                    agent_state, obs, carry, sk, deterministic=True,
+                    prev_action=prev_action,
+                )
                 a = jnp.round(raw).astype(jnp.int32)
                 _nobs, nst, _r, d, _ = env.step(ek, est, a, env_params)
+                npa = jax.nn.one_hot(a, N)
                 valid = alive  # 1 up to and including the terminal step, 0 after
                 new_alive = alive * (1.0 - d.astype(jnp.float32))
+                npa = jnp.where(d, zero_prev_action(), npa)
                 frame = {
-                    # post-step carry (memory part only — the probe's input),
+                    # post-step carry (the memory state — the probe's input),
                     # aligned with the post-step board state
                     "carries": nc[:CARRY_DIM],
                     "board": nst.board.reshape(-1).astype(jnp.float32),
                     "hits": nst.hits_misses.reshape(-1).astype(jnp.float32),
                     "valid": valid,
                 }
-                return (_nobs, nst, nc, key, new_alive), frame
+                return (_nobs, nst, nc, npa, key, new_alive), frame
 
-            init = (obs, est, carry, key, jnp.float32(1.0))
+            init = (obs, est, carry, prev_action, key, jnp.float32(1.0))
             _, data = jax.lax.scan(step_fn, init, length=_MAX_STEPS)
             return data
 

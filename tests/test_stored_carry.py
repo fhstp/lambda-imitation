@@ -1,13 +1,15 @@
 """Tests for R2D2 stored-state burn-in (``burn_in_from_stored_carry``).
 
-With the flag enabled, ``run_env_step`` stores the FULL recurrent carry
-(memory + prev-action tail) that the online policy consumed at each step,
-and ``loss_combined`` initialises the burn-in of every sampled training
-sequence from the stored carry of its first step instead of zeros.
+With the flag enabled, ``run_env_step`` stores the memory carry (and, with
+``use_prev_action``, the prev-action input) that the online policy consumed
+at each step, and ``loss_combined`` initialises the burn-in of every sampled
+training sequence from the stored carry / prev-action of its first step
+instead of zeros.
 
 Covered:
 
-* buffer schema: ``carries`` key present iff the flag is on,
+* buffer schema: ``carries`` (and ``prev_actions``) key present iff the
+  flag is on,
 * equivalence: with only pre-filled (zero-carry) data, one update under the
   flag is metric-identical to the zero-init path,
 * alignment: stored carries are zero exactly at episode starts and non-zero
@@ -21,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from lambda_imitation.iqlearn import Hyperparameters, carry_key
+from lambda_imitation.iqlearn import Hyperparameters, carry_key, prev_action_key
 from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
 
@@ -54,7 +56,7 @@ def _make_agent(stored_carry, seed=0, hp=None, train_steps=4):
         expert_data,
         buffer_size=4,
         hp=hp or _tiny_hp(),
-        projection_dim=16,
+        projection=16,
         memory_type="gru",
         memory_hidden_dim=HIDDEN,
         use_prev_action=True,
@@ -81,7 +83,8 @@ def _prefill(env, env_params, state, fns, key):
     return state, env_state, key
 
 
-CARRY_DIM = HIDDEN + 2  # GRU(8) + CartPole prev-action one-hot (2)
+CARRY_DIM = HIDDEN  # GRU(8); the prev-action is threaded separately, not in carry
+ACTION_DIM = 2  # CartPole prev-action one-hot width
 
 
 # ---------------------------------------------------------------------------
@@ -94,10 +97,14 @@ class TestSchema:
         _, _, spec, state, _, _ = _make_agent(stored_carry=True)
         assert carry_key in state.online_buffer.info
         assert state.online_buffer.info[carry_key].shape[1:] == (CARRY_DIM,)
+        # With use_prev_action the prev-action input is stored alongside.
+        assert prev_action_key in state.online_buffer.info
+        assert state.online_buffer.info[prev_action_key].shape[1:] == (ACTION_DIM,)
 
     def test_buffer_carry_key_absent_when_disabled(self):
         _, _, _, state, _, _ = _make_agent(stored_carry=False)
         assert carry_key not in state.online_buffer.info
+        assert prev_action_key not in state.online_buffer.info
 
 
 # ---------------------------------------------------------------------------
