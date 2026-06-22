@@ -444,6 +444,7 @@ class Hyperparameters(NamedTuple):
     online_buffer_size: int = 10_000
     online_batch_size: int = 256
     tau: float = 0.005
+    periodic_update: int = 1
     lambda1: float = 0.1
     lambda2: float = 0.9
     c_bar: float = 1.0
@@ -2638,40 +2639,41 @@ def create_iqlearn(
             new_log_alpha = sac.log_alpha
             new_alpha = sac.alpha
 
+        update_param = jax.lax.select((sac.update_step + 1) % params.periodic_update == 0, params.tau, 0.0)
         new_fe_target = jax.tree.map(
-            lambda x, y: (1 - params.tau) * x + params.tau * y,
+            lambda x, y: (1 - update_param) * x + update_param * y,
             sac.feature_extractor_target,
             new_fe,
         )
         new_actor_target = jax.tree.map(
-            lambda x, y: (1 - params.tau) * x + params.tau * y,
+            lambda x, y: (1 - update_param) * x + update_param * y,
             sac.actor_target,
             new_actor,
         )
         new_critic_target = jax.tree.map(
-            lambda x, y: (1 - params.tau) * x + params.tau * y,
+            lambda x, y: (1 - update_param) * x + update_param * y,
             sac.critic_target,
             new_critic,
         )
         if approximate_lambda:
             new_lambda1_critic_target = jax.tree.map(
-                lambda x, y: (1 - params.tau) * x + params.tau * y,
+                lambda x, y: (1 - update_param) * x + update_param * y,
                 sac.lambda1_critic_target,
                 new_lambda1_critic,
             )
             new_lambda2_critic_target = jax.tree.map(
-                lambda x, y: (1 - params.tau) * x + params.tau * y,
+                lambda x, y: (1 - update_param) * x + update_param * y,
                 sac.lambda2_critic_target,
                 new_lambda2_critic,
             )
         if use_gvd:
             new_gvd_sf1_target = jax.tree.map(
-                lambda x, y: (1 - params.tau) * x + params.tau * y,
+                lambda x, y: (1 - update_param) * x + update_param * y,
                 sac.gvd_sf1_target,
                 new_gvd_sf1,
             )
             new_gvd_sf2_target = jax.tree.map(
-                lambda x, y: (1 - params.tau) * x + params.tau * y,
+                lambda x, y: (1 - update_param) * x + update_param * y,
                 sac.gvd_sf2_target,
                 new_gvd_sf2,
             )
