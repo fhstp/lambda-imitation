@@ -69,6 +69,15 @@ g.add_argument("--seed", type=int, default=42)
 g.add_argument("--memory-type", choices=("identity", "rnn", "gru", "lstm"), default="gru")
 g.add_argument("--memory-hidden-dim", type=int, default=512)
 g.add_argument("--projection-dim", type=int, default=128)
+g.add_argument("--paper-arch", dest="paper_arch", action="store_true",
+               help="use the original lambda-discrepancy Battleship network "
+                    "(BattleShipActorCriticRNN): a Dense(2H)->relu->concat(hit)"
+                    "->Dense(H)->relu pre-RNN embedding with a hit-bit skip "
+                    "connection (H = --memory-hidden-dim), a GRU memory, and "
+                    "single-hidden-layer actor/critic heads of width H. "
+                    "Overrides --projection-dim and the head dims; the "
+                    "prev-action one-hot is still fed via use_prev_action.")
+parser.set_defaults(paper_arch=False)
 # Value-stability knobs (previously hard-coded in Hyperparameters).  Defaults
 # reproduce the prior behaviour exactly so existing launches are unchanged.
 g.add_argument("--fe-lr", type=float, default=1e-4, help="feature-extractor lr (default 1e-4)")
@@ -231,6 +240,7 @@ if args.wandb and not args.vis_only:
             "memory_type": args.memory_type,
             "memory_hidden_dim": args.memory_hidden_dim,
             "projection_dim": args.projection_dim,
+            "paper_arch": args.paper_arch,
             "approximate_lambda": args.approximate_lambda,
             "use_gvd": args.gvd,
             "gvd_coef": args.gvd_coef,
@@ -727,7 +737,11 @@ if not args.vis_only:
         sys.exit("lambda-envs required.  pip install lambda-envs")
 
     from lambda_imitation.iqlearn import Hyperparameters
-    from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
+    from lambda_imitation.utils import (
+        battleship_projection,
+        create_iqlearn_from_env,
+        env_spec_from_gymnax,
+    )
 
     # ── env setup ──────────────────────────────────────────────────────────────
     #
@@ -833,7 +847,23 @@ if not args.vis_only:
     # separately (not packed into the carry).
     AGENT_CARRY_DIM = CARRY_DIM
 
-    projection_dim = args.projection_dim if args.projection_dim > 0 else None
+    # Network architecture.  --paper-arch swaps the projection + head sizes
+    # for the original lambda-discrepancy BattleShipActorCriticRNN: a custom
+    # hit-skip-connection embedding (width H = --memory-hidden-dim) feeding the
+    # GRU, with single-hidden-layer actor/critic heads of width H.  Otherwise
+    # the default LinearProjection(--projection-dim) + (256, 256) heads.
+    if args.paper_arch:
+        H = args.memory_hidden_dim
+        # With no recurrent cell (identity), add the third Dense(H)->relu so the
+        # embedding matches the paper's memoryless BattleShipActorCritic; with a
+        # GRU the cell provides that depth (BattleShipActorCriticRNN).
+        projection_arg = battleship_projection(H, extra_layer=_memoryless)
+        actor_dims = (H,)
+        critic_dims = (H,)
+    else:
+        projection_arg = args.projection_dim if args.projection_dim > 0 else None
+        actor_dims = (256, 256)
+        critic_dims = (256, 256)
 
     def zero_carry():
         return jnp.zeros((AGENT_CARRY_DIM,), dtype=jnp.float32)
@@ -871,11 +901,11 @@ if not args.vis_only:
     def _build_agent(seed_val):
         return create_iqlearn_from_env(
             spec, expert_data, buffer_size=1, hp=hp,
-            projection=projection_dim,
+            projection=projection_arg,
             memory_type=args.memory_type,
             memory_hidden_dim=args.memory_hidden_dim,
-            actor_dims=(256, 256),
-            critic_dims=(256, 256),
+            actor_dims=actor_dims,
+            critic_dims=critic_dims,
             lambda1_critic_dims=(64,64,64),
             lambda2_critic_dims=(64,64,64),
             train_steps=args.train_steps,

@@ -133,6 +133,116 @@ class _ConcatProjection(nnx.Module):
         return x
 
 
+class BattleshipProjection(nnx.Module):
+    """Pre-RNN embedding from the original lambda-discrepancy Battleship net.
+
+    Reproduces the embedding of ``BattleShipActorCriticRNN`` in the original
+    lambda-discrepancy code (``lamb/models.py``).  Channel 0 of the
+    observation is the *hit* bit (did the last shot hit a ship), and it is
+    re-injected via a skip connection after the first dense layer so the
+    recurrent memory never loses the raw hit signal under the projection::
+
+        x = concat([obs, prev_action])          # [hit | …obs… | a_{t-1}]
+        e = relu(Dense(2H)(x))
+        e = concat([hit, e])                    # skip-connect the raw hit bit
+        e = relu(Dense(H)(e))                   # -> recurrent cell
+        e = relu(Dense(H)(e))                   # only if extra_layer=True
+
+    The observation fed in must carry the hit bit at channel 0; the battleship
+    probe's ``obs_fn`` already strips the action mask, leaving ``[hit]`` (or
+    ``[hit | …]`` under ``--full-obs``).  ``prev_action`` is concatenated
+    before the first layer — the probe threads the previously-fired cell's
+    one-hot here, which the paper's mask-only variant omits (pass a zero-width
+    array / ``prev_action_dim == 0`` to reproduce that).  Dense layers use the
+    paper's orthogonal(√2) kernel init with zero bias.
+
+    The original code has two networks: ``BattleShipActorCriticRNN`` feeds the
+    two-layer embedding straight into a GRU, while the memoryless
+    ``BattleShipActorCritic`` inserts a *third* ``Dense(H)→relu`` in place of
+    the recurrent cell (to keep depth comparable).  Set ``extra_layer=True``
+    to reproduce that third layer — do so exactly when the feature extractor
+    has no recurrent cell (``memory_type="identity"``).
+
+    Args:
+        hidden_size: Width ``H``.  The first dense layer is ``2H`` wide, the
+            second (cell-input) layer ``H``.  Tie this to the recurrent cell's
+            ``memory_hidden_dim``.
+        flat_in: Flattened observation width (product of ``obs_shape``).
+        prev_action_dim: Width of the prev-action encoding (``0`` = obs only).
+        extra_layer: If True, append a third ``Dense(H)→relu`` (the
+            ``BattleShipActorCritic`` memoryless variant).  Leave False when a
+            recurrent cell follows the projection.
+        rngs: Flax NNX RNG container.
+    """
+
+    def __init__(
+        self, hidden_size: int, flat_in: int, prev_action_dim: int,
+        *, extra_layer: bool = False, rngs: nnx.Rngs,
+    ):
+        kernel_init = nnx.initializers.orthogonal(math.sqrt(2))
+        bias_init = nnx.initializers.constant(0.0)
+        self.dense1 = nnx.Linear(
+            flat_in + prev_action_dim, 2 * hidden_size,
+            kernel_init=kernel_init, bias_init=bias_init, rngs=rngs,
+        )
+        # +1 input feature for the re-injected raw hit bit.
+        self.dense2 = nnx.Linear(
+            2 * hidden_size + 1, hidden_size,
+            kernel_init=kernel_init, bias_init=bias_init, rngs=rngs,
+        )
+        # Memoryless variant: a third dense replaces the recurrent cell.
+        self.dense3 = (
+            nnx.Linear(
+                hidden_size, hidden_size,
+                kernel_init=kernel_init, bias_init=bias_init, rngs=rngs,
+            )
+            if extra_layer else None
+        )
+
+    def __call__(self, obs: jax.Array, prev_action: jax.Array | None) -> jax.Array:
+        x = obs.reshape(obs.shape[0], -1)
+        hit = x[..., 0:1]
+        if prev_action is not None and prev_action.shape[-1]:
+            x = jnp.concatenate([x, prev_action], axis=-1)
+        e = nnx.relu(self.dense1(x))
+        e = jnp.concatenate([hit, e], axis=-1)
+        e = nnx.relu(self.dense2(e))
+        if self.dense3 is not None:
+            e = nnx.relu(self.dense3(e))
+        return e
+
+
+def battleship_projection(
+    hidden_size: int, extra_layer: bool = False
+) -> Callable[..., nnx.Module]:
+    """Projection builder for the original Battleship architecture.
+
+    Returns a callable with the ``(obs_shape, prev_action_dim, rngs) ->
+    nnx.Module`` signature :class:`RecurrentFeatureExtractor` expects, building
+    a :class:`BattleshipProjection` of width ``hidden_size``.  Pair it with
+    ``memory_type="gru"``, ``memory_hidden_dim=hidden_size`` and single-hidden
+    actor/critic heads of width ``hidden_size`` to reproduce
+    ``BattleShipActorCriticRNN``.
+
+    Args:
+        hidden_size: Embedding / cell width ``H`` (see
+            :class:`BattleshipProjection`).
+        extra_layer: Forwarded to :class:`BattleshipProjection`.  Set True for
+            ``memory_type="identity"`` to add the third ``Dense(H)→relu`` of the
+            memoryless ``BattleShipActorCritic`` (which has no recurrent cell to
+            provide that depth).
+    """
+
+    def build(obs_shape, prev_action_dim, rngs):
+        flat_in = math.prod(obs_shape)
+        return BattleshipProjection(
+            hidden_size, flat_in, prev_action_dim,
+            extra_layer=extra_layer, rngs=rngs,
+        )
+
+    return build
+
+
 class RecurrentFeatureExtractor(nnx.Module):
     """Projection module followed by an optional recurrent memory cell.
 
