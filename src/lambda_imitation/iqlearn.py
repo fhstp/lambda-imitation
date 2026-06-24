@@ -256,6 +256,7 @@ class SACState(NamedTuple):
     alpha: jax.Array
     log_alpha: jax.Array
     online_buffer: Buffer
+    update_step: jax.Array
     # GVD successor-feature heads (appended with defaults so positional
     # constructions and old pickles of the 19-field layout keep working).
     gvd_sf1: nnx.GraphState = None
@@ -1069,6 +1070,7 @@ def create_iqlearn(
         remove_weak_types(jnp.exp(log_alpha)),
         remove_weak_types(log_alpha),
         remove_weak_types(online_buffer),
+        jnp.zeros(tuple(), dtype=jnp.int32),
         gvd_sf1=remove_weak_types(gvd_sf1_state) if use_gvd else None,
         gvd_sf2=remove_weak_types(gvd_sf2_state) if use_gvd else None,
         # SF targets start equal to online weights, like all other targets.
@@ -2714,6 +2716,7 @@ def create_iqlearn(
                 new_alpha,
                 new_log_alpha,  # type: ignore
                 sac.online_buffer,
+                sac.update_step + 1,
                 gvd_sf1=new_gvd_sf1 if use_gvd else sac.gvd_sf1,
                 gvd_sf2=new_gvd_sf2 if use_gvd else sac.gvd_sf2,
                 gvd_sf1_target=(
