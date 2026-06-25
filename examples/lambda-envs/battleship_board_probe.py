@@ -66,6 +66,18 @@ g = parser.add_argument_group("agent training")
 g.add_argument("--rounds", type=int, default=100, help="training rounds (default 100)")
 g.add_argument("--train-steps", type=int, default=10_000, help="env steps per round (default 10 000)")
 g.add_argument("--seed", type=int, default=42)
+g.add_argument("--num-seeds", type=int, default=1,
+               help="number of seeds to run; seeds are args.seed + i.  >1 runs "
+                    "the full pipeline per seed concurrently (vmapped) and logs "
+                    "per-seed (seed_i/) plus aggregated (agg/ mean,std,sterr) "
+                    "metrics (default 1; sweep default 5).")
+g.add_argument("--concurrent-seeds", type=int, default=0,
+               help="seeds trained concurrently in one vmapped+jitted kernel "
+                    "(0 = all --num-seeds in a single group, the common case).  "
+                    "When set, --num-seeds must be divisible by it.")
+g.add_argument("--final-return-window", type=int, default=10,
+               help="number of final rounds averaged for the smoothed final "
+                    "return / steps-to-clear (default 10).")
 g.add_argument("--memory-type", choices=("identity", "rnn", "gru", "lstm"), default="gru")
 g.add_argument("--memory-hidden-dim", type=int, default=512)
 g.add_argument("--projection-dim", type=int, default=128)
@@ -192,6 +204,44 @@ g.add_argument("--wandb-run-name", default=None, metavar="NAME", help="W&B run n
 
 args, _ = parser.parse_known_args()
 
+# ── wandb sweep support ───────────────────────────────────────────────────────
+#
+# Under ``wandb agent`` the hyperparameters arrive via the sweep config, not the
+# CLI: the agent passes underscore-style ``--name=value`` args that match neither
+# the dashed flags nor the store_true/store_false pairs (parse_known_args drops
+# them).  Attach to the run the agent pre-created and override args from its
+# config instead.  Mirrors battleship_sac_mc.py's sweep block.
+
+_SWEEP_RUN = None
+if os.environ.get("WANDB_SWEEP_ID"):
+    import wandb as _wandb_mod
+
+    _SWEEP_RUN = _wandb_mod.init()
+    _SWEEP_ALIASES = {"use_gvd": "gvd"}
+    _SWEEP_IGNORED = {"action_masked", "buffer_size"}  # not script knobs
+    _ARG_TYPES = {a.dest: a.type for a in parser._actions if callable(a.type)}
+    for _k, _v in dict(_SWEEP_RUN.config).items():
+        _key = _SWEEP_ALIASES.get(_k, _k)
+        if _key in _SWEEP_IGNORED:
+            continue
+        if not hasattr(args, _key):
+            print(f"sweep config: ignoring unknown parameter {_k!r}")
+            continue
+        if isinstance(_v, str) and _v.lower() in ("true", "false"):
+            _v = _v.lower() == "true"
+        elif _key in _ARG_TYPES:
+            _v = _ARG_TYPES[_key](_v)
+        setattr(args, _key, _v)
+    # The agent owns exactly one run; log everything into it.
+    args.wandb = True
+    # Give every sweep run its own output dir (keyed by the unique W&B run id) so
+    # several agents can share one machine without clobbering each other's
+    # per-seed artifacts (agent_seed*.pkl, dataset_seed*.pkl, probe_seed*.pkl,
+    # seed*/ image dirs).  Applied AFTER the config overrides so it also wins when
+    # the sweep config pins ``output_dir``.
+    args.output_dir = os.path.join(args.output_dir, f"run_{_SWEEP_RUN.id}")
+    print(f"sweep run {_SWEEP_RUN.id}: output_dir → {args.output_dir}")
+
 # ── always-needed imports ────────────────────────────────────────────────────
 
 import jax
@@ -216,10 +266,7 @@ if args.wandb and not args.vis_only:
         sys.exit("wandb not installed.  Install with:  pip install wandb")
 
     _algo = ("SAC+LD" if args.approximate_lambda else "SAC") + ("+GVD" if args.gvd else "")
-    _wandb.init(
-        project=args.wandb_project,
-        name=args.wandb_run_name,
-        config={
+    _wandb_cfg = {
             "env": "Battleship",
             "experiment": "board_probe",
             "algo": _algo,
@@ -265,13 +312,31 @@ if args.wandb and not args.vis_only:
             "probe_eval_steps": args.probe_eval_steps,
             "probe_eval_collect_steps": args.probe_eval_collect_steps,
             "use_sac": args.use_sac,
-        },
-    )
+            "num_seeds": args.num_seeds,
+            "concurrent_seeds": args.concurrent_seeds,
+            "final_return_window": args.final_return_window,
+    }
+    if _SWEEP_RUN is not None:
+        # The sweep agent already created (and owns) the run — reuse it; just
+        # merge our config so the dashboard shows the resolved hyperparameters.
+        _SWEEP_RUN.config.update(_wandb_cfg, allow_val_change=True)
+    else:
+        _wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config=_wandb_cfg,
+        )
     _wandb.define_metric("env_interactions")
     _wandb.define_metric("agent/*", step_metric="env_interactions")
     _wandb.define_metric("probe_eval/*", step_metric="env_interactions")
     _wandb.define_metric("probe_step")
     _wandb.define_metric("probe/*", step_metric="probe_step")
+    # Multi-seed: per-seed series under seed_i/, aggregates under agg/ and
+    # probe_eval/agg/ and eval/agg/, all keyed to env_interactions.
+    if args.num_seeds > 1:
+        _wandb.define_metric("agg/*", step_metric="env_interactions")
+        for _i in range(args.num_seeds):
+            _wandb.define_metric(f"seed_{_i}/*", step_metric="env_interactions")
 
 # ── probe MLP (pure JAX — no external deps) ──────────────────────────────────
 
@@ -428,12 +493,21 @@ def _draw_acc(ax, grid, title):
     ax.set_yticks([])
 
 
-def _fig_episode(probe_params, ds_c, ds_b, ds_hm, ds_eb, ve_idx, out_path, tag_str, vis_frames):
-    """Render one stored episode (truth vs probe) as a multi-frame PNG → out_path."""
+def _fig_episode(probe_params, ds_c, ds_b, ds_hm, ds_eb, ve_idx, out_path, tag_str,
+                 vis_frames, probs_all=None):
+    """Render one stored episode (truth vs probe) as a multi-frame PNG → out_path.
+
+    ``probs_all`` (host sigmoid probabilities for the *full* ``ds_c``, shape
+    ``(len(ds_c), 2N)``) lets the caller skip the in-helper GPU forward pass —
+    used by the multi-seed async-overlap path so rendering is pure CPU.
+    """
     start, end = int(ds_eb[ve_idx]), int(ds_eb[ve_idx + 1])
-    ep_c, ep_b, ep_hm = ds_c[start:end], ds_b[start:end], ds_hm[start:end]
+    ep_b, ep_hm = ds_b[start:end], ds_hm[start:end]
     ep_len = end - start
-    preds = np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(ep_c))))
+    if probs_all is not None:
+        preds = np.asarray(probs_all)[start:end]
+    else:
+        preds = np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(ds_c[start:end]))))
     ship_preds, fired_preds = preds[:, :N], preds[:, N:]
     nf = min(vis_frames, ep_len)
     idxs = np.linspace(0, ep_len - 1, nf, dtype=int)
@@ -458,9 +532,12 @@ def _fig_episode(probe_params, ds_c, ds_b, ds_hm, ds_eb, ve_idx, out_path, tag_s
     return out_path
 
 
-def _fig_accuracy(probe_params, t_carries, t_boards, t_hm, out_path, tag_str):
+def _fig_accuracy(probe_params, t_carries, t_boards, t_hm, out_path, tag_str, probs_all=None):
     """Per-cell accuracy (unfired=inference, fired=retention) → out_path."""
-    probs = np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(t_carries))))[:, :N]
+    if probs_all is not None:
+        probs = np.asarray(probs_all)[:, :N]
+    else:
+        probs = np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(t_carries))))[:, :N]
     preds = (probs > 0.5).astype(np.float32)
     targets = np.asarray(t_boards).astype(np.float32)
     correct = (preds == targets).astype(np.float32)
@@ -491,9 +568,12 @@ def _fig_accuracy(probe_params, t_carries, t_boards, t_hm, out_path, tag_str):
     return out_path
 
 
-def _fig_retention(probe_params, t_carries, t_boards, t_hm, t_eb, out_path, tag_str):
+def _fig_retention(probe_params, t_carries, t_boards, t_hm, t_eb, out_path, tag_str, probs_all=None):
     """Fired-cell mean P(ship) vs steps-since-fired → out_path (None if no data)."""
-    probs = np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(t_carries))))[:, :N]
+    if probs_all is not None:
+        probs = np.asarray(probs_all)[:, :N]
+    else:
+        probs = np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(t_carries))))[:, :N]
     targets = np.asarray(t_boards).astype(np.float32)
     hm = np.asarray(t_hm)
     ship_frac = float((targets == 1).mean())
@@ -559,14 +639,22 @@ def _fig_retention(probe_params, t_carries, t_boards, t_hm, t_eb, out_path, tag_
     return out_path
 
 
-def _fig_movie(probe_params, ep_c, ep_b, ep_hm, out_path_base, tag_str, movie_tag, fps=10):
-    """Animate one episode (truth vs probe) → mp4 (or gif fallback); returns path."""
+def _fig_movie(probe_params, ep_c, ep_b, ep_hm, out_path_base, tag_str, movie_tag, fps=10,
+               probs_all=None):
+    """Animate one episode (truth vs probe) → mp4 (or gif fallback); returns path.
+
+    ``probs_all`` (host sigmoid probabilities for ``ep_c``) skips the GPU forward
+    pass for the async-overlap path.
+    """
     from matplotlib.animation import FuncAnimation
 
-    ep_len = len(ep_c)
+    ep_len = len(ep_b) if probs_all is not None else len(ep_c)
     if ep_len == 0:
         return None
-    ep_preds = np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(ep_c))))
+    if probs_all is not None:
+        ep_preds = np.asarray(probs_all)
+    else:
+        ep_preds = np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(ep_c))))
     ep_ship, ep_fired = ep_preds[:, :N], ep_preds[:, N:]
 
     fig, (ax_t, ax_p) = plt.subplots(1, 2, figsize=(10, 6))
@@ -898,6 +986,52 @@ if not args.vis_only:
         int(env_params.max_steps_in_episode), args.rows * args.cols + 1
     )
 
+    # ── multi-seed helpers ─────────────────────────────────────────────────────
+    #
+    # Concurrent seeds are trained in one vmapped+jitted kernel: per-seed agent
+    # states are stacked along a leading axis, vmapped over, then split back out.
+    # Mirrors battleship_sac_mc.py:754-762.
+
+    def _stack_states(states):
+        """Stack a list of per-seed pytrees along a new leading axis."""
+        return jax.tree.map(lambda *xs: jnp.stack(xs), *states)
+
+    def _unstack_state(batched, j):
+        """Pull seed ``j``'s pytree out of a leading-axis-batched state."""
+        return jax.tree.map(lambda x: x[j], batched)
+
+    def _split_each(keys):
+        """Split a batch of PRNG keys, returning two batches (carry, fresh)."""
+        out = jax.vmap(lambda k: jax.random.split(k))(keys)
+        return out[:, 0], out[:, 1]
+
+    def _agg(values, prefix):
+        """mean / std / sterr (+ band edges) of per-seed scalars (NaN-safe).
+
+        std is the sample std (ddof=1; →0 when n≤1) and sterr = std/√n, so the
+        aggregates are the natural across-seed uncertainty bars.  NaN entries
+        (e.g. AUROC when a class is absent for a seed) are dropped.
+
+        Also logs precomputed band edges so a plain W&B line panel can show the
+        error bands directly (no Vega calculate transform needed):
+        ``lo_sd``/``hi_sd`` = mean ∓ std, ``lo_se``/``hi_se`` = mean ∓ sterr.
+        """
+        a = np.asarray(values, dtype=np.float64).ravel()
+        a = a[~np.isnan(a)]
+        n = a.size
+        mean = float(a.mean()) if n else float("nan")
+        std = float(a.std(ddof=1)) if n > 1 else 0.0
+        sterr = std / np.sqrt(n) if n > 1 else 0.0
+        return {
+            f"{prefix}/mean": mean,
+            f"{prefix}/std": std,
+            f"{prefix}/sterr": sterr,
+            f"{prefix}/lo_sd": mean - std,
+            f"{prefix}/hi_sd": mean + std,
+            f"{prefix}/lo_se": mean - sterr,
+            f"{prefix}/hi_se": mean + sterr,
+        }
+
     def _build_agent(seed_val):
         return create_iqlearn_from_env(
             spec, expert_data, buffer_size=1, hp=hp,
@@ -1192,9 +1326,14 @@ if not args.vis_only:
             _step(remainder)
         return params
 
-    def _probe_metrics(probe_params, t_carries, t_boards, t_hm):
-        """Headline decodability metrics on a held-out test set (no plots)."""
-        probs_all = np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(t_carries))))
+    def _probe_metrics_from_probs(probs_all, t_boards, t_hm):
+        """Headline decodability metrics from precomputed host probabilities.
+
+        Split out from :func:`_probe_metrics` so the multi-seed path can score
+        from predictions already pulled to host (pure numpy — no GPU op), which
+        is what lets the matplotlib rendering overlap the next training round.
+        """
+        probs_all = np.asarray(probs_all)
         probs = probs_all[:, :N]            # P(ship)
         fired_probs = probs_all[:, N:]      # P(fired)
         preds = (probs > 0.5).astype(np.float32)
@@ -1227,6 +1366,11 @@ if not args.vis_only:
             "fired_pred_auroc": _auroc(fired_probs, fired_targets),
             "fired_pred_acc": float((fired_pred == fired_targets).mean()),
         }
+
+    def _probe_metrics(probe_params, t_carries, t_boards, t_hm):
+        """Headline decodability metrics on a held-out test set (no plots)."""
+        probs_all = np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(t_carries))))
+        return _probe_metrics_from_probs(probs_all, t_boards, t_hm)
 
     def _run_probe_eval(agent_state, rnd):
         """Collect → train a lightweight probe → score it; log under probe_eval/.
@@ -1313,6 +1457,477 @@ if not args.vis_only:
             if qpi_mov is not None:
                 payload["probe_eval/critic_actor_movie"] = _wandb.Video(qpi_mov)
             _wandb.log(payload)
+
+    # ════════════════════════════════════════════════════════════════════════
+    #  Multi-seed pipeline (--num-seeds > 1): train concurrent seeds in one
+    #  vmapped kernel, run the full pipeline per seed, and log per-seed (seed_i/)
+    #  plus aggregated (agg/ mean,std,sterr) metrics.  Self-contained: exits
+    #  before the single-seed module-level code below.
+    # ════════════════════════════════════════════════════════════════════════
+
+    if args.num_seeds > 1:
+        CONCURRENT = args.concurrent_seeds or args.num_seeds
+        if CONCURRENT < 1:
+            sys.exit("--concurrent-seeds must be >= 1")
+        if args.num_seeds % CONCURRENT != 0:
+            sys.exit(
+                f"--num-seeds ({args.num_seeds}) must be divisible by "
+                f"--concurrent-seeds ({CONCURRENT})."
+            )
+        seeds = [args.seed + i for i in range(args.num_seeds)]
+        n_groups = args.num_seeds // CONCURRENT
+        print(
+            f"{args.num_seeds} seed(s) in {n_groups} group(s) of {CONCURRENT} "
+            f"trained concurrently (vmap); {args.rounds} rounds × "
+            f"{args.train_steps} steps each."
+        )
+
+        # ── vmapped train / reset / eval over the leading seed axis ───────────
+        # fns.train has host-side control flow (auto-prefill) and is NOT
+        # vmappable; use the documented vmap-safe split instead — prefill the
+        # buffer once, then run the jittable fns.train_unrolled each round,
+        # threading a per-round zero env_carry (cf. battleship_sac_mc.py:881-895).
+        PREFILL_STEPS = hp.online_batch_size * (
+            hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
+        )
+        _reset_v = jax.jit(jax.vmap(lambda k: env.reset(k, env_params)))
+        _prefill_v = jax.jit(
+            jax.vmap(
+                lambda s, es, k: fns.prefill_buffer(
+                    s, env, env_params, es, PREFILL_STEPS, k),
+                in_axes=(0, 0, 0),
+            ),
+            donate_argnums=(0, 1),
+        )
+        _train_v = jax.jit(
+            jax.vmap(
+                lambda s, es, ec, k: fns.train_unrolled(s, env, env_params, es, ec, k),
+                in_axes=(0, 0, 0, 0),
+            ),
+            donate_argnums=(0, 1),
+        )
+
+        def _evaluate_v(states_b, keys, n):
+            return jax.vmap(lambda s, k: evaluate(s, k, n_episodes=n))(states_b, keys)
+
+        def _evaluate_critic_v(states_b, keys, n):
+            return jax.vmap(
+                lambda s, k: evaluate_critic(s, k, n_episodes=n))(states_b, keys)
+
+        # ── vmapped collect + probe-train (used by periodic eval and Phase 2/3)
+        def _collect_v(states_b, keys, n_steps):
+            return jax.vmap(lambda s, k: collect_rollout(s, k, n_steps))(states_b, keys)
+
+        def _ep_bounds(dones, length):
+            di = np.where(np.asarray(dones) > 0.5)[0]
+            es = np.concatenate([[0], di + 1])
+            es = es[es < length]
+            return np.concatenate([es, [length]])
+
+        def _targets_b(boards_b, hm_b):
+            # [ship(N) | fired(N)] per seed → (S, n, 2N).
+            return jnp.concatenate(
+                [jnp.asarray(boards_b),
+                 (jnp.asarray(hm_b) != 0).astype(jnp.float32)], axis=-1)
+
+        def _train_probe_v(c_b, t_b, init_keys, train_keys, n_steps):
+            """Vmapped probe training: (S, n, CARRY_DIM)/(S, n, 2N) → batched params."""
+            params = jax.vmap(
+                lambda k: init_probe_params(k, CARRY_DIM, 2 * N, args.probe_hidden_dim)
+            )(init_keys)
+            opt_state = jax.vmap(_probe_opt.init)(params)
+            _CHUNK = 50_000
+            n_chunks = n_steps // _CHUNK
+            remainder = n_steps % _CHUNK
+            keys = train_keys
+
+            def _chunk_v(p, o, k, nsteps):
+                # vmap over params/opt/key AND the per-seed data slices (c_b/t_b
+                # are (S, n, …) — each lane must train on its own slice).
+                return jax.vmap(
+                    lambda p, o, k, c, t: _probe_train_chunk(
+                        p, o, k, c, t, nsteps, args.probe_batch_size),
+                    in_axes=(0, 0, 0, 0, 0),
+                )(p, o, k, c_b, t_b)
+
+            for _ in range(n_chunks):
+                params, opt_state, keys, _loss = _chunk_v(params, opt_state, keys, _CHUNK)
+            if remainder > 0:
+                params, opt_state, keys, _loss = _chunk_v(
+                    params, opt_state, keys, remainder)
+            return params
+
+        # ── periodic probe-eval across all seeds, split GPU-compute / CPU-render
+        #
+        # Async-dispatch overlap: the GPU phase (collect + train probe) pulls all
+        # predictions + metrics to host; the caller then dispatches the next
+        # training round (async, donating the agent state) and only AFTER that
+        # runs the pure-CPU matplotlib rendering, which therefore overlaps the
+        # next round's GPU compute.  The _fig_* helpers take probs_all=<host
+        # predictions> so rendering fires no GPU op.
+        _probe_forward_v = jax.vmap(probe_forward)
+
+        def _probe_eval_compute(states_b, gidxs, rnd):
+            ne = args.probe_eval_collect_steps
+            ck_tr = jnp.stack([jax.random.key(args.seed + 500000 + rnd + gi) for gi in gidxs])
+            ck_te = jnp.stack([jax.random.key(args.seed + 600000 + rnd + gi) for gi in gidxs])
+            tr = _collect_v(states_b, ck_tr, ne)
+            te = _collect_v(states_b, ck_te, ne)
+            c_tr = jnp.asarray(tr["carries"])
+            t_tr = _targets_b(tr["board_masks"], tr["hits_misses"])
+            ik = jnp.stack([jax.random.key(args.seed + 40000 + rnd + gi) for gi in gidxs])
+            tk = jnp.stack([jax.random.key(args.seed + 50000 + rnd + gi) for gi in gidxs])
+            params_b = _train_probe_v(c_tr, t_tr, ik, tk, args.probe_eval_steps)
+            te_c = jnp.asarray(te["carries"])
+            # Pull predictions (and test data) to host — this block_until_ready is
+            # the only sync point; everything downstream is pure CPU.
+            preds = np.array(jax.nn.sigmoid(_probe_forward_v(params_b, te_c)))  # (S, n, 2N)
+            te_c = np.array(te_c); te_b = np.array(te["board_masks"])
+            te_hm = np.array(te["hits_misses"]); te_d = np.array(te["dones"])
+            per_seed = [
+                _probe_metrics_from_probs(preds[j], te_b[j], te_hm[j])
+                for j in range(len(gidxs))
+            ]
+            return {"gidxs": list(gidxs), "rnd": rnd, "preds": preds, "te_c": te_c,
+                    "te_b": te_b, "te_hm": te_hm, "te_d": te_d, "per_seed": per_seed}
+
+        def _probe_eval_render(host):
+            """Pure-CPU: log aggregated/per-seed metrics + render every seed's
+            figures (overlaps the next training round under async dispatch)."""
+            gidxs = host["gidxs"]; rnd = host["rnd"]; step = rnd * args.train_steps
+            per_seed = host["per_seed"]
+            payload = {"env_interactions": step}
+            for k in per_seed[0]:
+                payload.update(_agg([m[k] for m in per_seed], f"probe_eval/agg/{k}"))
+                for j, gi in enumerate(gidxs):
+                    payload[f"seed_{gi}/probe_eval/{k}"] = per_seed[j][k]
+            print(f"  [probe-eval] agg fired AUROC={payload['probe_eval/agg/fired_auroc/mean']:.3f}"
+                  f"±{payload['probe_eval/agg/fired_auroc/sterr']:.3f}  "
+                  f"unfired AUROC={payload['probe_eval/agg/unfired_auroc/mean']:.3f}")
+            if _wandb is not None:
+                _wandb.log(payload)
+            if not args.probe_eval_vis:
+                return
+            img_payload = {"env_interactions": step}
+            for j, gi in enumerate(gidxs):
+                vtag = f"{tag} @ {step} steps (seed {gi})"
+                vdir = os.path.join(args.output_dir, f"seed{gi}", "probe_eval")
+                os.makedirs(vdir, exist_ok=True)
+                pj, tc, tb, thm = host["preds"][j], host["te_c"][j], host["te_b"][j], host["te_hm"][j]
+                eb = _ep_bounds(host["te_d"][j], len(tc))
+                if len(eb) - 1 >= 1:
+                    ep = _fig_episode(None, tc, tb, thm, eb, 0,
+                                      os.path.join(vdir, f"episode_r{rnd:04d}.png"),
+                                      vtag, args.vis_frames, probs_all=pj)
+                    if _wandb is not None:
+                        img_payload[f"seed_{gi}/probe_eval/episode"] = _wandb.Image(ep)
+                acc = _fig_accuracy(None, tc, tb, thm,
+                                    os.path.join(vdir, f"accuracy_r{rnd:04d}.png"),
+                                    vtag, probs_all=pj)
+                ret = _fig_retention(None, tc, tb, thm, eb,
+                                     os.path.join(vdir, f"retention_r{rnd:04d}.png"),
+                                     vtag, probs_all=pj)
+                if _wandb is not None:
+                    img_payload[f"seed_{gi}/probe_eval/per_cell_accuracy"] = _wandb.Image(acc)
+                    if ret is not None:
+                        img_payload[f"seed_{gi}/probe_eval/retention"] = _wandb.Image(ret)
+            if _wandb is not None and len(img_payload) > 1:
+                _wandb.log(img_payload)
+
+        def _qpi_collect_host(state0, gi0, rnd):
+            """GPU: collect one actor-greedy episode's Q/π for seed gi0 → host."""
+            if getattr(debug_fns, "predict_qpi", None) is None or not args.probe_eval_vis:
+                return None
+            qb, qhm, qq, qp = _collect_qpi_episode(state0, 7000 + rnd, args.probe_eval_collect_steps)
+            return (qb, qhm, qq, qp, gi0, rnd)
+
+        def _qpi_render_host(h):
+            if h is None:
+                return
+            qb, qhm, qq, qp, gi0, rnd = h
+            step = rnd * args.train_steps
+            vtag = f"{tag} @ {step} steps (seed {gi0})"
+            vdir = os.path.join(args.output_dir, f"seed{gi0}", "probe_eval")
+            os.makedirs(vdir, exist_ok=True)
+            qimg = _fig_qpi_episode(qb, qhm, qq, qp,
+                                    os.path.join(vdir, f"qpi_r{rnd:04d}.png"), vtag, args.vis_frames)
+            qmov = _fig_qpi_movie(qb, qhm, qq, qp,
+                                  os.path.join(vdir, f"qpi_movie_r{rnd:04d}"), vtag)
+            if _wandb is not None:
+                payload = {"env_interactions": step}
+                if qimg is not None:
+                    payload[f"seed_{gi0}/probe_eval/critic_actor"] = _wandb.Image(qimg)
+                if qmov is not None:
+                    payload[f"seed_{gi0}/probe_eval/critic_actor_movie"] = _wandb.Video(qmov)
+                _wandb.log(payload)
+
+        # ── per-round history (across all groups) for the smoothed final metric
+        return_hist = {gi: [] for gi in range(args.num_seeds)}
+        steps_hist = {gi: [] for gi in range(args.num_seeds)}
+
+        def run_group(group_idx, gidxs):
+            svals = [seeds[gi] for gi in gidxs]
+            print(f"\n{'=' * 60}\nGroup {group_idx + 1}/{n_groups}  "
+                  f"seeds={svals} (idx {gidxs[0]}–{gidxs[-1]})\n{'=' * 60}")
+            states = [
+                state if gi == 0 else _build_agent(seeds[gi])[0] for gi in gidxs
+            ]
+            batched = _stack_states(states)
+            keys = jnp.stack([jax.random.key(sv) for sv in svals])
+            keys, reset_keys = _split_each(keys)
+            _obs, env_state = _reset_v(reset_keys)
+            keys, prefill_keys = _split_each(keys)
+            print(f"  prefilling {PREFILL_STEPS} steps/seed…")
+            batched, env_state = _prefill_v(batched, env_state, prefill_keys)
+            # Fresh zero env_carry each round (matches fns.train's per-call reset);
+            # reused across rounds, so NOT donated.
+            zero_carry_b = jnp.zeros((len(gidxs), AGENT_CARRY_DIM), dtype=jnp.float32)
+
+            # Prefetch round 1's training (async); each iteration renders the
+            # current round's figures while the NEXT round trains on the GPU.
+            keys, train_keys = _split_each(keys)
+            pending = _train_v(batched, env_state, zero_carry_b, train_keys)
+
+            for rnd in tqdm(range(1, args.rounds + 1), desc=f"Group {group_idx + 1}"):
+                batched, env_state, _ec, metrics = pending
+                keys, eval_keys = _split_each(keys)
+                returns, steps, cleared = _evaluate_v(batched, eval_keys, 10)
+                returns = np.array(returns); steps = np.array(steps); cleared = np.array(cleared)
+                cg = None
+                if evaluate_critic is not None:
+                    keys, cg_keys = _split_each(keys)
+                    cgr, cgs, cgc, qsp, qrg = _evaluate_critic_v(batched, cg_keys, 10)
+                    cg = (np.array(cgr), np.array(cgs), np.array(cgc),
+                          np.array(qsp), np.array(qrg))
+
+                # GPU work that still reads `batched` (probe-eval collect/train,
+                # qpi collect) → pulled to host BEFORE the next round is dispatched
+                # (which donates `batched`).
+                do_probe = args.probe_eval_interval > 0 and rnd % args.probe_eval_interval == 0
+                do_qpi = _qpi_interval > 0 and rnd % _qpi_interval == 0
+                probe_host = _probe_eval_compute(batched, gidxs, rnd) if do_probe else None
+                qpi_host = (_qpi_collect_host(_unstack_state(batched, 0), gidxs[0], rnd)
+                            if do_qpi else None)
+
+                # All reads of batched/env_state are now on host — dispatch the
+                # NEXT round's training (async, donates them).  Its GPU compute
+                # overlaps the matplotlib rendering at the end of this iteration.
+                if rnd < args.rounds:
+                    keys, train_keys = _split_each(keys)
+                    pending = _train_v(batched, env_state, zero_carry_b, train_keys)
+
+                for j, gi in enumerate(gidxs):
+                    return_hist[gi].append(float(returns[j]))
+                    steps_hist[gi].append(float(steps[j]))
+
+                step = rnd * args.train_steps
+                print(f"Round {rnd:4d}/{args.rounds}  "
+                      f"return={float(returns.mean()):7.1f}±{float(returns.std()):.1f}  "
+                      f"steps_to_clear={float(steps.mean()):5.1f}  "
+                      f"cleared={float(cleared.mean()):.2f}")
+                if _wandb is not None:
+                    payload = {"round": rnd, "env_interactions": step}
+                    payload.update(_agg(returns, "agg/return"))
+                    payload.update(_agg(steps, "agg/steps_to_clear"))
+                    payload.update(_agg(cleared, "agg/cleared_frac"))
+                    if cg is not None:
+                        payload.update(_agg(cg[0], "agg/critic_greedy_return"))
+                        payload.update(_agg(cg[1], "agg/critic_greedy_steps_to_clear"))
+                        payload.update(_agg(cg[2], "agg/critic_greedy_cleared_frac"))
+                        payload.update(_agg(cg[3], "agg/q_action_spread"))
+                        payload.update(_agg(cg[4], "agg/q_action_range"))
+                    for mk, mv in metrics.items():
+                        payload.update(_agg(np.array(mv), f"agg/{mk}"))
+                    for j, gi in enumerate(gidxs):
+                        payload[f"seed_{gi}/agent/mean_return"] = float(returns[j])
+                        payload[f"seed_{gi}/agent/steps_to_clear"] = float(steps[j])
+                        payload[f"seed_{gi}/agent/cleared_frac"] = float(cleared[j])
+                        if cg is not None:
+                            payload[f"seed_{gi}/agent/critic_greedy_steps_to_clear"] = float(cg[1][j])
+                            payload[f"seed_{gi}/agent/q_action_spread"] = float(cg[3][j])
+                            payload[f"seed_{gi}/agent/q_action_range"] = float(cg[4][j])
+                        for mk, mv in metrics.items():
+                            payload[f"seed_{gi}/agent/{mk}"] = float(np.array(mv)[j])
+                    _wandb.log(payload)
+
+                # CPU rendering — overlaps the dispatched round R+1 GPU training.
+                if probe_host is not None:
+                    _probe_eval_render(probe_host)
+                if qpi_host is not None:
+                    _qpi_render_host(qpi_host)
+            return batched
+
+        # ── train each group (or load saved per-seed agents) ──────────────────
+        indexed = list(range(args.num_seeds))
+        groups = [indexed[g * CONCURRENT:(g + 1) * CONCURRENT] for g in range(n_groups)]
+        seed_states = [None] * args.num_seeds
+        if not args.skip_train:
+            for g, gidxs in enumerate(groups):
+                batched = run_group(g, gidxs)
+                for j, gi in enumerate(gidxs):
+                    seed_states[gi] = _unstack_state(batched, j)
+                    p = os.path.join(args.output_dir, f"agent_seed{gi}.pkl")
+                    leaves, treedef = jax.tree.flatten(seed_states[gi])
+                    with open(p, "wb") as f:
+                        pickle.dump({"leaves": [np.array(l) for l in leaves],
+                                     "treedef": treedef}, f)
+            print(f"Saved {args.num_seeds} per-seed agents → {args.output_dir}/agent_seed*.pkl")
+        else:
+            for gi in range(args.num_seeds):
+                p = os.path.join(args.output_dir, f"agent_seed{gi}.pkl")
+                print(f"Loading agent ← {p}")
+                with open(p, "rb") as f:
+                    saved = pickle.load(f)
+                _, treedef = jax.tree.flatten(state)
+                seed_states[gi] = treedef.unflatten([jnp.array(l) for l in saved["leaves"]])
+
+        # ── smoothed final return / steps (per seed, then aggregated) ─────────
+        if not args.skip_train:
+            W = max(1, args.final_return_window)
+            fin_ret = np.array([np.mean(return_hist[gi][-W:]) for gi in range(args.num_seeds)])
+            fin_steps = np.array([np.mean(steps_hist[gi][-W:]) for gi in range(args.num_seeds)])
+            # 20-episode eval of the final policy, aggregated across seeds.
+            all_states = _stack_states(seed_states)
+            fkeys = jnp.stack([jax.random.key(seeds[gi] + 999) for gi in range(args.num_seeds)])
+            fr, _fs, _fc = _evaluate_v(all_states, fkeys, 20)
+            fr = np.array(fr)
+            agg = {}
+            agg.update(_agg(fin_ret, "final/return_smoothed"))
+            agg.update(_agg(fin_steps, "final/steps_to_clear_smoothed"))
+            agg.update(_agg(fr, "final/return"))
+            print(f"\n{'=' * 60}\nAggregated over {args.num_seeds} seed(s) "
+                  f"(smoothed over final {W} round(s)):\n"
+                  f"  final/return_smoothed = {agg['final/return_smoothed/mean']:.1f} "
+                  f"± {agg['final/return_smoothed/sterr']:.1f} (sterr)\n"
+                  f"  final/steps_to_clear_smoothed = "
+                  f"{agg['final/steps_to_clear_smoothed/mean']:.1f} "
+                  f"± {agg['final/steps_to_clear_smoothed/sterr']:.1f}\n{'=' * 60}")
+            if _wandb is not None:
+                _wandb.log(agg)
+                _wandb.summary.update(agg)
+
+        if _memoryless:
+            print("[memoryless diagnostic] done (skipping collect/probe/vis phases).")
+            if _wandb is not None:
+                _wandb.finish()
+            sys.exit(0)
+
+        # ── Phase 2/3 — collect + train probe, per seed (vmapped) ─────────────
+        all_states = _stack_states(seed_states)
+        if not args.skip_collect:
+            print(f"Collecting {args.collect_steps} train+test steps per seed (vmapped)…")
+            ck_tr = jnp.stack([jax.random.key(seeds[gi] + 1000) for gi in range(args.num_seeds)])
+            ck_te = jnp.stack([jax.random.key(seeds[gi] + 2000) for gi in range(args.num_seeds)])
+            tr = _collect_v(all_states, ck_tr, args.collect_steps)
+            te = _collect_v(all_states, ck_te, args.collect_steps)
+            tr_c = np.array(tr["carries"]); tr_b = np.array(tr["board_masks"])
+            tr_hm = np.array(tr["hits_misses"]); tr_d = np.array(tr["dones"])
+            te_c = np.array(te["carries"]); te_b = np.array(te["board_masks"])
+            te_hm = np.array(te["hits_misses"]); te_d = np.array(te["dones"])
+            for gi in range(args.num_seeds):
+                for nm, c, b, hm, d in (
+                    (f"dataset_seed{gi}.pkl", tr_c[gi], tr_b[gi], tr_hm[gi], tr_d[gi]),
+                    (f"test_dataset_seed{gi}.pkl", te_c[gi], te_b[gi], te_hm[gi], te_d[gi]),
+                ):
+                    eb = _ep_bounds(d, len(c))
+                    with open(os.path.join(args.output_dir, nm), "wb") as f:
+                        pickle.dump({"carries": c, "board_masks": b, "hits_misses": hm,
+                                     "ep_bounds": eb, "rows": args.rows, "cols": args.cols,
+                                     "tag": tag}, f)
+            print(f"  → {args.output_dir}/dataset_seed*.pkl, test_dataset_seed*.pkl")
+        else:
+            tr_c = tr_b = tr_hm = None
+            te_c, te_b, te_hm, te_d = [], [], [], []
+            tr_list = []
+            for gi in range(args.num_seeds):
+                with open(os.path.join(args.output_dir, f"dataset_seed{gi}.pkl"), "rb") as f:
+                    ds = pickle.load(f)
+                tr_list.append((ds["carries"], ds["board_masks"], ds["hits_misses"]))
+                with open(os.path.join(args.output_dir, f"test_dataset_seed{gi}.pkl"), "rb") as f:
+                    tds = pickle.load(f)
+                te_c.append(tds["carries"]); te_b.append(tds["board_masks"])
+                te_hm.append(tds["hits_misses"]); te_d.append(tds["ep_bounds"])
+            tr_c = np.stack([x[0] for x in tr_list]); tr_b = np.stack([x[1] for x in tr_list])
+            tr_hm = np.stack([x[2] for x in tr_list])
+            te_c = np.stack(te_c); te_b = np.stack(te_b); te_hm = np.stack(te_hm)
+            te_d = None  # ep_bounds reloaded per seed below when needed
+
+        if not args.skip_probe:
+            print(f"Training probe per seed ({args.probe_steps} steps, vmapped)…")
+            c_b = jnp.asarray(tr_c)
+            t_b = _targets_b(tr_b, tr_hm)
+            ik = jnp.stack([jax.random.key(seeds[gi] + 20000) for gi in range(args.num_seeds)])
+            tk = jnp.stack([jax.random.key(seeds[gi] + 30000) for gi in range(args.num_seeds)])
+            probe_b = _train_probe_v(c_b, t_b, ik, tk, args.probe_steps)
+            for gi in range(args.num_seeds):
+                pp = _unstack_state(probe_b, gi)
+                leaves, td = jax.tree.flatten(pp)
+                with open(os.path.join(args.output_dir, f"probe_seed{gi}.pkl"), "wb") as f:
+                    pickle.dump({"leaves": [np.array(l) for l in leaves], "treedef": td}, f)
+            print(f"  → {args.output_dir}/probe_seed*.pkl")
+        else:
+            params_list = []
+            ref = init_probe_params(jax.random.key(0), CARRY_DIM, 2 * N, args.probe_hidden_dim)
+            _, td = jax.tree.flatten(ref)
+            for gi in range(args.num_seeds):
+                with open(os.path.join(args.output_dir, f"probe_seed{gi}.pkl"), "rb") as f:
+                    saved = pickle.load(f)
+                params_list.append(td.unflatten([jnp.array(l) for l in saved["leaves"]]))
+            probe_b = _stack_states(params_list)
+
+        # ── Phase 4 — final metrics (aggregated) + per-seed visualisation ─────
+        print("Computing final probe metrics per seed (held-out test set)…")
+        per_seed = [
+            _probe_metrics(_unstack_state(probe_b, gi),
+                           np.asarray(te_c[gi]), np.asarray(te_b[gi]), np.asarray(te_hm[gi]))
+            for gi in range(args.num_seeds)
+        ]
+        final_payload = {}
+        for k in per_seed[0]:
+            final_payload.update(_agg([m[k] for m in per_seed], f"eval/agg/{k}"))
+            for gi in range(args.num_seeds):
+                final_payload[f"eval/seed_{gi}/{k}"] = per_seed[gi][k]
+        print(f"  eval/agg/fired_auroc = {final_payload['eval/agg/fired_auroc/mean']:.3f} "
+              f"± {final_payload['eval/agg/fired_auroc/sterr']:.3f} (sterr)")
+        print(f"  eval/agg/unfired_auroc = {final_payload['eval/agg/unfired_auroc/mean']:.3f} "
+              f"± {final_payload['eval/agg/unfired_auroc/sterr']:.3f}")
+        if _wandb is not None:
+            _wandb.log(final_payload)
+            _wandb.summary.update(final_payload)
+
+        print("Rendering per-seed visualisations…")
+        for gi in range(args.num_seeds):
+            vdir = os.path.join(args.output_dir, f"seed{gi}")
+            os.makedirs(vdir, exist_ok=True)
+            pp = _unstack_state(probe_b, gi)
+            tc, tb, thm = np.asarray(te_c[gi]), np.asarray(te_b[gi]), np.asarray(te_hm[gi])
+            if not args.skip_collect:
+                eb = _ep_bounds(te_d[gi], len(tc))
+            else:
+                with open(os.path.join(args.output_dir, f"test_dataset_seed{gi}.pkl"), "rb") as f:
+                    eb = pickle.load(f)["ep_bounds"]
+            vtag = f"{tag} (seed {gi})"
+            n_vis = min(args.vis_episodes, len(eb) - 1)
+            for vi in range(n_vis):
+                _fig_episode(pp, tc, tb, thm, eb, vi,
+                             os.path.join(vdir, f"board_probe_ep{vi + 1}.png"), vtag, args.vis_frames)
+            _fig_accuracy(pp, tc, tb, thm,
+                          os.path.join(vdir, "board_probe_accuracy.png"), vtag)
+            _fig_retention(pp, tc, tb, thm, eb,
+                           os.path.join(vdir, "board_probe_retention.png"), vtag)
+            if args.mp4:
+                lens = np.diff(eb)
+                if len(lens):
+                    best = int(np.argmax(lens))
+                    s0, e0 = int(eb[best]), int(eb[best + 1])
+                    _fig_movie(pp, tc[s0:e0], tb[s0:e0], thm[s0:e0],
+                               os.path.join(vdir, "board_probe"), vtag,
+                               "epsilon-soft (collected)")
+        print(f"  → per-seed images under {args.output_dir}/seed*/")
+        if _wandb is not None:
+            _wandb.finish()
+        print("Done (multi-seed).")
+        sys.exit(0)
 
     if not args.skip_train:
         key = jax.random.key(args.seed)
