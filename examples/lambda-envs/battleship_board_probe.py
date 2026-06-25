@@ -78,6 +78,25 @@ g.add_argument("--paper-arch", dest="paper_arch", action="store_true",
                     "Overrides --projection-dim and the head dims; the "
                     "prev-action one-hot is still fed via use_prev_action.")
 parser.set_defaults(paper_arch=False)
+g.add_argument("--cnn-proj", dest="cnn_proj", action="store_true",
+               help="use a CNN projection that treats the full-obs 10x10 shot "
+                    "grid as an image (paper's SmallImageCNN: conv 5->4->3 VALID), "
+                    "giving spatial inductive bias for hunt/target.  Requires "
+                    "--full-obs + 10x10 board.  Overrides the projection; head "
+                    "dims follow --paper-arch / --actor-dims / --critic-dims.")
+parser.set_defaults(cnn_proj=False)
+g.add_argument("--actor-dims", default=None, metavar="H1,H2,…",
+               help="override the actor head's hidden widths (comma-separated; "
+                    "'' = direct linear).  Default: (256,256), or (H,) under "
+                    "--paper-arch where H=--memory-hidden-dim.")
+g.add_argument("--critic-dims", default=None, metavar="H1,H2,…",
+               help="override the SAC critic head's hidden widths.  Raising "
+                    "this is the most direct way to add critic capacity (the "
+                    "critic maps the H-dim FE latent to per-action Q).  Default: "
+                    "(256,256), or (H,) under --paper-arch.  Try e.g. 512,512.")
+g.add_argument("--lambda-critic-dims", default=None, metavar="H1,H2,…",
+               help="override the λ1/λ2 discrepancy critic hidden widths "
+                    "(only used with --approximate-lambda).  Default 64,64,64.")
 # Value-stability knobs (previously hard-coded in Hyperparameters).  Defaults
 # reproduce the prior behaviour exactly so existing launches are unchanged.
 g.add_argument("--fe-lr", type=float, default=1e-4, help="feature-extractor lr (default 1e-4)")
@@ -241,6 +260,12 @@ if args.wandb and not args.vis_only:
             "memory_hidden_dim": args.memory_hidden_dim,
             "projection_dim": args.projection_dim,
             "paper_arch": args.paper_arch,
+            "cnn_proj": args.cnn_proj,
+            "actor_dims": args.actor_dims,
+            "critic_dims": args.critic_dims,
+            "lambda_critic_dims": args.lambda_critic_dims,
+            "cql_coef": args.cql_coef,
+            "grad_clip": args.grad_clip,
             "approximate_lambda": args.approximate_lambda,
             "use_gvd": args.gvd,
             "gvd_coef": args.gvd_coef,
@@ -738,6 +763,7 @@ if not args.vis_only:
 
     from lambda_imitation.iqlearn import Hyperparameters
     from lambda_imitation.utils import (
+        battleship_image_projection,
         battleship_projection,
         create_iqlearn_from_env,
         env_spec_from_gymnax,
@@ -852,7 +878,19 @@ if not args.vis_only:
     # hit-skip-connection embedding (width H = --memory-hidden-dim) feeding the
     # GRU, with single-hidden-layer actor/critic heads of width H.  Otherwise
     # the default LinearProjection(--projection-dim) + (256, 256) heads.
-    if args.paper_arch:
+    def _parse_dims(s):
+        return tuple(int(x) for x in s.split(",") if x.strip())
+
+    if args.cnn_proj:
+        if not args.full_obs:
+            sys.exit("--cnn-proj needs the shot grid; pass --full-obs.")
+        if args.rows != 10 or args.cols != 10:
+            sys.exit("--cnn-proj conv stack is configured for a 10x10 board.")
+        H = args.memory_hidden_dim
+        projection_arg = battleship_image_projection(H, grid_size=args.rows)
+        actor_dims = (H,)
+        critic_dims = (H,)
+    elif args.paper_arch:
         H = args.memory_hidden_dim
         # With no recurrent cell (identity), add the third Dense(H)->relu so the
         # embedding matches the paper's memoryless BattleShipActorCritic; with a
@@ -864,6 +902,18 @@ if not args.vis_only:
         projection_arg = args.projection_dim if args.projection_dim > 0 else None
         actor_dims = (256, 256)
         critic_dims = (256, 256)
+    # Explicit --actor-dims/--critic-dims override the arch defaults, so critic
+    # capacity can be raised without touching the (faithful) paper embedding.
+    if args.actor_dims is not None:
+        actor_dims = _parse_dims(args.actor_dims)
+    if args.critic_dims is not None:
+        critic_dims = _parse_dims(args.critic_dims)
+    lambda_critic_dims = (
+        _parse_dims(args.lambda_critic_dims)
+        if args.lambda_critic_dims is not None else (64, 64, 64)
+    )
+    print(f"Head dims: actor={actor_dims}  critic={critic_dims}  "
+          f"λ-critic={lambda_critic_dims}")
 
     def zero_carry():
         return jnp.zeros((AGENT_CARRY_DIM,), dtype=jnp.float32)
@@ -890,6 +940,8 @@ if not args.vis_only:
         gvd_lambda1=args.gvd_lambda1,
         gvd_lambda2=args.gvd_lambda2,
         gvd_sf_lr=args.gvd_sf_lr,
+        cql_coef=args.cql_coef,
+        grad_clip=args.grad_clip,
     )
 
     # Battleship episodes end after at most rows*cols shots (legal-action
@@ -906,8 +958,8 @@ if not args.vis_only:
             memory_hidden_dim=args.memory_hidden_dim,
             actor_dims=actor_dims,
             critic_dims=critic_dims,
-            lambda1_critic_dims=(64,64,64),
-            lambda2_critic_dims=(64,64,64),
+            lambda1_critic_dims=lambda_critic_dims,
+            lambda2_critic_dims=lambda_critic_dims,
             train_steps=args.train_steps,
             approximate_lambda=args.approximate_lambda,
             use_prev_action=True,

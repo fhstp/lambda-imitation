@@ -459,6 +459,8 @@ class Hyperparameters(NamedTuple):
     gvd_lambda1: float = 0.0
     gvd_lambda2: float = 1.0
     gvd_sf_lr: float = 1e-4
+    cql_coef: float = 0.0
+    grad_clip: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1008,15 +1010,25 @@ def create_iqlearn(
         )
 
     # Optimizers: actor operates on its nnx.GraphState; critic on TwinCriticState.
-    fe_optimizer = optax.adam(params.fe_lr)
-    actor_optimizer = optax.adam(params.actor_lr)
-    critic_optimizer = optax.adam(params.critic_lr)
+    # When ``grad_clip > 0`` the network optimisers clip by global norm before
+    # Adam (recommended for the recurrent BPTT unroll); alpha (a scalar) is left
+    # unclipped.
+    def _adam(lr):
+        if params.grad_clip and params.grad_clip > 0:
+            return optax.chain(
+                optax.clip_by_global_norm(params.grad_clip), optax.adam(lr)
+            )
+        return optax.adam(lr)
+
+    fe_optimizer = _adam(params.fe_lr)
+    actor_optimizer = _adam(params.actor_lr)
+    critic_optimizer = _adam(params.critic_lr)
     if approximate_lambda:
-        lambda1_critic_optimizer = optax.adam(params.lambda_critic_lr)
-        lambda2_critic_optimizer = optax.adam(params.lambda_critic_lr)
+        lambda1_critic_optimizer = _adam(params.lambda_critic_lr)
+        lambda2_critic_optimizer = _adam(params.lambda_critic_lr)
     if use_gvd:
-        gvd_sf1_optimizer = optax.adam(params.gvd_sf_lr)
-        gvd_sf2_optimizer = optax.adam(params.gvd_sf_lr)
+        gvd_sf1_optimizer = _adam(params.gvd_sf_lr)
+        gvd_sf2_optimizer = _adam(params.gvd_sf_lr)
     alpha_optimizer = optax.adam(params.alpha_lr)
 
     log_alpha = jnp.array(jnp.log(params.alpha))
@@ -1691,6 +1703,7 @@ def create_iqlearn(
         alpha: jax.Array,
         key: jax.Array,
         next_mask: jax.Array | None = None,
+        cur_mask: jax.Array | None = None,
     ) -> Tuple[jax.Array, dict]:
         """SAC Bellman MSE loss for the twin-critic (continuous and discrete).
 
@@ -1739,7 +1752,29 @@ def create_iqlearn(
 
         q1, q2 = get_q_both(critic, critic_graph, latents, actions)
         loss = 0.5 * (jnp.mean((q1 - target_q) ** 2) + jnp.mean((q2 - target_q) ** 2))
-        return loss, {"critic_loss": loss, "target_q": target_q.mean()}
+        metrics = {"critic_loss": loss, "target_q": target_q.mean()}
+
+        # CQL action-discrimination penalty (discrete only): minimise
+        # logsumexp_a Q(s,a) − Q(s,a_taken) over LEGAL actions, per branch.
+        # Pushes down Q on all legal actions and up on the taken one, widening
+        # the per-action gap — counteracts a critic that collapses to a flat,
+        # action-independent Q.  Gated by the static Python coef so it is a
+        # no-op (and adds no graph) when disabled.
+        if is_discrete and params.cql_coef and params.cql_coef > 0:
+            q_twin = run_critic(critic, critic_graph, latents)  # (B, A, 2)
+            if cur_mask is not None:
+                m = cur_mask.astype(bool)
+                safe = jnp.any(m, axis=-1, keepdims=True)
+                keep = jnp.logical_or(m, jnp.logical_not(safe))
+                q_for_lse = jnp.where(keep[..., None], q_twin, -1e9)
+            else:
+                q_for_lse = q_twin
+            lse = jax.scipy.special.logsumexp(q_for_lse, axis=1)  # (B, 2)
+            q_taken = jnp.stack([q1, q2], axis=-1)  # (B, 2)
+            cql = jnp.mean(lse - q_taken)
+            loss = loss + params.cql_coef * cql
+            metrics["cql_penalty"] = cql
+        return loss, metrics
 
     def loss_ld(
         lambda1_critic: TwinCriticState,
@@ -2425,6 +2460,7 @@ def create_iqlearn(
             alpha,
             key_critic,
             next_mask=_flat(masks_tm[1:]) if masks_tm is not None else None,
+            cur_mask=_flat(masks_tm[:-1]) if masks_tm is not None else None,
         )
         metrics.update(metrics_critic)
 

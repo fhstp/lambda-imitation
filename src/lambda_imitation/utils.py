@@ -243,6 +243,90 @@ def battleship_projection(
     return build
 
 
+class BattleshipImageProjection(nnx.Module):
+    """CNN embedding: treat the full-obs shot grid as a 2-D image.
+
+    The flat-dense :class:`BattleshipProjection` has no spatial inductive bias,
+    so it struggles to learn Battleship's *hunt/target* strategy (fire adjacent
+    to existing hits) from a flattened grid.  This projection instead reshapes
+    the per-cell ``hits_misses`` grid (the trailing ``grid_size**2`` channels of
+    the ``--full-obs`` observation) into a ``(grid_size, grid_size, 1)`` image
+    and runs the paper's ``SmallImageCNN`` 10×10 conv stack (kernels 5→4→3,
+    VALID), giving the network spatial structure.  The raw hit bit and the
+    ``prev_action`` one-hot are concatenated to the conv features before a final
+    ``Dense(H)→relu``::
+
+        grid (B,10,10,1) → relu(Conv5) → relu(Conv4) → relu(Conv3) → (B,1,1,H)
+        z = relu(Dense([conv_feats | hit | prev_action]))   # -> recurrent cell
+
+    Requires ``--full-obs`` (the grid must be present) and a 10×10 board (the
+    conv stack reduces 10→6→3→1 exactly).  Dense/Conv use orthogonal(√2) init.
+
+    Args:
+        hidden_size: Embedding / conv-channel width ``H``.
+        prev_action_dim: Width of the prev-action encoding (``0`` = none).
+        grid_size: Board side length (must be 10 for this conv stack).
+        rngs: Flax NNX RNG container.
+    """
+
+    def __init__(
+        self, hidden_size: int, prev_action_dim: int, grid_size: int,
+        *, rngs: nnx.Rngs,
+    ):
+        if grid_size != 10:
+            raise ValueError(
+                "BattleshipImageProjection's conv stack (k=5,4,3 VALID) is "
+                f"configured for a 10x10 board; got grid_size={grid_size}."
+            )
+        self.grid_size = grid_size
+        ki = nnx.initializers.orthogonal(math.sqrt(2))
+        bi = nnx.initializers.constant(0.0)
+        self.conv1 = nnx.Conv(1, hidden_size, kernel_size=(5, 5), strides=1,
+                              padding="VALID", kernel_init=ki, bias_init=bi, rngs=rngs)
+        self.conv2 = nnx.Conv(hidden_size, hidden_size, kernel_size=(4, 4), strides=1,
+                              padding="VALID", kernel_init=ki, bias_init=bi, rngs=rngs)
+        self.conv3 = nnx.Conv(hidden_size, hidden_size, kernel_size=(3, 3), strides=1,
+                              padding="VALID", kernel_init=ki, bias_init=bi, rngs=rngs)
+        # conv → (B,1,1,H) → flatten H; concat raw hit bit + prev-action.
+        self.dense = nnx.Linear(hidden_size + 1 + prev_action_dim, hidden_size,
+                                kernel_init=ki, bias_init=bi, rngs=rngs)
+
+    def __call__(self, obs: jax.Array, prev_action: jax.Array | None) -> jax.Array:
+        x = obs.reshape(obs.shape[0], -1)
+        hit = x[..., 0:1]
+        n = self.grid_size * self.grid_size
+        img = x[..., 1:1 + n].reshape(obs.shape[0], self.grid_size, self.grid_size, 1)
+        h = nnx.relu(self.conv1(img))
+        h = nnx.relu(self.conv2(h))
+        h = nnx.relu(self.conv3(h))
+        h = h.reshape(obs.shape[0], -1)
+        feats = [h, hit]
+        if prev_action is not None and prev_action.shape[-1]:
+            feats.append(prev_action)
+        return nnx.relu(self.dense(jnp.concatenate(feats, axis=-1)))
+
+
+def battleship_image_projection(
+    hidden_size: int, grid_size: int = 10
+) -> Callable[..., nnx.Module]:
+    """Projection builder for :class:`BattleshipImageProjection` (CNN, full-obs).
+
+    Returns the ``(obs_shape, prev_action_dim, rngs) -> nnx.Module`` callable the
+    feature extractor expects.  Use with ``--full-obs`` on a 10×10 board.
+
+    Args:
+        hidden_size: Conv-channel / embedding width ``H``.
+        grid_size: Board side length (10).
+    """
+
+    def build(obs_shape, prev_action_dim, rngs):
+        return BattleshipImageProjection(
+            hidden_size, prev_action_dim, grid_size, rngs=rngs
+        )
+
+    return build
+
+
 class RecurrentFeatureExtractor(nnx.Module):
     """Projection module followed by an optional recurrent memory cell.
 
