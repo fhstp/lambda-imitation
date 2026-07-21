@@ -192,6 +192,16 @@ g.add_argument("--output-dir", default="./battleship_probe_output")
 g.add_argument("--skip-train", action="store_true", help="load agent from output-dir")
 g.add_argument("--skip-collect", action="store_true", help="load dataset from output-dir")
 g.add_argument("--skip-probe", action="store_true", help="load probe from output-dir")
+g.add_argument("--train-only", action="store_true",
+               help="exit right after Phase-1 training (skip collect/probe/vis); "
+                    "for stabilization sweeps that only watch training metrics")
+g.add_argument("--save-checkpoint-at", type=int, default=0, metavar="ROUND",
+               help="save a resumable training checkpoint (agent state + env "
+                    "state + RNG key) after this round, then exit (0 = off)")
+g.add_argument("--resume-from", default=None, metavar="PATH",
+               help="resume Phase-1 training from a checkpoint written by "
+                    "--save-checkpoint-at; continues with the CURRENT CLI "
+                    "hyperparameters (so you can switch tau/lr/gvd_coef mid-run)")
 g.add_argument("--vis-only", action="store_true",
                help="portable mode: load dataset.pkl + probe.pkl, render only "
                     "(no lambda-imitation / lambda-envs needed)")
@@ -1937,13 +1947,31 @@ if not args.vis_only:
         sys.exit(0)
 
     if not args.skip_train:
-        key = jax.random.key(args.seed)
-        key, reset_key = jax.random.split(key)
-        _, env_state = env.reset(reset_key, env_params)
+        if args.resume_from:
+            print(f"Resuming training ← {args.resume_from}")
+            with open(args.resume_from, "rb") as f:
+                _ck = pickle.load(f)
+            # Transplant the checkpointed state into the freshly-built `fns`
+            # (built above from the CURRENT CLI hyperparameters).  Net shapes
+            # are unchanged by tau/lr/gvd_coef, so the pytree structure matches.
+            state = _ck["state_treedef"].unflatten(
+                [jnp.array(l) for l in _ck["state_leaves"]])
+            env_state = _ck["env_treedef"].unflatten(
+                [jnp.array(l) for l in _ck["env_leaves"]])
+            key = jax.random.wrap_key_data(jnp.asarray(_ck["key"]))
+            _start_round = int(_ck["round"])
+            print(f"  resumed at round {_start_round}; continuing with "
+                  f"tau={args.tau} critic_lr={args.critic_lr} fe_lr={args.fe_lr} "
+                  f"gvd_sf_lr={args.gvd_sf_lr} gvd_coef={args.gvd_coef}")
+        else:
+            key = jax.random.key(args.seed)
+            key, reset_key = jax.random.split(key)
+            _, env_state = env.reset(reset_key, env_params)
+            _start_round = 0
         total = args.rounds * args.train_steps
         print(f"Training for {args.rounds} × {args.train_steps} = {total} steps…")
 
-        for rnd in tqdm(range(1, args.rounds + 1), desc="Training"):
+        for rnd in tqdm(range(_start_round + 1, args.rounds + 1), desc="Training"):
             key, train_key = jax.random.split(key)
             state, env_state, metrics = fns.train(
                 state, env, env_params, env_state, train_key
@@ -1991,6 +2019,30 @@ if not args.vis_only:
             # so they appear even in the memoryless (identity) diagnostic.
             if _qpi_interval > 0 and rnd % _qpi_interval == 0:
                 _log_qpi_heatmaps(state, rnd)
+
+            if args.save_checkpoint_at and rnd == args.save_checkpoint_at:
+                _ckpath = os.path.join(args.output_dir, f"train_ckpt_r{rnd}.pkl")
+                _sl, _st = jax.tree.flatten(state)
+                _el, _et = jax.tree.flatten(env_state)
+                with open(_ckpath, "wb") as f:
+                    pickle.dump({
+                        "state_leaves": [np.array(l) for l in _sl],
+                        "state_treedef": _st,
+                        "env_leaves": [np.array(l) for l in _el],
+                        "env_treedef": _et,
+                        "key": np.array(jax.random.key_data(key)),
+                        "round": rnd,
+                    }, f)
+                print(f"\nSaved training checkpoint → {_ckpath} (round {rnd}); exiting.")
+                if _wandb is not None:
+                    _wandb.finish()
+                sys.exit(0)
+
+        if args.train_only:
+            print("[train-only] Phase-1 done (skipping collect/probe/vis).")
+            if _wandb is not None:
+                _wandb.finish()
+            sys.exit(0)
 
         print(f"Saving agent → {agent_path}")
         leaves, treedef = jax.tree.flatten(state)
