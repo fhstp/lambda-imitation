@@ -51,6 +51,10 @@ g.add_argument("--cols", type=int, default=10, help="board cols (default 10)")
 g.add_argument("--dense-reward", dest="dense_reward", action="store_true",
                help="reward every hit (default: sparse terminal reward)")
 parser.set_defaults(dense_reward=False)
+g.add_argument("--terminal-bonus", dest="terminal_bonus", type=float, default=None,
+               help="sparse-mode reward on the clearing step (default None = "
+                    "env default rows*cols; 0.0 = pure -1/step, which is what "
+                    "surfaces the spatial-Q spike).")
 g.add_argument("--ship-lengths", default="5,4,3,2", metavar="L1,L2,…",
                help="comma-separated ship lengths (default 5,4,3,2).  Use "
                     "shorter ships for small-board curriculum stages, e.g. "
@@ -274,6 +278,7 @@ if args.wandb and not args.vis_only:
             "cols": args.cols,
             "ship_lengths": args.ship_lengths,
             "dense_reward": args.dense_reward,
+            "terminal_bonus": args.terminal_bonus,
             "fe_lr": args.fe_lr,
             "actor_lr": args.actor_lr,
             "critic_lr": args.critic_lr,
@@ -863,10 +868,12 @@ if not args.vis_only:
 
         env = _BattleshipFullObs(rows=args.rows, cols=args.cols,
                                  dense_reward=args.dense_reward,
+                                 terminal_bonus=args.terminal_bonus,
                                  ship_lengths=ship_lengths)
     else:
         env = Battleship(rows=args.rows, cols=args.cols,
                          dense_reward=args.dense_reward,
+                         terminal_bonus=args.terminal_bonus,
                          ship_lengths=ship_lengths)
     env_params = env.default_params
     spec = env_spec_from_gymnax(env, env_params)
