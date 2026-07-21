@@ -459,6 +459,16 @@ class Hyperparameters(NamedTuple):
     gvd_lambda1: float = 0.0
     gvd_lambda2: float = 1.0
     gvd_sf_lr: float = 1e-4
+    # If True, stop-gradient the online FE latents feeding the GVD SF heads so
+    # neither the SF TD losses nor the discrepancy backprop into the shared FE
+    # (a strictly stronger decoupling than gvd_coef=0, which leaves the SF
+    # heads' own TD loss training the FE). The SF heads still learn.
+    gvd_stop_fe: bool = False
+    # If True, stop-gradient the FE latents feeding the ACTOR loss (SAC-AE
+    # recipe): the shared FE is trained only by the value/critic (+ GVD) losses,
+    # never by the policy-improvement gradient. The actor is a head on detached
+    # features. Removes actor↔critic gradient conflict on the shared encoder.
+    stop_actor_fe: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -2400,12 +2410,19 @@ def create_iqlearn(
 
         # Actor: per-state objective, treat (t, b) as an independent batch.
         # Use the *online* critic but freeze its params via stop_gradient so
-        # the actor loss does not train the critic. Gradient still flows into
-        # the FE via the latent input, which is intended for the shared encoder.
+        # the actor loss does not train the critic. By default the gradient also
+        # flows into the shared FE via the latent input. --stop-actor-fe detaches
+        # that path (SAC-AE recipe): the FE is then trained only by the value /
+        # critic (and GVD) losses, and the actor is a head on frozen features.
+        # This removes the actor's E_π[Q]-maximising pressure on the shared
+        # recurrent memory (a suspected driver of value-magnitude inflation)
+        # while preserving GVD's influence on the representation.
+        actor_latent = (jax.lax.stop_gradient(latent)
+                        if params.stop_actor_fe else latent)
         l_actor, metrics = loss_actor(
             actor_state,
             jax.lax.stop_gradient(critic_state),
-            _flat(latent),
+            _flat(actor_latent),
             alpha,
             key_actor,
             mask=_flat(masks_tm) if masks_tm is not None else None,
@@ -2495,6 +2512,14 @@ def create_iqlearn(
             # deliberately NOT adopted here — revisit if SF collapse shows up.
             cumulants = phi_tm
 
+            # --gvd-stop-fe: sever GVD/SF gradients from the shared FE. The SF
+            # heads still train (their targets come from target_latent, which is
+            # already stop-gradded), but their loss no longer backprops into the
+            # online FE via `latent`. Strictly stronger than gvd_coef=0, which
+            # leaves the SF heads' own TD loss training the FE.
+            sf_latent = (jax.lax.stop_gradient(latent)
+                         if params.gvd_stop_fe else latent)
+
             l_sf1, m_sf1 = loss_vtrace_sf_sequence(
                 gvd_sf1_state,
                 gvd_sf1_target_state,
@@ -2506,7 +2531,7 @@ def create_iqlearn(
                 cumulants,
                 terminated_tm,
                 behaviour_tm,
-                latent,
+                sf_latent,
                 target_latent,
                 masks=masks_tm,
             )
@@ -2522,7 +2547,7 @@ def create_iqlearn(
                 cumulants,
                 terminated_tm,
                 behaviour_tm,
-                latent,
+                sf_latent,
                 target_latent,
                 masks=masks_tm,
             )
@@ -2531,7 +2556,7 @@ def create_iqlearn(
             l_gvd, m_gvd = loss_gvd(
                 gvd_sf1_state,
                 gvd_sf2_state,
-                _flat(latent[:-1]),
+                _flat(sf_latent[:-1]),
                 _flat(actions_tm[:-1])
             )
             metrics.update(m_gvd)

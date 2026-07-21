@@ -145,6 +145,17 @@ g.add_argument("--gvd-features", type=int, default=16,
 g.add_argument("--gvd-lambda1", type=float, default=0.05)
 g.add_argument("--gvd-lambda2", type=float, default=0.75)
 g.add_argument("--gvd-sf-lr", type=float, default=1.8e-4)
+g.add_argument("--gvd-stop-fe", dest="gvd_stop_fe", action="store_true",
+               help="stop-gradient the FE latents feeding the GVD SF heads so "
+                    "no GVD/SF gradient reaches the shared feature extractor "
+                    "(stronger than --gvd-coef 0; SF heads still train)")
+parser.set_defaults(gvd_stop_fe=False)
+g.add_argument("--stop-actor-fe", dest="stop_actor_fe", action="store_true",
+               help="stop-gradient the FE latents feeding the actor loss so the "
+                    "shared FE is trained only by the value/critic (+GVD) losses "
+                    "(SAC-AE recipe); removes actor-vs-critic gradient conflict "
+                    "on the shared recurrent memory")
+parser.set_defaults(stop_actor_fe=False)
 g.add_argument("--batch-size", type=int, default=128)
 g.add_argument("--sequence-length", type=int, default=80)
 g.add_argument("--burn-in-length", type=int, default=5)
@@ -310,6 +321,8 @@ if args.wandb and not args.vis_only:
             "gvd_lambda1": args.gvd_lambda1,
             "gvd_lambda2": args.gvd_lambda2,
             "gvd_sf_lr": args.gvd_sf_lr,
+            "gvd_stop_fe": args.gvd_stop_fe,
+            "stop_actor_fe": args.stop_actor_fe,
             "batch_size": args.batch_size,
             "sequence_length": args.sequence_length,
             "burn_in_length": args.burn_in_length,
@@ -995,6 +1008,8 @@ if not args.vis_only:
         gvd_lambda1=args.gvd_lambda1,
         gvd_lambda2=args.gvd_lambda2,
         gvd_sf_lr=args.gvd_sf_lr,
+        gvd_stop_fe=args.gvd_stop_fe,
+        stop_actor_fe=args.stop_actor_fe,
     )
 
     # Battleship episodes end after at most rows*cols shots (legal-action
