@@ -518,6 +518,25 @@ class Hyperparameters(NamedTuple):
     # almost all advantages positive → policy reinforces sampled spread and
     # never sharpens). Only affects the vtrace_actor path.
     vtrace_center_advantage: bool = False
+    # Full PPO-style advantage standardisation (Â − mean)/std in the V-trace
+    # actor loss. Takes precedence over vtrace_center_advantage: centering alone
+    # leaves the advantages at a tiny absolute scale under low-variance returns,
+    # so the PG gradient is negligible and the policy freezes at ~uniform.
+    vtrace_normalize_advantage: bool = False
+    # PPO clipped-surrogate epsilon for the V-trace actor (0 = plain PG, no trust
+    # region).  LOAD-BEARING: without it the unclipped off-policy PG drives one
+    # logit to +∞, entropy collapses to ~0 within a few steps, the policy becomes
+    # a deterministic board-blind firing order, and the encoder's board memory
+    # dies with it (forward ladder: 0.865 clipped vs 0.591 unclipped).
+    ppo_clip_eps: float = 0.0
+    # If True, mask out every step after the window's first episode in the
+    # sequence losses.  With episode_aligned_sampling a short episode's window
+    # spills into the NEXT episode's first steps, so those early/low-memory
+    # states are ~2x over-represented (once as their own window's start, once as
+    # the previous window's tail) and the FE gradient is biased AWAY from the
+    # memory-rich late states.  Reference PPO's arbitrary-start chunks sample
+    # positions uniformly and have no such bias.
+    mask_first_episode_only: bool = False
     # Scalar multiplier on the GVD successor-feature cumulant. The SF value is
     # E[Σ γ^t c_t]; for a raw hit cumulant (c∈{0,1}) that grows to ~O(1/(1-γ)),
     # whose large TD targets drive the SF heads into deadly-triad divergence
@@ -1895,9 +1914,49 @@ def create_iqlearn(
         # otherwise makes almost every advantage positive — restoring the
         # "suppress bad actions" half of the policy gradient so the policy can
         # actually sharpen instead of reinforcing whatever spread was sampled.
-        if params.vtrace_center_advantage:
+        if params.vtrace_normalize_advantage:
+            # Full PPO-style standardisation (Â − mean)/std.  Under low-variance
+            # returns the merely *centered* advantages are tiny in absolute
+            # scale, so the raw PG gradient is negligible and the policy freezes
+            # at ~uniform; dividing by the batch std restores a unit-scale
+            # gradient.  Takes precedence over --vtrace-center-advantage.
+            adv_keep = (adv_keep - adv_raw_mean) / (adv_keep.std() + 1e-8)
+        elif params.vtrace_center_advantage:
             adv_keep = adv_keep - adv_raw_mean
-        pg_loss = -(adv_keep * logp_a[keep]).mean()
+
+        if params.ppo_clip_eps > 0.0:
+            # PPO clipped surrogate = a trust region for the off-policy PG.
+            # r_t = π_online(a_t|s_t) / μ(a_t|s_t) with μ the behaviour prob of
+            # the taken action (the same quantity get_importance_ratios divides
+            # by).  min() handles both advantage signs and caps the effective
+            # step.  WITHOUT this the unclipped PG has no trust region, drives
+            # one logit to +∞ and collapses the policy to a deterministic,
+            # board-blind firing order within a few steps — which also destroys
+            # the encoder's board memory (ladder: 0.865 with the clip vs 0.591
+            # without, entropy 5e-4).
+            log_ratio = logp_a - jnp.log(jnp.clip(behaviour_probs, 1e-8, None))
+            ratio = jnp.exp(log_ratio)[keep]
+            pg_loss = -jnp.minimum(
+                ratio * adv_keep,
+                jnp.clip(ratio, 1.0 - params.ppo_clip_eps, 1.0 + params.ppo_clip_eps)
+                * adv_keep,
+            ).mean()
+            clip_frac = (jnp.abs(ratio - 1.0) > params.ppo_clip_eps).mean()
+            ratio_mean = ratio.mean()
+            # Per-timestep IS-ratio diagnostic (recurrent representational
+            # drift): ratio[0] is at the window start (episode start, zero carry
+            # → ≈1 unless a bookkeeping bug), ratio[-1] is deep into the episode
+            # where the carry has been re-rolled many steps under updated
+            # weights, so drift shows up there first.
+            _lr_keep = log_ratio[keep]
+            abslogr_t0 = jnp.abs(_lr_keep[0]).mean()
+            abslogr_tlast = jnp.abs(_lr_keep[-1]).mean()
+        else:
+            pg_loss = -(adv_keep * logp_a[keep]).mean()
+            clip_frac = jnp.array(0.0)
+            ratio_mean = jnp.array(1.0)
+            abslogr_t0 = abslogr_tlast = jnp.array(0.0)
+
         ent = entropy[keep].mean()
         loss = pg_loss - alpha * ent
         metrics = {
@@ -1907,6 +1966,10 @@ def create_iqlearn(
             "q": V[keep].mean(),
             "vtrace_adv": adv_raw_mean,
             "vtrace_v": vs[keep].mean(),
+            "ppo_clip_frac": clip_frac,
+            "ppo_ratio_mean": ratio_mean,
+            "ppo_abslogratio_t0": abslogr_t0,
+            "ppo_abslogratio_tlast": abslogr_tlast,
         }
         return loss, metrics
 
@@ -2234,6 +2297,39 @@ def create_iqlearn(
 
         return latent
 
+    def _seq_loss_mean(per_step: jax.Array, dones: jax.Array) -> jax.Array:
+        """Reduce a per-step sequence loss ``(T', B)`` to a scalar.
+
+        Drops the trailing ``params.lambda_truncation`` steps (their λ-return is
+        biased by the missing bootstrap mass at the unroll tail) and, when
+        ``params.mask_first_episode_only`` is set, every step after the window's
+        first episode.
+
+        The mask matters with ``episode_aligned_sampling``: a window starts at an
+        episode start, so a short episode's window spills into the *next*
+        episode's opening steps, over-representing early/low-memory states and
+        biasing the FE gradient away from the memory-rich late ones.
+
+        ``dones[t]`` is True iff step *t* terminated, so
+        ``cumsum(dones) - dones`` counts terminations strictly *before* t and the
+        first episode is ``== 0`` (i.e. the terminal step itself is kept).
+
+        Args:
+            per_step: Per-step loss, shape ``(T', B)``.
+            dones: Per-step termination flags, shape ``(T', B)``.
+
+        Returns:
+            Scalar mean over the kept steps.
+        """
+        L = params.lambda_truncation
+        keep = slice(0, -L) if L > 0 else slice(None)
+        x = per_step[keep]
+        if not params.mask_first_episode_only:
+            return x.mean()
+        prior_dones = jnp.cumsum(dones, axis=0) - dones
+        m = (prior_dones == 0).astype(x.dtype)[keep]
+        return jnp.sum(x * m) / jnp.clip(jnp.sum(m), 1.0)
+
     def loss_vtrace_lambda_sequence(
         target_actor_state: nnx.GraphState,
         q_state: TwinCriticState,
@@ -2349,10 +2445,8 @@ def create_iqlearn(
             unroll=8,  # fuse across timesteps -> fewer tiny per-step kernels
         )
 
-        loss = optax.losses.huber_loss(
-            q[: -params.lambda_truncation],
-            jax.lax.stop_gradient(targets)[: -params.lambda_truncation],
-        ).mean()
+        tgt = jax.lax.stop_gradient(targets)
+        loss = _seq_loss_mean(optax.losses.huber_loss(q, tgt), dones)
         metrics = {
             "loss": loss,
             f"lambda{lam}_critic:": q[: -params.lambda_truncation].mean(),
@@ -2492,10 +2586,10 @@ def create_iqlearn(
                 params.c_bar,
             )
 
-            loss = optax.losses.huber_loss(
-                q[: -params.lambda_truncation],
-                jax.lax.stop_gradient(targets)[: -params.lambda_truncation],
-            ).sum(-1).mean()
+            tgt = jax.lax.stop_gradient(targets)
+            # sum over the SF feature axis, then mean over the kept steps
+            loss = _seq_loss_mean(
+                optax.losses.huber_loss(q, tgt).sum(-1), dones)
             metrics = {
                 f"gvd_{tag}_loss": loss,
                 f"gvd_{tag}_critic:": q[: -params.lambda_truncation].mean(),

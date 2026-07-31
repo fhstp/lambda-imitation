@@ -223,6 +223,35 @@ g.add_argument("--vtrace-center-advantage", dest="vtrace_center_advantage",
                     "offset so the policy gradient can sharpen the policy "
                     "instead of reinforcing sampled spread.")
 parser.set_defaults(vtrace_center_advantage=False)
+g.add_argument("--vtrace-normalize-advantage", dest="vtrace_normalize_advantage",
+               action="store_true",
+               help="full PPO-style advantage standardisation (A-mean)/std in "
+                    "the V-trace actor (takes precedence over "
+                    "--vtrace-center-advantage): centering alone leaves the "
+                    "advantages at a tiny absolute scale under low-variance "
+                    "returns, so the policy freezes at ~uniform.")
+parser.set_defaults(vtrace_normalize_advantage=False)
+g.add_argument("--ppo-clip-eps", dest="ppo_clip_eps", type=float, default=0.0,
+               help="PPO clipped-surrogate epsilon for the V-trace actor "
+                    "(0 = plain PG, no trust region). LOAD-BEARING: without it "
+                    "the unclipped off-policy PG collapses the policy to a "
+                    "deterministic board-blind firing order within a few steps "
+                    "and the encoder's board memory dies with it.")
+g.add_argument("--rho-bar", dest="rho_bar", type=float, default=1.05,
+               help="V-trace rho truncation cap (default 1.05). rho=min(rho_bar, "
+                    "pi/mu) is one-sided: on stale data the upside is clipped "
+                    "but the downside is not, so E[rho]<1 attenuates the reward "
+                    "correction. Raise it if replay data is heavily reused.")
+g.add_argument("--c-bar", dest="c_bar", type=float, default=1.05,
+               help="V-trace c truncation cap (default 1.05); see --rho-bar.")
+g.add_argument("--mask-first-episode-only", dest="mask_first_episode_only",
+               action="store_true",
+               help="in the sequence losses, drop every step after the window's "
+                    "first episode. With --episode-aligned-sampling a short "
+                    "episode's window spills into the next episode's opening "
+                    "steps, over-representing early/low-memory states and "
+                    "biasing the FE gradient away from memory-rich late ones.")
+parser.set_defaults(mask_first_episode_only=False)
 g.add_argument("--random-behaviour", dest="random_behaviour", action="store_true",
                help="collect with a uniform-random LEGAL behaviour policy "
                     "(order-invariant, board-revealing data, no learned-policy "
@@ -435,6 +464,11 @@ if args.wandb and not args.vis_only:
             "stop_critic_fe": args.stop_critic_fe,
             "vtrace_actor": args.vtrace_actor,
             "vtrace_center_advantage": args.vtrace_center_advantage,
+            "vtrace_normalize_advantage": args.vtrace_normalize_advantage,
+            "ppo_clip_eps": args.ppo_clip_eps,
+            "rho_bar": args.rho_bar,
+            "c_bar": args.c_bar,
+            "mask_first_episode_only": args.mask_first_episode_only,
             "alpha_anneal_final": args.alpha_anneal_final,
             "batch_size": args.batch_size,
             "sequence_length": args.sequence_length,
@@ -1123,7 +1157,7 @@ if not args.vis_only:
         alpha=args.alpha, autotune_alpha=args.autotune_alpha,
         batch_size=args.batch_size, gamma=args.gamma, tau=args.tau,
         lambda1=args.lambda1, lambda2=args.lambda2,
-        c_bar=1.05, rho_bar=1.05, lambda_truncation=20,
+        c_bar=args.c_bar, rho_bar=args.rho_bar, lambda_truncation=20,
         sequence_length=args.sequence_length,
         burn_in_length=args.burn_in_length,
         lambda_coef=args.lambda_coef, fake_onpolicy_loss=args.fake_onpolicy_loss,
@@ -1136,6 +1170,9 @@ if not args.vis_only:
         stop_critic_fe=args.stop_critic_fe,
         vtrace_actor=args.vtrace_actor,
         vtrace_center_advantage=args.vtrace_center_advantage,
+        vtrace_normalize_advantage=args.vtrace_normalize_advantage,
+        ppo_clip_eps=args.ppo_clip_eps,
+        mask_first_episode_only=args.mask_first_episode_only,
         gvd_cumulant_diff=args.gvd_cumulant_diff,
         gvd_cumulant_scale=args.gvd_cumulant_scale,
         random_behaviour=args.random_behaviour,
