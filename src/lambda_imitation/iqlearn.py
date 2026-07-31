@@ -2021,6 +2021,7 @@ def create_iqlearn(
         alpha: jax.Array,
         key: jax.Array,
         next_mask: jax.Array | None = None,
+        mask: jax.Array | None = None,
     ) -> Tuple[jax.Array, dict]:
         """SAC Bellman MSE loss for the twin-critic (continuous and discrete).
 
@@ -2045,6 +2046,9 @@ def create_iqlearn(
             key: JAX PRNG key (used only on the continuous path).
             next_mask: Optional action mask for the next state ``s'``
                 (discrete only); used inside ``V(s')``.
+            mask: Optional action mask for the CURRENT state ``s`` (discrete
+                only); used only by the ``dense_value_coef`` term, which needs
+                ``π(a|s)`` to weight the expectation over actions.
 
         Returns:
             ``(scalar_loss, metrics)`` where metrics contains
@@ -2068,8 +2072,33 @@ def create_iqlearn(
         )
 
         q1, q2 = get_q_both(critic, critic_graph, latents, actions)
-        loss = 0.5 * (jnp.mean((q1 - target_q) ** 2) + jnp.mean((q2 - target_q) ** 2))
-        return loss, {"critic_loss": loss, "target_q": target_q.mean()}
+        loss = jnp.array(0.0)
+        if params.sparse_value_loss:
+            loss = loss + 0.5 * (jnp.mean((q1 - target_q) ** 2)
+                                 + jnp.mean((q2 - target_q) ** 2))
+        metrics = {"critic_loss": loss, "target_q": target_q.mean()}
+        if params.dense_value_coef > 0.0 and is_discrete:
+            # DENSE term (see dense_value_coef): the main SAC critic regresses
+            # only Q(s,a_t), so like the λ-critics it feeds the shared FE through
+            # one action column per step.  Regress the expected value
+            # V(s) = Σ_a π(a|s)·min(Q1,Q2)(s,a) against the same 1-step target so
+            # every column carries gradient.  π from the TARGET actor (no actor
+            # perturbation); no entropy term, matching the λ-critic dense term.
+            v_dense = get_v(
+                actor_target,
+                critic,
+                critic_graph,
+                jnp.array(0.0),
+                latents,
+                key_v,
+                include_entropy=False,
+                mask=mask,
+            )
+            l_dense = jnp.mean((v_dense - target_q) ** 2)
+            loss = loss + params.dense_value_coef * l_dense
+            metrics["critic_dense_loss"] = l_dense
+            metrics["critic_loss"] = loss
+        return loss, metrics
 
     def loss_ld(
         lambda1_critic: TwinCriticState,
@@ -2911,6 +2940,7 @@ def create_iqlearn(
             alpha,
             key_critic,
             next_mask=_flat(masks_tm[1:]) if masks_tm is not None else None,
+            mask=_flat(masks_tm[:-1]) if masks_tm is not None else None,
         )
         metrics.update(metrics_critic)
 
