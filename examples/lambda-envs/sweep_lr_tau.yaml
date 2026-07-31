@@ -1,0 +1,93 @@
+# W&B sweep over all (agent) learning rates + the target-net EMA coefficient τ
+# for battleship_board_probe.py.
+#
+# How the override works: under `wandb agent` the probe sets WANDB_SWEEP_ID, so
+# its sweep block (battleship_board_probe.py, right after parse_known_args)
+# attaches to the agent's run and overrides argparse from wandb.config — so the
+# parameter KEYS below must be the underscore arg *dests* (fe_lr, not fe-lr).
+# Fixed params live in the same `parameters` block and are applied the same way.
+#
+# Objective: the smoothed final return aggregated across seeds
+# (final/return_smoothed/mean), which the script logs to the run summary after
+# training.  Return is negative (per-step penalty), so we MAXIMIZE it; the
+# equivalent steps-to-clear objective is shown commented below.
+#
+# Usage (run from examples/lambda-envs/ so `program` resolves):
+#   cd examples/lambda-envs
+#   wandb sweep --entity fhstp-data-intelligence-research-group \
+#               --project offline-lambda-battleship-probe sweep_lr_tau.yaml
+#
+# MULTIPLE AGENTS PER MACHINE (one VM, several GPUs): the script now writes each
+# sweep run into its own output dir (battleship_probe_output/run_<wandb_id>/), so
+# concurrent agents never clobber each other's artifacts.  Pin one agent per GPU
+# and stop JAX from grabbing all of them — launch one shell per GPU:
+#   CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+#       wandb agent <entity>/<project>/<sweep_id> &
+#   CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+#       wandb agent <entity>/<project>/<sweep_id> &
+#   # …one line per GPU.  Or loop:
+#   #   for g in $(seq 0 $((NGPU-1))); do
+#   #     CUDA_VISIBLE_DEVICES=$g wandb agent <entity>/<project>/<sweep_id> & done
+#
+# Each agent sees exactly one GPU (CUDA_VISIBLE_DEVICES) so they don't contend;
+# MEM_FRACTION<1 leaves headroom.  To run two agents on a SINGLE shared GPU
+# instead, give both XLA_PYTHON_CLIENT_MEM_FRACTION=0.45 (or
+# XLA_PYTHON_CLIENT_PREALLOCATE=false) so they fit alongside each other.
+
+program: battleship_board_probe.py
+method: bayes
+
+metric:
+  name: final/return_smoothed/mean
+  goal: maximize
+  # Alternative — minimise steps to clear the board:
+  # name: final/steps_to_clear_smoothed/mean
+  # goal: minimize
+
+parameters:
+  # ── swept: every agent learning rate + τ (log-uniform around the defaults) ──
+  fe_lr:                       # default 1e-4  (feature extractor)
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 1.0e-3
+  actor_lr:                    # default 1e-4
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 1.0e-3
+  critic_lr:                   # default 2e-4
+    distribution: log_uniform_values
+    min: 3.0e-5
+    max: 3.0e-3
+  gvd_sf_lr:                   # default 1.8e-4  (GVD successor-feature head)
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 3.0e-3
+  tau:                         # default 5e-3  (target-net EMA coefficient)
+    distribution: log_uniform_values
+    min: 1.0e-3
+    max: 5.0e-2
+
+  # ── fixed: concurrent multi-seed so the aggregated objective is meaningful ──
+  num_seeds:
+    value: 5                   # 5 seeds, all trained concurrently (one vmap group)
+  final_return_window:
+    value: 10                  # smooth the final return over the last 10 rounds
+
+  # ── fixed knobs you'll likely want to pin per sweep (defaults shown) ────────
+  rounds:
+    value: 100
+  train_steps:
+    value: 10000
+  # Trim the (post-training) probe phases so each run finishes sooner — the
+  # objective is logged before them.  Drop these to also get probe metrics.
+  probe_eval_interval:
+    value: 0                   # disable periodic probe-eval during the sweep
+  collect_steps:
+    value: 50000
+  probe_steps:
+    value: 200000
+
+# lambda_critic_lr (1e-4) and alpha_lr (1e-4) are hard-coded in the script's
+# Hyperparameters and would need a small code change (new CLI args) to sweep.
+# probe_lr (1e-4) is the probe MLP's lr — it affects only the eval/* decodability
+# metrics, not return/steps, so it's intentionally left out of this objective.

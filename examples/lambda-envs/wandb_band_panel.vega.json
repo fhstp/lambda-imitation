@@ -1,0 +1,30 @@
+{
+  "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+  "title": "Return — seed mean ± std-dev (light) / ± std-err (dark)",
+  "data": { "name": "wandb" },
+  "encoding": {
+    "x": {"field": "env_interactions", "type": "quantitative", "title": "env interactions"}
+  },
+  "layer": [
+    {
+      "mark": {"type": "area", "opacity": 0.18, "color": "#4c78a8"},
+      "encoding": {
+        "y":  {"field": "agg/return/lo_sd", "type": "quantitative", "title": "return"},
+        "y2": {"field": "agg/return/hi_sd"}
+      }
+    },
+    {
+      "mark": {"type": "area", "opacity": 0.35, "color": "#4c78a8"},
+      "encoding": {
+        "y":  {"field": "agg/return/lo_se", "type": "quantitative"},
+        "y2": {"field": "agg/return/hi_se"}
+      }
+    },
+    {
+      "mark": {"type": "line", "strokeWidth": 2, "color": "#1b4f72"},
+      "encoding": {
+        "y": {"field": "agg/return/mean", "type": "quantitative"}
+      }
+    }
+  ]
+}

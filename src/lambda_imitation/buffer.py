@@ -179,6 +179,84 @@ def create_sequence_sample(
     return sample
 
 
+def create_episode_aligned_sequence_sample(
+    buffer_size: int,
+    sampling_size: int,
+    sequence_size: int,
+    keys: list[str],
+    terminated_key: str,
+) -> Callable[[Buffer, jax.Array], Tuple[BufferSample, Tuple[int]]]:
+    """Like :func:`create_sequence_sample` but windows START at episode starts.
+
+    A window may only begin at slot ``j`` when the *previous* slot ``(j-1) %
+    size`` was terminal, i.e. ``j`` is the first step of an episode.  The
+    recurrent carry there is genuinely zero (episode start), so training can
+    roll the FE from a zero carry with **no** burn-in and **no** stored carry —
+    eliminating stored-carry staleness entirely (drift-free by construction).
+
+    Requires ``sequence_size`` >= the longest episode for a window to contain a
+    whole episode; the window-validity check (all slots sampleable) is the same
+    as :func:`create_sequence_sample`.
+
+    Args:
+        buffer_size: Total capacity (slots).
+        sampling_size: Windows drawn per call.
+        sequence_size: Window length (``burn_in + sequence + lambda_truncation``).
+        keys: Buffer keys to gather into ``this_info``.
+        terminated_key: Buffer key holding the per-step done flag (used to
+            locate episode-start slots).
+
+    Returns:
+        ``sample(buffer, key) -> (BufferSample, indices)``.  Falls back to the
+        plain window-validity distribution if the buffer currently contains no
+        valid episode-start window (e.g. a cold buffer), so it never divides by
+        zero.
+    """
+
+    base_indices = jnp.vstack((jnp.arange(sequence_size),) * sampling_size)
+
+    def sample(buffer: Buffer, key: jax.Array) -> Tuple[BufferSample, jax.Array]:
+        # Window validity: every slot in [j, j+sequence_size] must be sampleable
+        # (same circular reduce-window as create_sequence_sample).
+        x = buffer.sampling_ok.astype(jnp.int32)
+        padded = jnp.concatenate([x, x[:sequence_size]])
+        window_ok = jax.lax.reduce_window(
+            padded,
+            init_value=jnp.iinfo(padded.dtype).max,
+            computation=jax.lax.min,
+            window_dimensions=(sequence_size + 1,),
+            window_strides=(1,),
+            padding="VALID",
+        ).astype(jnp.float32)
+
+        # Episode-start mask: slot j starts an episode iff slot (j-1) was
+        # terminal.  ``jnp.roll(term, 1)[j] == term[j-1]`` (circular).
+        term = buffer.info[terminated_key].reshape(buffer_size).astype(jnp.float32)
+        start_mask = (jnp.roll(term, 1) > 0.5).astype(jnp.float32)
+
+        aligned = window_ok * start_mask
+        total = aligned.sum()
+        # Fallback to plain window-validity if no aligned start exists yet.
+        probs = jnp.where(total > 0, aligned, window_ok)
+        probs = probs / probs.sum()
+
+        indices = jax.random.choice(key, buffer_size, (sampling_size, 1), p=probs)
+        sequence_indices = (indices + base_indices) % buffer_size
+
+        return (
+            BufferSample(
+                this_info=jax.tree.map(
+                    lambda arr: arr[sequence_indices],
+                    {k: buffer.info[k] for k in keys},
+                ),
+                next_info={},
+            ),
+            sequence_indices,
+        )
+
+    return sample
+
+
 def create_buffer(
     shapes: dict[str, tuple[int, ...]],
     size: int,

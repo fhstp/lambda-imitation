@@ -51,7 +51,12 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 
-from .buffer import Buffer, create_buffer, create_sequence_sample
+from .buffer import (
+    Buffer,
+    create_buffer,
+    create_episode_aligned_sequence_sample,
+    create_sequence_sample,
+)
 
 # Bounds for the squashed log-standard-deviation of the policy distribution.
 # The raw output is tanh-squashed and then rescaled into this range to keep
@@ -469,6 +474,70 @@ class Hyperparameters(NamedTuple):
     # never by the policy-improvement gradient. The actor is a head on detached
     # features. Removes actor↔critic gradient conflict on the shared encoder.
     stop_actor_fe: bool = False
+    # If True, stop-gradient the online FE latents feeding the CRITIC losses
+    # (main twin critic + the λ-critics + their LD discrepancy). The value heads
+    # then learn on detached features and never backprop into the shared FE.
+    # Mirror of gvd_stop_fe for the SF heads: together the two knobs sever the
+    # whole value side from the encoder, isolating whether value-magnitude
+    # inflation is being driven into the shared recurrent memory by the critic.
+    stop_critic_fe: bool = False
+    # If True, replace the SAC E_π[Q] actor objective with an off-policy
+    # V-trace (IMPALA-style) policy gradient.  The actor then maximises
+    #   E[ ρ_t · Â_t · log π(a_t|s_t) ] + α·H(π),
+    # where Â_t = ρ_t (r_t + γ(1-d_t) v_{t+1} − V(s_t)) is the V-trace
+    # advantage: V(s) = Σ_a π(a|s) Q(s,a) from the twin-Q critic under the
+    # target policy, and v_t the V-trace return (same backward recursion as the
+    # λ-critics, full trace lam=1).  Only the taken action's log-prob carries a
+    # gradient — there is no maximisation over the (mis-calibrated) untaken-action
+    # Q, which is what drives the deadly-triad value-magnitude divergence under
+    # value-greedy improvement.  The critic / λ-critic / (G)VD losses are
+    # unchanged; the actor simply reads the critic as a baseline.  Discrete only.
+    vtrace_actor: bool = False
+    # If True, build the GVD successor-feature cumulant as the temporal
+    # DIFFERENCE f_t = φ(o_{t+1}) − φ(o_t) (Jaderberg-style) instead of the raw
+    # f_t = φ(o_t).  The paper uses this in its deep-RL section as an
+    # SF-collapse remedy: a difference cumulant telescopes so the SF value
+    # predicts (roughly) φ(o_end) − φ(o_t) — for a spatial hit map, the cells
+    # that WILL be hit but haven't been = the remaining ship locations, which
+    # is board-dependent and cannot be matched by a count-level marginal.
+    # Removes the constant/marginal component that lets both λ-heads agree
+    # trivially (the discrepancy → 0 without a Markov memory).  The difference
+    # is zeroed across episode boundaries (via 1 − done at the terminal step).
+    gvd_cumulant_diff: bool = False
+    # If True, sample training windows that START at an episode start (the slot
+    # after a terminal) instead of anywhere. The recurrent carry there is
+    # genuinely zero, so the FE can be rolled from a zero carry with NO burn-in
+    # and NO stored carry — eliminating stored-carry staleness (drift-free by
+    # construction). Requires sequence_length >= the longest episode to contain
+    # a whole episode per window. Pair with burn_in_from_stored_carry=False and
+    # burn_in_length=0.
+    episode_aligned_sampling: bool = False
+    # If True, subtract the batch-mean advantage in the V-trace actor loss
+    # before the policy-gradient term (standard A2C/IMPALA variance reduction).
+    # Targets the observed systematic advantage offset (lagging value baseline →
+    # almost all advantages positive → policy reinforces sampled spread and
+    # never sharpens). Only affects the vtrace_actor path.
+    vtrace_center_advantage: bool = False
+    # Scalar multiplier on the GVD successor-feature cumulant. The SF value is
+    # E[Σ γ^t c_t]; for a raw hit cumulant (c∈{0,1}) that grows to ~O(1/(1-γ)),
+    # whose large TD targets drive the SF heads into deadly-triad divergence
+    # (sf1 → large negative, violating the c≥0 lower bound → garbage discrepancy).
+    # Setting scale≈(1-γ) turns the SF into a bounded "expected future hit-rate"
+    # in [0,1], stabilising the regression while preserving the (interpretable)
+    # signal. The discrepancy scales by scale², so retune gvd_coef accordingly.
+    gvd_cumulant_scale: float = 1.0
+    # If True, the online behaviour policy executes a uniform-random LEGAL action
+    # each step (instead of the actor's), giving board-revealing, order-invariant
+    # data with no learned-policy structure. Pair with actor_lr=0/critic_lr=0 +
+    # stop_actor_fe + stop_critic_fe to train the FE by the GVD objective ALONE
+    # on random data — the clean isolation of reward-free memory-forcing.
+    random_behaviour: bool = False
+    # Global gradient-norm clip applied to every optimizer (FE / actor / critic /
+    # λ-critics / GVD-SF heads), matching the reference PPO's MAX_GRAD_NORM=0.5.
+    # 0.0 disables clipping (the prior behaviour). Unclipped gradients on the
+    # large-magnitude (+100) reward + off-policy value learning are a primary
+    # deadly-triad divergence driver — set ~0.5 to stabilise.
+    grad_clip: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -814,12 +883,25 @@ def create_iqlearn(
         online_mc_this_keys.append(carry_key)
         if use_prev_action:
             online_mc_this_keys.append(prev_action_key)
-    online_buffer_lambda_sample = create_sequence_sample(
-        online_buffer.size,
-        params.online_batch_size,
-        params.burn_in_length + params.sequence_length + params.lambda_truncation,
-        online_mc_this_keys,
-    )
+    if params.episode_aligned_sampling:
+        # Windows begin at episode starts (previous slot terminal) → the carry
+        # there is genuinely zero, so training rolls the FE from zero with no
+        # burn-in / no stored carry: drift-free, no staleness. Pair with
+        # burn_in_from_stored_carry=False and (ideally) burn_in_length=0.
+        online_buffer_lambda_sample = create_episode_aligned_sequence_sample(
+            online_buffer.size,
+            params.online_batch_size,
+            params.burn_in_length + params.sequence_length + params.lambda_truncation,
+            online_mc_this_keys,
+            terminated_key,
+        )
+    else:
+        online_buffer_lambda_sample = create_sequence_sample(
+            online_buffer.size,
+            params.online_batch_size,
+            params.burn_in_length + params.sequence_length + params.lambda_truncation,
+            online_mc_this_keys,
+        )
     # Pre-initialise every behaviour_key slot to 1.0 so that slots which
     # have never been written by run_env_step (pre-fill and as-yet-unwritten
     # slots) contribute an IS denominator of 1.0 rather than 0.0.
@@ -1018,15 +1100,23 @@ def create_iqlearn(
         )
 
     # Optimizers: actor operates on its nnx.GraphState; critic on TwinCriticState.
-    fe_optimizer = optax.adam(params.fe_lr)
-    actor_optimizer = optax.adam(params.actor_lr)
-    critic_optimizer = optax.adam(params.critic_lr)
+    def _mk_opt(lr):
+        # Optionally clip the global gradient norm (reference MAX_GRAD_NORM=0.5)
+        # before Adam. grad_clip <= 0 disables (prior behaviour).
+        if params.grad_clip and params.grad_clip > 0:
+            return optax.chain(optax.clip_by_global_norm(params.grad_clip),
+                               optax.adam(lr))
+        return optax.adam(lr)
+
+    fe_optimizer = _mk_opt(params.fe_lr)
+    actor_optimizer = _mk_opt(params.actor_lr)
+    critic_optimizer = _mk_opt(params.critic_lr)
     if approximate_lambda:
-        lambda1_critic_optimizer = optax.adam(params.lambda_critic_lr)
-        lambda2_critic_optimizer = optax.adam(params.lambda_critic_lr)
+        lambda1_critic_optimizer = _mk_opt(params.lambda_critic_lr)
+        lambda2_critic_optimizer = _mk_opt(params.lambda_critic_lr)
     if use_gvd:
-        gvd_sf1_optimizer = optax.adam(params.gvd_sf_lr)
-        gvd_sf2_optimizer = optax.adam(params.gvd_sf_lr)
+        gvd_sf1_optimizer = _mk_opt(params.gvd_sf_lr)
+        gvd_sf2_optimizer = _mk_opt(params.gvd_sf_lr)
     alpha_optimizer = optax.adam(params.alpha_lr)
 
     log_alpha = jnp.array(jnp.log(params.alpha))
@@ -1689,6 +1779,137 @@ def create_iqlearn(
         metrics.update({"v": v.mean()})
         return -v.mean(), metrics
 
+    def loss_actor_vtrace(
+        actor: nnx.GraphState,
+        critic: TwinCriticState,
+        target_actor: nnx.GraphState,
+        critic_target: TwinCriticState,
+        actor_latents: jax.Array,
+        target_latents: jax.Array,
+        actions: jax.Array,
+        rewards: jax.Array,
+        dones: jax.Array,
+        behaviour_probs: jax.Array,
+        alpha: jax.Array,
+        key: jax.Array,
+        masks: jax.Array | None = None,
+    ) -> Tuple[jax.Array, dict]:
+        """Off-policy V-trace (IMPALA-style) policy-gradient actor loss.
+
+        Replaces the SAC ``max_π E_π[Q]`` objective (see :func:`loss_actor`).
+        All inputs are time-major ``(T', B, …)`` — the same slices the critic
+        and λ-critic losses consume.  The state-value baseline ``V(s) =
+        Σ_a π(a|s) Q(s,a)`` and the V-trace return ``v_t`` are computed under
+        the *target* actor + *target* critic (stable, fully stop-gradient'd);
+        the only gradient path is through ``log π_online(a_t|s_t)`` on the
+        online latents (so the actor still shapes the shared FE unless
+        ``stop_actor_fe`` detached ``actor_latents`` upstream) and through the
+        entropy bonus.  The trailing ``lambda_truncation`` steps are dropped
+        (missing bootstrap mass at the unroll tail), matching the critics.
+
+        Args:
+            actor: Online actor head (the only differentiated network here).
+            critic: Online twin-critic (unused; accepted for call-site
+                symmetry with :func:`loss_actor`).
+            target_actor: EMA actor for the baseline / V-trace value.
+            critic_target: EMA twin-critic for the baseline / V-trace value.
+            actor_latents: Online-FE features ``(T', B, feat)`` — already
+                stop-gradient'd for the FE iff ``stop_actor_fe``.
+            target_latents: Target-FE features ``(T', B, feat)``.
+            actions: Time-major taken actions ``(T', B, 1)`` (float indices).
+            rewards / dones / behaviour_probs: Time-major ``(T', B)``.
+            alpha: Entropy temperature (reused as the PG entropy coefficient).
+            key: PRNG key (unused on the discrete path).
+            masks: Optional time-major action masks ``(T', B, action_dim)``.
+
+        Returns:
+            ``(scalar_loss, metrics)`` with ``"entropy"`` (so alpha autotune
+            keeps working), ``"v"``, ``"q"`` and V-trace diagnostics.
+        """
+        assert is_discrete, "vtrace_actor is only supported for discrete actions."
+        Tp, B = actor_latents.shape[:2]
+
+        def _tb(a):
+            return a.reshape((Tp * B,) + a.shape[2:])
+
+        mask_flat = _tb(masks) if masks is not None else None
+
+        # Baseline V(s_t) under the target policy/critic (hard value, no
+        # entropy) — a scalar per state, far better conditioned than the
+        # per-action Q differences the SAC actor chased.
+        V = get_v(
+            target_actor, critic_target, critic_graph, jnp.array(0.0),
+            _tb(target_latents), key, include_entropy=False, mask=mask_flat,
+        ).reshape(Tp, B)
+
+        if params.fake_onpolicy_loss:
+            ratios = jnp.ones_like(behaviour_probs)
+        else:
+            ratios = get_importance_ratios(
+                target_actor, _tb(target_latents), _tb(actions),
+                _tb(behaviour_probs), mask_flat,
+            ).reshape(Tp, B)
+
+        # V-trace return v_t (full trace, lam=1) — identical backward recursion
+        # to loss_vtrace_lambda_sequence's scan_target.
+        def scan_target(scan_carry, x):
+            v_sp1, V_sp1 = scan_carry
+            V_s, done, reward, ratio = x
+            rho = jnp.minimum(params.rho_bar, ratio)
+            c = jnp.minimum(params.c_bar, ratio)
+            delta_V = reward + (1 - done) * params.gamma * V_sp1 - V_s
+            v_s = V_s + rho * delta_V + (1 - done) * params.gamma * c * (v_sp1 - V_sp1)
+            return (v_s, V_s), v_s
+
+        _carry, vs = jax.lax.scan(
+            scan_target,
+            (jnp.zeros_like(V[0]), jnp.zeros_like(V[0])),
+            (V, dones, rewards, ratios),
+            reverse=True,
+            unroll=8,
+        )
+
+        # Advantage Â_t = ρ_t (r_t + γ(1-d_t) v_{t+1} − V_t); v_{t+1} shifted
+        # (the last entry is dropped by the lambda_truncation slice below).
+        v_next = jnp.concatenate([vs[1:], vs[-1:]], axis=0)
+        rho = jnp.minimum(params.rho_bar, ratios)
+        adv = jax.lax.stop_gradient(
+            rho * (rewards + (1 - dones) * params.gamma * v_next - V)
+        )
+
+        # Gradient path: log π_online(a_t|s_t) on the ONLINE latents.
+        logits = _apply_mask(run_actor(actor, _tb(actor_latents)), mask_flat)
+        logits = logits.reshape(Tp, B, -1)
+        log_probs = jax.nn.log_softmax(logits, axis=-1)
+        probs = jax.nn.softmax(logits, axis=-1)
+        idx = jnp.round(actions.reshape(Tp, B)).astype(jnp.int32)
+        logp_a = jnp.take_along_axis(log_probs, idx[..., None], axis=-1)[..., 0]
+        entropy = -(probs * log_probs).sum(-1)  # (T', B) exact H(π)
+
+        L = params.lambda_truncation
+        keep = slice(0, -L) if L > 0 else slice(None)
+        adv_keep = adv[keep]
+        adv_raw_mean = adv_keep.mean()  # keep the RAW mean as the offset diagnostic
+        # --vtrace-center-advantage: subtract the batch-mean advantage (A2C/IMPALA
+        # variance reduction). Removes the systematic offset (baseline lag) that
+        # otherwise makes almost every advantage positive — restoring the
+        # "suppress bad actions" half of the policy gradient so the policy can
+        # actually sharpen instead of reinforcing whatever spread was sampled.
+        if params.vtrace_center_advantage:
+            adv_keep = adv_keep - adv_raw_mean
+        pg_loss = -(adv_keep * logp_a[keep]).mean()
+        ent = entropy[keep].mean()
+        loss = pg_loss - alpha * ent
+        metrics = {
+            "actor_pg_loss": pg_loss,
+            "entropy": ent,
+            "v": V[keep].mean(),
+            "q": V[keep].mean(),
+            "vtrace_adv": adv_raw_mean,
+            "vtrace_v": vs[keep].mean(),
+        }
+        return loss, metrics
+
     def loss_critic(
         actor_target: nnx.GraphState,
         critic: TwinCriticState,
@@ -1823,13 +2044,25 @@ def create_iqlearn(
             ``new_carry`` / ``new_prev_action`` are the post-step FE state
             (both reset to zero on episode termination).
         """
-        key_act, key_step = jax.random.split(key, 2)
+        key_act, key_step, key_rb = jax.random.split(key, 3)
         obs = env.get_obs(env_state, env_params)
         pa = env_prev_action if use_prev_action else None
         if is_discrete:
             action, new_carry, prob = predict(
                 sac, obs, env_carry, key_act, return_prob=True, prev_action=pa
             )
+            if params.random_behaviour:
+                # Override the executed action with a uniform draw over LEGAL
+                # cells — a fixed random behaviour policy for isolating the
+                # representation objective (e.g. GVD-only) on board-revealing,
+                # order-invariant data with no learned-policy structure. The FE
+                # carry from ``predict`` is kept (the memory still rolls over the
+                # observation); only the env action / behaviour prob change.
+                _mask = (mask_fn(obs) if mask_fn is not None
+                         else jnp.ones((action_dim,), jnp.float32))
+                _rb = jax.random.categorical(key_rb, jnp.where(_mask > 0, 0.0, -1e9))
+                action = _rb.astype(jnp.float32)
+                prob = 1.0 / jnp.maximum(_mask.sum(), 1.0)
             env_action = jnp.round(action).astype(jnp.int32)
         else:
             if approximate_lambda:
@@ -2419,14 +2652,40 @@ def create_iqlearn(
         # while preserving GVD's influence on the representation.
         actor_latent = (jax.lax.stop_gradient(latent)
                         if params.stop_actor_fe else latent)
-        l_actor, metrics = loss_actor(
-            actor_state,
-            jax.lax.stop_gradient(critic_state),
-            _flat(actor_latent),
-            alpha,
-            key_actor,
-            mask=_flat(masks_tm) if masks_tm is not None else None,
-        )
+        if params.vtrace_actor:
+            # Off-policy V-trace policy gradient (IMPALA-style) instead of the
+            # SAC E_π[Q] objective. Consumes the time-major sequence directly.
+            l_actor, metrics = loss_actor_vtrace(
+                actor_state,
+                jax.lax.stop_gradient(critic_state),
+                actor_target_state,
+                critic_target_state,
+                actor_latent,
+                target_latent,
+                actions_tm,
+                rewards_tm,
+                terminated_tm,
+                behaviour_tm,
+                alpha,
+                key_actor,
+                masks=masks_tm,
+            )
+        else:
+            l_actor, metrics = loss_actor(
+                actor_state,
+                jax.lax.stop_gradient(critic_state),
+                _flat(actor_latent),
+                alpha,
+                key_actor,
+                mask=_flat(masks_tm) if masks_tm is not None else None,
+            )
+
+        # --stop-critic-fe: detach the online FE latents feeding the value heads
+        # (mirror of gvd_stop_fe / stop_actor_fe). The critic still learns; its
+        # loss no longer backprops into the shared FE via `latent`. target_latent
+        # is already the target FE and is left untouched.
+        critic_latent = (jax.lax.stop_gradient(latent)
+                         if params.stop_critic_fe else latent)
 
         # Critic: pair (latent[t], target_latent[t+1]) so V(s') is computed at
         # the next state. Action / reward / terminated at index t.
@@ -2434,7 +2693,7 @@ def create_iqlearn(
             actor_target_state,
             critic_state,
             critic_target_state,
-            _flat(latent[:-1]),
+            _flat(critic_latent[:-1]),
             _flat(target_latent[1:]),
             _flat(actions_tm[:-1]),
             rewards_tm[:-1].reshape(-1),
@@ -2457,7 +2716,7 @@ def create_iqlearn(
                 rewards_tm,
                 terminated_tm,
                 behaviour_tm,
-                latent,
+                critic_latent,
                 target_latent,
                 key_lambda_critic1,
                 masks=masks_tm,
@@ -2473,7 +2732,7 @@ def create_iqlearn(
                 rewards_tm,
                 terminated_tm,
                 behaviour_tm,
-                latent,
+                critic_latent,
                 target_latent,
                 key_lambda_critic2,
                 masks=masks_tm,
@@ -2485,7 +2744,7 @@ def create_iqlearn(
                 lambda2_critic_state,
                 lambda1_critic_graph,
                 lambda2_critic_graph,
-                _flat(latent[:-1]),
+                _flat(critic_latent[:-1]),
                 _flat(actions_tm[:-1]),
             )
             metrics.update(metrics_ld)
@@ -2506,11 +2765,18 @@ def create_iqlearn(
             phi_tm = jnp.swapaxes(phi, 0, 1)[_BL:]           # (T', B, n)
             # Cumulant f_t = φ(o_t, a_{t-1}): the paper's pseudo-return is
             # Σ γ^t f(ω_t) directly (Eq. 4/6), so the features go into the
-            # reward slot of the V-trace recursion.  The alternative
-            # f_t = φ(o_{t+1}) − φ(o_t) (Jaderberg-style differences, used in
-            # the paper's deep-RL section as an SF-collapse remedy) was
-            # deliberately NOT adopted here — revisit if SF collapse shows up.
-            cumulants = phi_tm
+            # reward slot of the V-trace recursion.  --gvd-cumulant-diff swaps
+            # in the Jaderberg-style temporal difference f_t = φ(o_{t+1})−φ(o_t)
+            # (the paper's SF-collapse remedy), zeroed across episode boundaries
+            # so a terminal→reset transition contributes no spurious jump.
+            if params.gvd_cumulant_diff:
+                phi_next = jnp.concatenate([phi_tm[1:], phi_tm[-1:]], axis=0)
+                cumulants = (phi_next - phi_tm) * (1.0 - terminated_tm)[..., None]
+            else:
+                cumulants = phi_tm
+            # Bound the cumulant magnitude to keep the SF TD targets small and
+            # stop sf-head divergence (scale≈(1-γ) → SF in [0,1]). Default 1.0.
+            cumulants = cumulants * params.gvd_cumulant_scale
 
             # --gvd-stop-fe: sever GVD/SF gradients from the shared FE. The SF
             # heads still train (their targets come from target_latent, which is

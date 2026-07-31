@@ -132,6 +132,23 @@ g.add_argument("--behaviour-epsilon", type=float, default=0.0,
 g.add_argument("--approximate-lambda", dest="approximate_lambda", action="store_true")
 g.add_argument("--no-approximate-lambda", dest="approximate_lambda", action="store_false")
 parser.set_defaults(approximate_lambda=False)
+g.add_argument("--lambda1", type=float, default=0.05,
+               help="short-horizon λ for the value λ-critic (reference uses 0.1). "
+                    "Only active with --approximate-lambda.")
+g.add_argument("--lambda2", type=float, default=0.75,
+               help="long-horizon λ for the value λ-critic (reference uses 0.95). "
+                    "Only active with --approximate-lambda.")
+g.add_argument("--lambda-coef", dest="lambda_coef", type=float, default=1.0,
+               help="weight on the value λ-discrepancy loss (Huber between the "
+                    "two λ-critics), which shapes the shared FE. Only active "
+                    "with --approximate-lambda.")
+g.add_argument("--fake-onpolicy-loss", dest="fake_onpolicy_loss", action="store_true",
+               help="clamp every V-trace importance ratio to 1.0, i.e. treat "
+                    "replay data as on-policy (applies to the λ-critic and GVD "
+                    "successor-feature losses alike)")
+g.add_argument("--no-fake-onpolicy-loss", dest="fake_onpolicy_loss",
+               action="store_false")
+parser.set_defaults(fake_onpolicy_loss=True)
 g.add_argument("--gvd", dest="gvd", action="store_true",
                help="enable the GVD successor-feature branches (reward-free "
                     "memory pressure; an agent trained with --gvd must be "
@@ -142,6 +159,34 @@ g.add_argument("--gvd-coef", type=float, default=0.2, help="GVD discrepancy coef
 g.add_argument("--gvd-features", type=int, default=16,
                help="random-projection width of the GVD feature map; total dim "
                     "is 1 (hit bit) + N (default 16)")
+g.add_argument("--gvd-spatial", dest="gvd_spatial", action="store_true",
+               help="use the action-localised SPATIAL hit cumulant "
+                    "phi = [hit | (one_hot(a_prev)*hit) @ P] (P: N x gvd_features "
+                    "fixed random projection) instead of the scalar hit bit. "
+                    "Gives the memory a per-location target (restores the "
+                    "pre-42a0a5f cumulant).")
+parser.set_defaults(gvd_spatial=False)
+g.add_argument("--gvd-raw", dest="gvd_raw", action="store_true",
+               help="with --gvd-spatial, skip the random projection P and use "
+                    "the RAW per-cell hit map phi = [hit | one_hot(a_prev)*hit] "
+                    "(N+1 dims). The projection makes the spatial signal "
+                    "near-zero-mean and board-independent in expectation "
+                    "(washout); raw per-cell keeps a board-dependent target.")
+parser.set_defaults(gvd_raw=False)
+g.add_argument("--gvd-cumulant-diff", dest="gvd_cumulant_diff", action="store_true",
+               help="build the SF cumulant as the temporal difference "
+                    "f_t = phi(o_{t+1}) - phi(o_t) (Jaderberg-style SF-collapse "
+                    "remedy) instead of raw phi(o_t); telescopes so the SF "
+                    "predicts the remaining (board-dependent) ship cells.")
+parser.set_defaults(gvd_cumulant_diff=False)
+g.add_argument("--gvd-cumulant-scale", dest="gvd_cumulant_scale", type=float,
+               default=1.0,
+               help="scalar multiplier on the GVD SF cumulant. The raw hit "
+                    "cumulant's SF grows to ~O(1/(1-gamma)) and its large TD "
+                    "targets diverge the SF heads (sf1->negative). Set ~0.01 "
+                    "(=1-gamma) to bound the SF to [0,1] (expected future "
+                    "hit-rate) and stabilise; retune --gvd-coef (discrepancy "
+                    "scales by scale^2). Default 1.0 = unchanged.")
 g.add_argument("--gvd-lambda1", type=float, default=0.05)
 g.add_argument("--gvd-lambda2", type=float, default=0.75)
 g.add_argument("--gvd-sf-lr", type=float, default=1.8e-4)
@@ -156,6 +201,40 @@ g.add_argument("--stop-actor-fe", dest="stop_actor_fe", action="store_true",
                     "(SAC-AE recipe); removes actor-vs-critic gradient conflict "
                     "on the shared recurrent memory")
 parser.set_defaults(stop_actor_fe=False)
+g.add_argument("--stop-critic-fe", dest="stop_critic_fe", action="store_true",
+               help="stop-gradient the FE latents feeding the critic losses "
+                    "(main twin critic + lambda-critics + LD) so no value-head "
+                    "gradient reaches the shared feature extractor; mirror of "
+                    "--gvd-stop-fe, together they sever the whole value side "
+                    "from the encoder (critic still trains)")
+parser.set_defaults(stop_critic_fe=False)
+g.add_argument("--vtrace-actor", dest="vtrace_actor", action="store_true",
+               help="replace the SAC E_pi[Q] actor with an off-policy V-trace "
+                    "(IMPALA-style) policy gradient: the actor maximises "
+                    "rho*advantage*log pi(a|s) + alpha*H, with a V-trace value "
+                    "baseline from the twin-Q critic. Removes the value-greedy "
+                    "policy improvement (the deadly-triad divergence driver); "
+                    "critic/GVD losses unchanged. Discrete only.")
+parser.set_defaults(vtrace_actor=False)
+g.add_argument("--vtrace-center-advantage", dest="vtrace_center_advantage",
+               action="store_true",
+               help="subtract the batch-mean advantage in the V-trace actor "
+                    "(A2C/IMPALA variance reduction); removes the baseline-lag "
+                    "offset so the policy gradient can sharpen the policy "
+                    "instead of reinforcing sampled spread.")
+parser.set_defaults(vtrace_center_advantage=False)
+g.add_argument("--random-behaviour", dest="random_behaviour", action="store_true",
+               help="collect with a uniform-random LEGAL behaviour policy "
+                    "(order-invariant, board-revealing data, no learned-policy "
+                    "structure). Pair with --actor-lr 0 --critic-lr 0 "
+                    "--stop-actor-fe --stop-critic-fe to shape the FE by GVD "
+                    "alone on random data (isolate reward-free memory-forcing).")
+parser.set_defaults(random_behaviour=False)
+g.add_argument("--alpha-anneal-final", dest="alpha_anneal_final", type=float,
+               default=None, metavar="A_FINAL",
+               help="linearly anneal the entropy temperature alpha from --alpha "
+                    "(round 1) to this value (final round) across training; "
+                    "None (default) = fixed alpha. Requires autotune off.")
 g.add_argument("--batch-size", type=int, default=128)
 g.add_argument("--sequence-length", type=int, default=80)
 g.add_argument("--burn-in-length", type=int, default=5)
@@ -169,6 +248,15 @@ g.add_argument("--no-burn-in-from-stored-carry", dest="burn_in_from_stored_carry
                action="store_false")
 parser.set_defaults(burn_in_from_stored_carry=True)
 g.add_argument("--online-buffer-size", type=int, default=200_000)
+g.add_argument("--episode-aligned-sampling", dest="episode_aligned_sampling",
+               action="store_true",
+               help="sample training windows that START at an episode start "
+                    "(carry there is genuinely zero) instead of anywhere; roll "
+                    "the FE from zero with no burn-in / no stored carry — "
+                    "drift-free, no stored-carry staleness. Pair with "
+                    "--no-burn-in-from-stored-carry --burn-in-length 0 and "
+                    "--sequence-length >= the longest episode (rows*cols).")
+parser.set_defaults(episode_aligned_sampling=False)
 g.add_argument("--use-sac", dest="use_sac", action="store_true",
                help="whether or not to use a SAC entropy term for update"
                     "or just use entropy globally in loss")
@@ -177,7 +265,15 @@ parser.set_defaults(use_sac=False)
 
 g = parser.add_argument_group("data collection")
 g.add_argument("--collect-steps", type=int, default=100_000, help="total env steps to collect (default 100 000)")
-g.add_argument("--collect-epsilon", type=float, default=0.1, help="epsilon-greedy rate during collection (default 0.1)")
+g.add_argument("--collect-epsilon", type=float, default=1.0,
+               help="epsilon-greedy rate for PROBE data collection: fraction of "
+                    "shots taken uniformly at random over legal cells (perturbs "
+                    "the fire order). Default 1.0 = fully random order = the "
+                    "ORDER-INVARIANT probe (the honest board-memory metric; a "
+                    "positional/temporal tape can't survive it). Set 0.0 to "
+                    "probe under the agent's own order (tape-prone, inflated). "
+                    "Only affects probe/eval data (collect_rollout), not agent "
+                    "training or the critic/actor visualisations.")
 
 g = parser.add_argument_group("probe training")
 g.add_argument("--probe-steps", type=int, default=500_000, help="SGD steps (default 500 k)")
@@ -227,15 +323,20 @@ g.add_argument("--wandb-project", default="offline-lambda-battleship-probe", met
                help="W&B project name (default: offline-lambda-battleship-probe)")
 g.add_argument("--wandb-run-name", default=None, metavar="NAME", help="W&B run name (default: auto)")
 
-args, _ = parser.parse_known_args()
-
 # ── wandb sweep support ───────────────────────────────────────────────────────
 #
 # Under ``wandb agent`` the hyperparameters arrive via the sweep config, not the
 # CLI: the agent passes underscore-style ``--name=value`` args that match neither
-# the dashed flags nor the store_true/store_false pairs (parse_known_args drops
-# them).  Attach to the run the agent pre-created and override args from its
-# config instead.  Mirrors battleship_sac_mc.py's sweep block.
+# the dashed flags nor the store_true/store_false pairs, so only there we
+# tolerate unknown CLI args (they are validated via the sweep config below
+# instead).  Outside a sweep, unknown arguments are a hard error.  Attach to
+# the run the agent pre-created and override args from its config.  Mirrors
+# battleship_sac_mc.py's sweep block.
+
+if os.environ.get("WANDB_SWEEP_ID"):
+    args, _ = parser.parse_known_args()
+else:
+    args = parser.parse_args()
 
 _SWEEP_RUN = None
 if os.environ.get("WANDB_SWEEP_ID"):
@@ -250,8 +351,7 @@ if os.environ.get("WANDB_SWEEP_ID"):
         if _key in _SWEEP_IGNORED:
             continue
         if not hasattr(args, _key):
-            print(f"sweep config: ignoring unknown parameter {_k!r}")
-            continue
+            parser.error(f"sweep config: unknown parameter {_k!r}")
         if isinstance(_v, str) and _v.lower() in ("true", "false"):
             _v = _v.lower() == "true"
         elif _key in _ARG_TYPES:
@@ -301,6 +401,7 @@ if args.wandb and not args.vis_only:
             "dense_reward": args.dense_reward,
             "terminal_bonus": args.terminal_bonus,
             "fe_lr": args.fe_lr,
+            "grad_clip": args.grad_clip,
             "actor_lr": args.actor_lr,
             "critic_lr": args.critic_lr,
             "alpha": args.alpha,
@@ -315,18 +416,31 @@ if args.wandb and not args.vis_only:
             "projection_dim": args.projection_dim,
             "paper_arch": args.paper_arch,
             "approximate_lambda": args.approximate_lambda,
+            "lambda1": args.lambda1,
+            "lambda2": args.lambda2,
+            "lambda_coef": args.lambda_coef,
             "use_gvd": args.gvd,
             "gvd_coef": args.gvd_coef,
             "gvd_features": args.gvd_features,
+            "gvd_spatial": args.gvd_spatial,
+            "gvd_raw": args.gvd_raw,
+            "gvd_cumulant_diff": args.gvd_cumulant_diff,
+            "gvd_cumulant_scale": args.gvd_cumulant_scale,
+            "random_behaviour": args.random_behaviour,
             "gvd_lambda1": args.gvd_lambda1,
             "gvd_lambda2": args.gvd_lambda2,
             "gvd_sf_lr": args.gvd_sf_lr,
             "gvd_stop_fe": args.gvd_stop_fe,
             "stop_actor_fe": args.stop_actor_fe,
+            "stop_critic_fe": args.stop_critic_fe,
+            "vtrace_actor": args.vtrace_actor,
+            "vtrace_center_advantage": args.vtrace_center_advantage,
+            "alpha_anneal_final": args.alpha_anneal_final,
             "batch_size": args.batch_size,
             "sequence_length": args.sequence_length,
             "burn_in_length": args.burn_in_length,
             "burn_in_from_stored_carry": args.burn_in_from_stored_carry,
+            "episode_aligned_sampling": args.episode_aligned_sampling,
             "online_buffer_size": args.online_buffer_size,
             "rounds": args.rounds,
             "train_steps": args.train_steps,
@@ -340,6 +454,7 @@ if args.wandb and not args.vis_only:
             "probe_eval_steps": args.probe_eval_steps,
             "probe_eval_collect_steps": args.probe_eval_collect_steps,
             "use_sac": args.use_sac,
+            "fake_onpolicy_loss": args.fake_onpolicy_loss,
             "num_seeds": args.num_seeds,
             "concurrent_seeds": args.concurrent_seeds,
             "final_return_window": args.final_return_window,
@@ -928,8 +1043,15 @@ if not args.vis_only:
 
         def gvd_feature_fn(o, a_prev):
             hit = o[..., :1]  # result of a_prev (0 at episode starts)
-            # loc = jax.nn.one_hot(a_prev[..., 0].astype(jnp.int32), N)
-            return hit # jnp.concatenate([loc * hit, loc * (1-hit)], axis=-1)
+            if args.gvd_spatial:
+                loc = jax.nn.one_hot(a_prev[..., 0].astype(jnp.int32), N)
+                if args.gvd_raw:
+                    # raw per-cell hit map (N+1 dims), no projection washout
+                    return jnp.concatenate([hit, loc * hit], axis=-1)
+                # action-localised spatial hit cumulant, projected to
+                # gvd_features dims: [hit | (one_hot(a_prev)*hit) @ P].
+                return jnp.concatenate([hit, (loc * hit) @ _GVD_P], axis=-1)
+            return hit
     else:
         gvd_feature_fn = None
 
@@ -995,21 +1117,29 @@ if not args.vis_only:
         online_batch_size=128,
         online_buffer_size=args.online_buffer_size,
         target_entropy=args.target_entropy,
+        grad_clip=args.grad_clip,
         fe_lr=args.fe_lr, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
         lambda_critic_lr=1e-4, alpha_lr=1e-4,
         alpha=args.alpha, autotune_alpha=args.autotune_alpha,
         batch_size=args.batch_size, gamma=args.gamma, tau=args.tau,
-        lambda1=0.05, lambda2=0.75,
+        lambda1=args.lambda1, lambda2=args.lambda2,
         c_bar=1.05, rho_bar=1.05, lambda_truncation=20,
         sequence_length=args.sequence_length,
         burn_in_length=args.burn_in_length,
-        lambda_coef=1.0, fake_onpolicy_loss=True,
+        lambda_coef=args.lambda_coef, fake_onpolicy_loss=args.fake_onpolicy_loss,
         gvd_coef=args.gvd_coef,
         gvd_lambda1=args.gvd_lambda1,
         gvd_lambda2=args.gvd_lambda2,
         gvd_sf_lr=args.gvd_sf_lr,
         gvd_stop_fe=args.gvd_stop_fe,
         stop_actor_fe=args.stop_actor_fe,
+        stop_critic_fe=args.stop_critic_fe,
+        vtrace_actor=args.vtrace_actor,
+        vtrace_center_advantage=args.vtrace_center_advantage,
+        gvd_cumulant_diff=args.gvd_cumulant_diff,
+        gvd_cumulant_scale=args.gvd_cumulant_scale,
+        random_behaviour=args.random_behaviour,
+        episode_aligned_sampling=args.episode_aligned_sampling,
     )
 
     # Battleship episodes end after at most rows*cols shots (legal-action
@@ -1800,9 +1930,9 @@ if not args.vis_only:
                     seed_states[gi] = _unstack_state(batched, j)
                     p = os.path.join(args.output_dir, f"agent_seed{gi}.pkl")
                     leaves, treedef = jax.tree.flatten(seed_states[gi])
-                    with open(p, "wb") as f:
-                        pickle.dump({"leaves": [np.array(l) for l in leaves],
-                                     "treedef": treedef}, f)
+                    #with open(p, "wb") as f:
+                    #    pickle.dump({"leaves": [np.array(l) for l in leaves],
+                    #                 "treedef": treedef}, f)
             print(f"Saved {args.num_seeds} per-seed agents → {args.output_dir}/agent_seed*.pkl")
         else:
             for gi in range(args.num_seeds):
@@ -1862,10 +1992,10 @@ if not args.vis_only:
                     (f"test_dataset_seed{gi}.pkl", te_c[gi], te_b[gi], te_hm[gi], te_d[gi]),
                 ):
                     eb = _ep_bounds(d, len(c))
-                    with open(os.path.join(args.output_dir, nm), "wb") as f:
-                        pickle.dump({"carries": c, "board_masks": b, "hits_misses": hm,
-                                     "ep_bounds": eb, "rows": args.rows, "cols": args.cols,
-                                     "tag": tag}, f)
+                    #with open(os.path.join(args.output_dir, nm), "wb") as f:
+                    #    pickle.dump({"carries": c, "board_masks": b, "hits_misses": hm,
+                    #                 "ep_bounds": eb, "rows": args.rows, "cols": args.cols,
+                    #                 "tag": tag}, f)
             print(f"  → {args.output_dir}/dataset_seed*.pkl, test_dataset_seed*.pkl")
         else:
             tr_c = tr_b = tr_hm = None
@@ -1894,8 +2024,8 @@ if not args.vis_only:
             for gi in range(args.num_seeds):
                 pp = _unstack_state(probe_b, gi)
                 leaves, td = jax.tree.flatten(pp)
-                with open(os.path.join(args.output_dir, f"probe_seed{gi}.pkl"), "wb") as f:
-                    pickle.dump({"leaves": [np.array(l) for l in leaves], "treedef": td}, f)
+                #with open(os.path.join(args.output_dir, f"probe_seed{gi}.pkl"), "wb") as f:
+                #    pickle.dump({"leaves": [np.array(l) for l in leaves], "treedef": td}, f)
             print(f"  → {args.output_dir}/probe_seed*.pkl")
         else:
             params_list = []
@@ -1987,6 +2117,18 @@ if not args.vis_only:
         print(f"Training for {args.rounds} × {args.train_steps} = {total} steps…")
 
         for rnd in tqdm(range(_start_round + 1, args.rounds + 1), desc="Training"):
+            # Linear alpha anneal (fixed schedule, autotune off): decay from
+            # args.alpha at round 1 to args.alpha_anneal_final at the last round.
+            # Override the carried state's alpha/log_alpha before this round's
+            # train() so update_step uses the scheduled value.
+            cur_alpha = args.alpha
+            if args.alpha_anneal_final is not None:
+                frac = (rnd - 1) / max(1, args.rounds - 1)
+                cur_alpha = float(args.alpha + (args.alpha_anneal_final - args.alpha) * min(1.0, frac))
+                state = state._replace(
+                    alpha=jnp.asarray(cur_alpha, dtype=jnp.float32),
+                    log_alpha=jnp.asarray(np.log(cur_alpha), dtype=jnp.float32),
+                )
             key, train_key = jax.random.split(key)
             state, env_state, metrics = fns.train(
                 state, env, env_params, env_state, train_key
@@ -2021,6 +2163,7 @@ if not args.vis_only:
                 _wandb.log({
                     "round": rnd,
                     "env_interactions": rnd * args.train_steps,
+                    "agent/alpha": cur_alpha,
                     "agent/mean_return": mr,
                     "agent/steps_to_clear": steps_to_clear,
                     "agent/cleared_frac": cleared,
@@ -2061,10 +2204,10 @@ if not args.vis_only:
 
         print(f"Saving agent → {agent_path}")
         leaves, treedef = jax.tree.flatten(state)
-        with open(agent_path, "wb") as f:
-            pickle.dump(
-                {"leaves": [np.array(l) for l in leaves], "treedef": treedef}, f
-            )
+        #with open(agent_path, "wb") as f:
+        #    pickle.dump(
+        #        {"leaves": [np.array(l) for l in leaves], "treedef": treedef}, f
+        #    )
     else:
         print(f"Loading agent ← {agent_path}")
         with open(agent_path, "rb") as f:
@@ -2085,10 +2228,10 @@ if not args.vis_only:
 
         def _save_dataset(path, c, b, hm, eb):
             print(f"  {len(c)} steps, {len(eb)-1} episodes → {path}")
-            with open(path, "wb") as f:
-                pickle.dump({"carries": c, "board_masks": b, "hits_misses": hm,
-                             "ep_bounds": eb, "rows": args.rows, "cols": args.cols,
-                             "tag": tag}, f)
+            #with open(path, "wb") as f:
+            #    pickle.dump({"carries": c, "board_masks": b, "hits_misses": hm,
+            #                 "ep_bounds": eb, "rows": args.rows, "cols": args.cols,
+            #                 "tag": tag}, f)
 
         print(f"Collecting {args.collect_steps} train steps (auto-reset)…")
         carries, board_masks, hits_misses, ep_bounds = _collect_and_parse(state, 1000, args.collect_steps)
@@ -2126,8 +2269,8 @@ if not args.vis_only:
 
         print(f"Saving probe → {probe_path}")
         leaves, td = jax.tree.flatten(probe_params)
-        with open(probe_path, "wb") as f:
-            pickle.dump({"leaves": [np.array(l) for l in leaves], "treedef": td}, f)
+        #with open(probe_path, "wb") as f:
+        #    pickle.dump({"leaves": [np.array(l) for l in leaves], "treedef": td}, f)
     else:
         print(f"Loading probe ← {probe_path}")
         with open(probe_path, "rb") as f:

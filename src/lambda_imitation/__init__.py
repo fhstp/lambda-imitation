@@ -13,6 +13,7 @@ from lambda_imitation.buffer import (
     BufferFunctions,
     BufferSample,
     create_buffer,
+    create_episode_aligned_sequence_sample,
     create_sample,
     create_sequence_sample,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "BufferFunctions",
     "BufferSample",
     "create_buffer",
+    "create_episode_aligned_sequence_sample",
     "create_sample",
     "create_sequence_sample",
 ]
