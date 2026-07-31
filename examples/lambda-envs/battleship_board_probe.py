@@ -252,6 +252,34 @@ g.add_argument("--mask-first-episode-only", dest="mask_first_episode_only",
                     "steps, over-representing early/low-memory states and "
                     "biasing the FE gradient away from memory-rich late ones.")
 parser.set_defaults(mask_first_episode_only=False)
+g.add_argument("--dense-value-coef", dest="dense_value_coef", type=float, default=0.0,
+               help="coefficient on the DENSE value loss: regress "
+                    "V(s)=sum_a pi(a|s)*Q(s,a) against the same V-trace target "
+                    "as the taken-action regression (expected-SARSA-style "
+                    "projection). THE FIX for off-policy memory formation: a "
+                    "per-action Q regressed only at a_t trains 1 of 100 output "
+                    "columns per step, so the shared recurrent encoder gets a "
+                    "~100x sparser gradient whose target column is chosen by the "
+                    "behaviour policy; under a near-uniform actor that scatters "
+                    "into noise. Applies to the lambda-critics AND the GVD SF "
+                    "heads. 0 = off.")
+g.add_argument("--no-sparse-value-loss", dest="sparse_value_loss",
+               action="store_false",
+               help="drop the taken-action regression and keep ONLY the dense "
+                    "term (the form validated in the forward ladder). Safe with "
+                    "--vtrace-actor (separate policy head); with SAC-style "
+                    "extraction the per-action Q would lose its action "
+                    "discrimination.")
+parser.set_defaults(sparse_value_loss=True)
+g.add_argument("--dense-discrepancy", dest="dense_discrepancy",
+               action="store_true",
+               help="compute the lambda-discrepancy (and the GVD discrepancy) "
+                    "between the heads' EXPECTED values sum_a pi(a|s)*Q(s,a) "
+                    "instead of at the executed action Q(s,a_t). Same sparsity "
+                    "argument as --dense-value-coef, and it is what the "
+                    "reference does: its discrepancy term is on the scalar V "
+                    "heads, not per-action Q.")
+parser.set_defaults(dense_discrepancy=False)
 g.add_argument("--random-behaviour", dest="random_behaviour", action="store_true",
                help="collect with a uniform-random LEGAL behaviour policy "
                     "(order-invariant, board-revealing data, no learned-policy "
@@ -469,6 +497,9 @@ if args.wandb and not args.vis_only:
             "rho_bar": args.rho_bar,
             "c_bar": args.c_bar,
             "mask_first_episode_only": args.mask_first_episode_only,
+            "dense_value_coef": args.dense_value_coef,
+            "sparse_value_loss": args.sparse_value_loss,
+            "dense_discrepancy": args.dense_discrepancy,
             "alpha_anneal_final": args.alpha_anneal_final,
             "batch_size": args.batch_size,
             "sequence_length": args.sequence_length,
@@ -1173,6 +1204,9 @@ if not args.vis_only:
         vtrace_normalize_advantage=args.vtrace_normalize_advantage,
         ppo_clip_eps=args.ppo_clip_eps,
         mask_first_episode_only=args.mask_first_episode_only,
+        dense_value_coef=args.dense_value_coef,
+        sparse_value_loss=args.sparse_value_loss,
+        dense_discrepancy=args.dense_discrepancy,
         gvd_cumulant_diff=args.gvd_cumulant_diff,
         gvd_cumulant_scale=args.gvd_cumulant_scale,
         random_behaviour=args.random_behaviour,

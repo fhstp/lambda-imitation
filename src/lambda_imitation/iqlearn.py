@@ -364,6 +364,16 @@ class DebugFunctions(NamedTuple):
             done resets (and, with ``use_prev_action``, the per-step
             prev-action input ``enc(a_{t-1})``).  Returns time-major latents
             of shape ``(T - burn_in_length, B, feature_dim)``.
+        get_v: ``(actor, critic, graph, alpha, x, key, include_entropy,
+            include_log, mask=None) -> values`` -- the policy-expected value
+            ``V(s) = Σ_a π(a|s)·min(Q1,Q2)(s,a)`` (plus ``α·H(π)`` when
+            ``include_entropy``).  This is the dense projection the
+            ``dense_value_coef`` loss regresses; exposed for testing.
+        graphs: The static ``nnx`` graphdefs the state pytrees pair with,
+            keyed ``"critic"`` / ``"lambda1"`` / ``"lambda2"`` /
+            ``"gvd_sf1"`` / ``"gvd_sf2"`` (absent keys = that head is
+            disabled).  ``SACState`` carries only the *states*, so callers
+            need these to evaluate a head outside the training loop.
         predict_qpi: ``(iqlearn, obs, carry, prev_action=None) ->
             (q_values, probs, new_carry)`` -- per-action Q (min-twin, raw/
             unmasked) and actor probabilities (masked softmax) for a single
@@ -376,6 +386,8 @@ class DebugFunctions(NamedTuple):
     get_entropy: Callable
     calculate_latent: Callable
     predict_qpi: Callable | None = None
+    get_v: Callable | None = None
+    graphs: dict | None = None
 
 
 class Hyperparameters(NamedTuple):
@@ -537,6 +549,30 @@ class Hyperparameters(NamedTuple):
     # memory-rich late states.  Reference PPO's arbitrary-start chunks sample
     # positions uniformly and have no such bias.
     mask_first_episode_only: bool = False
+    # ---- dense (expected) value loss -------------------------------------
+    # THE FIX for off-policy memory formation (forward ladder, ablations.md
+    # Part J).  A per-action (twin-)Q head regressed ONLY at the executed action
+    # trains 1 of `action_dim` output columns per step, so the gradient reaching
+    # the shared recurrent encoder is ~action_dim times sparser than a scalar-V
+    # head's — and WHICH column receives it is dictated by the behaviour policy's
+    # samples.  Under a near-uniform off-policy actor those updates scatter into
+    # noise and the encoder never accumulates the board.  Adding a DENSE term
+    # that regresses V(s) = Σ_a π(a|s)·Q(s,a) (an expected-SARSA-style
+    # projection) against the SAME V-trace target restores a dense encoder
+    # gradient: in the ladder this recovered fired_auroc 0.708 -> 0.969 with no
+    # change to the actor.  0.0 = off (prior behaviour).
+    dense_value_coef: float = 0.0
+    # If False, drop the taken-action regression and keep ONLY the dense term
+    # (the exact form validated in the ladder).  Safe when the policy is a
+    # separate head (vtrace_actor); with SAC-style extraction the per-action Q
+    # would lose its action discrimination, so the default keeps both.
+    sparse_value_loss: bool = True
+    # If True, compute the λ-discrepancy (and the GVD discrepancy) between the
+    # heads' EXPECTED values V(s) = Σ_a π(a|s)·Q(s,a) instead of between
+    # Q(s,a_t) at the executed action.  Same sparsity argument as
+    # dense_value_coef — and it is what the reference actually does: its
+    # λ-discrepancy term is on the scalar V heads, not on per-action Q.
+    dense_discrepancy: bool = False
     # Scalar multiplier on the GVD successor-feature cumulant. The SF value is
     # E[Σ γ^t c_t]; for a raw hit cumulant (c∈{0,1}) that grows to ~O(1/(1-γ)),
     # whose large TD targets drive the SF heads into deadly-triad divergence
@@ -2042,6 +2078,8 @@ def create_iqlearn(
         lambda2_graph: TwinCriticGraph,
         latents: jax.Array,
         actions: jax.Array,
+        target_actor_state: nnx.GraphState | None = None,
+        mask: jax.Array | None = None,
     ) -> Tuple[jax.Array, dict]:
         """λ-discrepancy regulariser pulling the two λ-critics together.
 
@@ -2070,9 +2108,28 @@ def create_iqlearn(
         # themselves (the cheapest descent direction), self-satisfying the
         # regulariser and leaving the FE — and thus ``lambda_coef`` — with no
         # effect.  The λ-critics still train via their V-trace losses.
-        q1 = get_q(jax.lax.stop_gradient(lambda1_critic), lambda1_graph, latents, actions)
-        q2 = get_q(jax.lax.stop_gradient(lambda2_critic), lambda2_graph, latents, actions)
-        loss = optax.losses.huber_loss(q1, q2).mean()
+        if params.dense_discrepancy:
+            # DENSE discrepancy: compare the heads' EXPECTED values
+            # V_i(s) = Σ_a π(a|s)·min(Q_i1,Q_i2)(s,a) instead of Q_i(s,a_t).
+            # Same sparsity argument as dense_value_coef — at the executed
+            # action only 1 of `action_dim` columns carries the discrepancy
+            # gradient into the FE.  This is also what the reference does: its
+            # λ-discrepancy term is on the scalar V heads, not per-action Q.
+            assert target_actor_state is not None, (
+                "dense_discrepancy needs the target actor to weight the "
+                "expectation over actions"
+            )
+            v1 = get_v(target_actor_state, jax.lax.stop_gradient(lambda1_critic),
+                       lambda1_graph, jnp.array(0.0), latents, jnp.array(0),
+                       False, False, mask=mask)
+            v2 = get_v(target_actor_state, jax.lax.stop_gradient(lambda2_critic),
+                       lambda2_graph, jnp.array(0.0), latents, jnp.array(0),
+                       False, False, mask=mask)
+            loss = optax.losses.huber_loss(v1, v2).mean()
+        else:
+            q1 = get_q(jax.lax.stop_gradient(lambda1_critic), lambda1_graph, latents, actions)
+            q2 = get_q(jax.lax.stop_gradient(lambda2_critic), lambda2_graph, latents, actions)
+            loss = optax.losses.huber_loss(q1, q2).mean()
         return loss, {"ld_loss": loss}
 
     # ------------------------------------------------------------------
@@ -2446,12 +2503,36 @@ def create_iqlearn(
         )
 
         tgt = jax.lax.stop_gradient(targets)
-        loss = _seq_loss_mean(optax.losses.huber_loss(q, tgt), dones)
         metrics = {
-            "loss": loss,
             f"lambda{lam}_critic:": q[: -params.lambda_truncation].mean(),
             f"lambda{lam}_target:": targets[: -params.lambda_truncation].mean(),
         }
+        loss = jnp.array(0.0)
+        if params.sparse_value_loss:
+            loss = loss + _seq_loss_mean(optax.losses.huber_loss(q, tgt), dones)
+        if params.dense_value_coef > 0.0:
+            # DENSE term: regress the ONLINE head's expected value
+            # V(s) = Σ_a π(a|s)·min(Q1,Q2)(s,a) against the same V-trace target,
+            # so every action column (and hence the shared FE) gets gradient
+            # every step instead of only the executed action's column.  π comes
+            # from the TARGET actor, so this stays a pure critic/FE term.
+            # min-over-twins matches how the target's V(s) is built above.
+            v_dense = get_v(
+                target_actor_state,
+                q_state,
+                q_graph,
+                jnp.array(0.0),
+                _tb(latents),
+                key,
+                False,
+                False,
+                mask=mask_flat,
+            ).reshape(Tp, B)
+            l_dense = _seq_loss_mean(optax.losses.huber_loss(v_dense, tgt), dones)
+            loss = loss + params.dense_value_coef * l_dense
+            metrics[f"lambda{lam}_dense_loss"] = l_dense
+            metrics[f"lambda{lam}_dense_v"] = v_dense[: -params.lambda_truncation].mean()
+        metrics["loss"] = loss
 
         return loss, metrics
 
@@ -2587,14 +2668,32 @@ def create_iqlearn(
             )
 
             tgt = jax.lax.stop_gradient(targets)
-            # sum over the SF feature axis, then mean over the kept steps
-            loss = _seq_loss_mean(
-                optax.losses.huber_loss(q, tgt).sum(-1), dones)
             metrics = {
-                f"gvd_{tag}_loss": loss,
                 f"gvd_{tag}_critic:": q[: -params.lambda_truncation].mean(),
                 f"gvd_{tag}_target:": targets[: -params.lambda_truncation].mean(),
             }
+            # sum over the SF feature axis, then mean over the kept steps
+            loss = jnp.array(0.0)
+            if params.sparse_value_loss:
+                loss = loss + _seq_loss_mean(
+                    optax.losses.huber_loss(q, tgt).sum(-1), dones)
+            if params.dense_value_coef > 0.0:
+                # DENSE term (SF analogue of the λ-critic one): regress the
+                # ONLINE head's expected SF Σ_a π(a|s)·SF(s,a) against the same
+                # V-trace target, so every action column feeds the shared FE
+                # instead of only the executed action's.
+                v_dense = run_sf_v(
+                    target_actor_state,
+                    sf_state,
+                    sf_graph,
+                    _tb(latents),
+                    mask_flat,
+                ).reshape(Tp, B, -1)
+                l_dense = _seq_loss_mean(
+                    optax.losses.huber_loss(v_dense, tgt).sum(-1), dones)
+                loss = loss + params.dense_value_coef * l_dense
+                metrics[f"gvd_{tag}_dense_loss"] = l_dense
+            metrics[f"gvd_{tag}_loss"] = loss
 
             return loss, metrics
 
@@ -2602,7 +2701,9 @@ def create_iqlearn(
             gvd_sf1_state: nnx.GraphState,
             gvd_sf2_state: nnx.GraphState,
             latents_flat: jax.Array,
-            actions_flat: jax.Array
+            actions_flat: jax.Array,
+            target_actor_state: nnx.GraphState | None = None,
+            mask: jax.Array | None = None,
         ) -> Tuple[jax.Array, dict]:
             """GVD discrepancy between the two SF heads at the stored actions.
 
@@ -2622,8 +2723,23 @@ def create_iqlearn(
             Returns:
                 ``(scalar_loss, {"gvd_loss": loss})``.
             """
-            sf_q1 = run_sf_q(jax.lax.stop_gradient(gvd_sf1_state), gvd_sf1_graph, latents_flat, actions_flat)
-            sf_q2 = run_sf_q(jax.lax.stop_gradient(gvd_sf2_state), gvd_sf2_graph, latents_flat, actions_flat)
+            if params.dense_discrepancy:
+                # DENSE SF discrepancy — see loss_ld / dense_value_coef: at the
+                # executed action only 1 of `action_dim` columns carries the
+                # discrepancy gradient into the shared FE.
+                assert target_actor_state is not None, (
+                    "dense_discrepancy needs the target actor to weight the "
+                    "expectation over actions"
+                )
+                sf_q1 = run_sf_v(target_actor_state,
+                                 jax.lax.stop_gradient(gvd_sf1_state),
+                                 gvd_sf1_graph, latents_flat, mask)
+                sf_q2 = run_sf_v(target_actor_state,
+                                 jax.lax.stop_gradient(gvd_sf2_state),
+                                 gvd_sf2_graph, latents_flat, mask)
+            else:
+                sf_q1 = run_sf_q(jax.lax.stop_gradient(gvd_sf1_state), gvd_sf1_graph, latents_flat, actions_flat)
+                sf_q2 = run_sf_q(jax.lax.stop_gradient(gvd_sf2_state), gvd_sf2_graph, latents_flat, actions_flat)
             loss = optax.losses.huber_loss(sf_q1, sf_q2).mean()
             # NB: "gvd_loss", not "ld_loss" — the λ-discrepancy already emits
             # ld_loss and metrics.update would silently collide.
@@ -2840,6 +2956,8 @@ def create_iqlearn(
                 lambda2_critic_graph,
                 _flat(critic_latent[:-1]),
                 _flat(actions_tm[:-1]),
+                actor_target_state,
+                _flat(masks_tm[:-1]) if masks_tm is not None else None,
             )
             metrics.update(metrics_ld)
             loss += l_lambda1 + l_lambda2 + params.lambda_coef* l_ld
@@ -2917,7 +3035,9 @@ def create_iqlearn(
                 gvd_sf1_state,
                 gvd_sf2_state,
                 _flat(sf_latent[:-1]),
-                _flat(actions_tm[:-1])
+                _flat(actions_tm[:-1]),
+                actor_target_state,
+                _flat(masks_tm[:-1]) if masks_tm is not None else None,
             )
             metrics.update(m_gvd)
             loss += l_sf1 + l_sf2 + params.gvd_coef * l_gvd
@@ -3344,9 +3464,17 @@ def create_iqlearn(
         encode_action,
     )
     if debug:
+        _debug_graphs = {"critic": critic_graph}
+        if approximate_lambda:
+            _debug_graphs["lambda1"] = lambda1_critic_graph
+            _debug_graphs["lambda2"] = lambda2_critic_graph
+        if use_gvd:
+            _debug_graphs["gvd_sf1"] = gvd_sf1_graph
+            _debug_graphs["gvd_sf2"] = gvd_sf2_graph
         return (
             iqlearn,
             fns,
-            DebugFunctions(get_q, get_entropy, calculate_latent, predict_qpi),
+            DebugFunctions(get_q, get_entropy, calculate_latent, predict_qpi,
+                           get_v, _debug_graphs),
         )
     return (iqlearn, fns)
