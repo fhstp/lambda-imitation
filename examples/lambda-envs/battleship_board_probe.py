@@ -280,6 +280,13 @@ g.add_argument("--dense-discrepancy", dest="dense_discrepancy",
                     "reference does: its discrepancy term is on the scalar V "
                     "heads, not per-action Q.")
 parser.set_defaults(dense_discrepancy=False)
+g.add_argument("--sac-critic-coef", dest="sac_critic_coef", type=float, default=1.0,
+               help="weight on the main SAC critic's 1-STEP Bellman loss "
+                    "(default 1.0; 0 drops it). A 1-step target V(s)=r+gV(s') is "
+                    "satisfiable by a near-constant value with no history, so this "
+                    "always-on head applies memoryless pressure to the shared "
+                    "encoder every update; the reference has no equivalent (its "
+                    "value regresses lam=0.95 near-Monte-Carlo returns).")
 g.add_argument("--random-behaviour", dest="random_behaviour", action="store_true",
                help="collect with a uniform-random LEGAL behaviour policy "
                     "(order-invariant, board-revealing data, no learned-policy "
@@ -500,6 +507,7 @@ if args.wandb and not args.vis_only:
             "dense_value_coef": args.dense_value_coef,
             "sparse_value_loss": args.sparse_value_loss,
             "dense_discrepancy": args.dense_discrepancy,
+            "sac_critic_coef": args.sac_critic_coef,
             "alpha_anneal_final": args.alpha_anneal_final,
             "batch_size": args.batch_size,
             "sequence_length": args.sequence_length,
@@ -1207,6 +1215,7 @@ if not args.vis_only:
         dense_value_coef=args.dense_value_coef,
         sparse_value_loss=args.sparse_value_loss,
         dense_discrepancy=args.dense_discrepancy,
+        sac_critic_coef=args.sac_critic_coef,
         gvd_cumulant_diff=args.gvd_cumulant_diff,
         gvd_cumulant_scale=args.gvd_cumulant_scale,
         random_behaviour=args.random_behaviour,

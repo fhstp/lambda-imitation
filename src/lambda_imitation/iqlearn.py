@@ -573,6 +573,14 @@ class Hyperparameters(NamedTuple):
     # dense_value_coef — and it is what the reference actually does: its
     # λ-discrepancy term is on the scalar V heads, not on per-action Q.
     dense_discrepancy: bool = False
+    # Weight on the main SAC critic's 1-step Bellman loss in the joint loss.
+    # V(s) ≈ r + γV(s') is satisfiable by a near-CONSTANT value with no history,
+    # so this always-on head is the most memoryless-friendly pressure on the
+    # shared recurrent encoder — and the reference has no equivalent (its value
+    # is trained on λ=0.95 near-Monte-Carlo returns, which encode
+    # steps-remaining and therefore require integrating past hits).
+    # 0.0 drops it, leaving the FE shaped only by the λ-critics (+ discrepancy).
+    sac_critic_coef: float = 1.0
     # Scalar multiplier on the GVD successor-feature cumulant. The SF value is
     # E[Σ γ^t c_t]; for a raw hit cumulant (c∈{0,1}) that grows to ~O(1/(1-γ)),
     # whose large TD targets drive the SF heads into deadly-triad divergence
@@ -2944,7 +2952,7 @@ def create_iqlearn(
         )
         metrics.update(metrics_critic)
 
-        loss = l_actor + l_critic
+        loss = l_actor + params.sac_critic_coef * l_critic
         if approximate_lambda:
             l_lambda1, metrics_lambda1_critic = loss_vtrace_lambda_sequence(
                 actor_target_state,
