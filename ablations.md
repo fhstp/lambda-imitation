@@ -430,3 +430,83 @@ restores 0.708 → 0.969 without touching anything else — and to keep the ppo-
 taken-action twin-Q regression, keep `--ppo-clip-eps`, and stop treating the reward/γ/buffer/timing
 knobs as suspects. The earlier ~0.62 plateau is consistent with this diagnosis: every stabilizer we
 added was helping, while the SAC-style per-action critic was quietly starving the encoder.
+
+---
+
+## Part K — Porting the fix: the probe FLOOR, and active erasure
+
+Part J's fix was implemented in `iqlearn.py` (branch `dense-value-loss`, five sparse
+sites incl. the always-active `loss_critic`) with the point-mass identity and
+gradient-reach properties unit-tested. The first six 2e6-step runs came back flat at
+0.53–0.57. The diagnosis that followed changed the question.
+
+### K.1 The probe floor — and what it does to the project's history
+
+**An UNTRAINED agent scores 0.599 / 0.599 / 0.621** (3 seeds, 200 training steps),
+and an agent whose encoder is frozen at random init (`--fe-lr 0`) holds **0.580–0.588
+flat** over 5 rounds. A randomly-initialised GRU echoes recent hit/miss history, so
+the probe's chance level for this task is **~0.58–0.62, not 0.5**.
+
+⇒ **The entire historical "0.55–0.64 plateau" (Parts A–I) lies at or below the
+untrained floor.** The slow-FE recipe's 0.64 — the previous arc's best result and its
+one apparent success — is ~0.03 above a random encoder. On this evidence **our stack
+has never formed board memory at all**, and every earlier comparison between 0.55 and
+0.64 was noise around chance. The floor was never measured until now; it should
+accompany every future number.
+
+### K.2 λ-discrepancy weight — not the LR — is what diverges the value
+
+Stabilisation sweep (300k steps, dense fix on, probe vs floor):
+
+| arm | `v` | `critic_loss` | `ld_loss` | verdict |
+|---|---|---|---|---|
+| λ-coef 0.1, normal LR | −27.8 → −37.4 | 0.76 → **0.23** | 3.9 → 0.15 | stable |
+| λ-coef 0.1 + LR 1e-5 | −20.9 → −37.3 | 3.1 → 0.61 | 4.4 → 0.12 | stable |
+| LR 1e-5, λ-coef 1.0 | −24.6 → −43.8 | 10.8 → 2.2 | 6.6 → 0.93 | stable |
+| τ 0.005 → 1e-3 | −9.7 → −46 | 0.78 → **7.5** ↑ | 25 → **57** ↑ | diverges |
+| control (λ 1.0, normal LR) | −38.5 → **−95.7** | 9.2 → 10.5 | 6.7 → **28.6** ↑ | diverges |
+
+At γ=0.99 with −1/step the value is bounded by −100; the control reached **−116**
+earlier, i.e. past the physical fixed point. Dropping λ-coef 1.0 → 0.1 at *normal* LR
+gives the lowest critic loss of the sweep (0.23 vs 10.5). Slower τ makes it worse.
+⇒ the λ-discrepancy *pressure* destabilises the value, inverting Parts C/H's framing
+(value divergence as the primary fault, discrepancy explosion as its symptom).
+**The dense fix also demonstrably stabilises the value**: −76 worst-case and inside
+the bound, vs −116 divergence for the matched sparse control.
+
+### K.3 Training ERASES the encoder's board information
+
+With the value stable (`critic_loss` 0.02–0.30), the probe is **flat at 0.53 across
+all runs — BELOW the 0.58 frozen-encoder floor**, and it is already there at round 1
+(20k updates), not by slow decay:
+
+| | probe curve (probe every round) |
+|---|---|
+| FE frozen at random init | 0.587 0.582 0.580 0.583 0.588 |
+| FE trained (stable value + dense fix) | 0.535 0.536 0.529 0.536 0.530 |
+
+⇒ the failure is not "our objective fails to add memory" but "**our objective
+actively destroys the echo a random GRU has for free**", within the first 20k
+updates, and then sits at the degraded level. Consistent with a state-independent
+minimiser: the cheapest descent direction suppresses the input pathway.
+
+### K.4 BPTT is sound (ruled out)
+
+`scratchpad/bptt_diag.py`, three checks on the same `calculate_latent` path training
+uses: (a) forward — `obs[0]` reaches `latent[-1]` (Δ 4.3e-3 from a Δ5 perturbation);
+(b) gradient — `d latent[-1]/d obs[0]` = 2.3e-2 (vs 1.07 at the last step);
+(c) the GRU hidden→hidden kernel receives gradient 0.82 from a last-step-only loss,
+which is only creditable through time. Temporal credit flows. NB the signal decays
+~275× (forward) / ~45× (gradient) over 11 steps, so retention over Battleship's ~90
+steps must be *learned* — it is not free at init.
+
+### K.5 Status
+
+Ruled out this session: probe artefact (frozen-FE control is flat), value instability
+(fixed, memory unchanged), BPTT plumbing, slow-LR recipes (5 flat probes over 560k
+steps), τ. Established: the floor, the λ-pressure/value-divergence inversion, active
+erasure, and that the dense fix helps stability but not memory *in our stack* (where
+it recovered 0.708 → 0.969 in the ladder harness). The open question is now sharp:
+**what does the reference's training loop do that makes memory form incidentally
+under any objective, when ours erases it under all of them** — given identical obs,
+capacity, BPTT, and stability.
