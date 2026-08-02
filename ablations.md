@@ -572,3 +572,37 @@ BPTT, alignment, routing, buffer, windows, capacity and probe are all individual
 verified sound, so it is likely an interaction among them. Answering it is optional for
 the project goal (the recommendation above routes around it) but it is the one honest
 loose end.
+
+### K.9 Pre-port bug audit (asked for before committing to a port)
+
+The signature — below-floor, immediate, objective-independent, while every component
+verifies — is more typical of a subtle bug than of a deep truth, so the data path was
+audited end-to-end rather than by component:
+
+| check | method | result |
+|---|---|---|
+| probe decodes the state the loss shapes | `CARRY_DIM == memory_hidden_dim == 512`; for a GRU the cell output **is** the carry, so `latent == carry` | ✔ same array |
+| training samples the right buffer | `update_step` passes `sac.online_buffer`, not the dummy 1-transition expert buffer the probe builds from zeros | ✔ correct |
+| (obs, action) pairing in the buffer | `run_env_step` stores `(o_t, a_t)`; `calculate_latent` shifts so step *t* sees `a_{t-1}` (numerically verified) | ✔ correct |
+| **trajectory coherence of the real stored data** | Battleship invariant on 4905 stored transitions: `mask[t] == mask[t-1] \ {a_{t-1}}`, one cell consumed per step, `reward == -1` off-terminal | ✔ **all PASS** |
+| episodes fit the training window | mean 91.5, max 100 vs window 120 and kept region [0:100] | ✔ 0/53 overflow |
+| hit-bit statistics | 0.140 vs ~0.15 expected (14 ship cells / ~92 shots) | ✔ plausible |
+| **encoder memory horizon at init** | flip the t=0 hit bit, track \|Δlatent[t]\|: **ours half-life 2 steps, reference half-life 2 steps**, ratio 1.1× at t=90 | ✔ no architectural handicap |
+
+No defect found in the data, the pairing, the buffer selection, the probe target, the
+BPTT path, the routing, the capacity, or the encoder's initial dynamics. **Both encoders
+forget within ~5 steps at initialisation — retention over ~90 steps is LEARNED, and the
+reference's loop learns it while ours does not.**
+
+**Correction to K.3.** "Training actively erases the echo" over-reads the numbers.
+Trained 0.53 vs frozen 0.58 is a 0.05 gap against a floor that itself spans 0.58–0.62
+across seeds, so the defensible claim is the weaker one: **training leaves the encoder at
+or near the untrained floor — no board memory forms — and any erasure is marginal.**
+The conclusions in K.5/K.8 do not depend on the stronger claim.
+
+**The one test not yet run** (deferred as too invasive to add unsupervised): an auxiliary
+memory loss inside our loop — predict the within-window accumulated hit-map from the
+carry, a target computable from stored actions+hit-bits alone. If our loop reaches ~0.9
+under it, the loop is sound and the entire story is that no RL objective here demands
+retention; if it stays ~0.55, the loop cannot shape the encoder and porting is the only
+option. That is the highest-value first move if certainty is wanted before porting.
