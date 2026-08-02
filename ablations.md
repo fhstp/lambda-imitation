@@ -510,3 +510,65 @@ it recovered 0.708 → 0.969 in the ladder harness). The open question is now sh
 **what does the reference's training loop do that makes memory form incidentally
 under any objective, when ours erases it under all of them** — given identical obs,
 capacity, BPTT, and stability.
+
+### K.6 The weekend sweep: no objective changes anything
+
+Every arm below ran the *stabilised* configuration (λ-coef 0.1 → `critic_loss` 0.02–0.6,
+`v` well inside its bound). Floor to beat: **0.58–0.62**.
+
+| arm | what it tests | probe |
+|---|---|---|
+| dense on / off, 2e6 steps | the Part-J fix in our stack | 0.52–0.54 |
+| slow LR 1e-5 (all / FE-only) | the 32× optimisation-pressure gap | 0.53 (5 flat probes) |
+| τ 1e-3 | target-net lag | diverges |
+| value-only + **frozen random policy** | the reference's minimal memory-forming regime (it gets 0.92 here) | 0.52 |
+| + **γ=1.0** | the reference's discount | 0.52 |
+| + **γ=1.0 and the +100 reference reward** | the reference's exact reward | 0.53 (flat to r46) |
+| `--sac-critic-coef 0` (drop the 1-step Bellman head) | the memoryless-satisfiable always-on target | 0.53 |
+| λ pair 0.95/0.99 (both near-MC) | short-λ bootstrapping | 0.55 |
+| **GVD, spatial cumulant** | a target that is board-shaped *by construction* | 0.53 |
+| GVD, scalar cumulant | GVD without the spatial target | 0.53 |
+| no `--paper-arch` (plain GRU) | the encoder implementation | **0.513–0.533, 19 probes to 1.94M steps** |
+
+### K.7 Controls: the comparison is valid
+
+- **Probe reads on-distribution carries.** `collect_rollout` does
+  `carry_out = where(done, zero_carry(), new_carry)` — episode-reset exactly as
+  episode-aligned training windows are, recording the within-episode carry.
+- **Probe is not drifting**: frozen-encoder control flat at 0.580–0.588 over 5 rounds.
+- **Encoder is capable**: 0.925 supervised on the same FE and the same metric (Part I).
+- **Time alignment correct**: perturbing `a_k` first moves `latent[k+1]`, `o_k` moves
+  `latent[k]` — step *t* sees `(o_t, a_{t-1})`, so hits are attributable to cells.
+- **BPTT sound**, **latent routing** un-detached, **buffer contiguity** covered by tests.
+- **The ladder target reproduces**: R13b+dense at a fresh seed → 0.799 → 0.825 → 0.904
+  → **0.953** (originally 0.969). Not a lucky seed.
+
+### K.8 Verdict and recommendation
+
+| same probe, same metric | result |
+|---|---|
+| our nnx FE, supervised board loss | **0.925** |
+| reference loop hosting OUR components (V-trace targets, our actor, 128-deep replay, dense per-action twin-Q) | **0.953–0.969** |
+| our loop, **every** objective tried incl. a board-shaped one | **0.51–0.55** (floor 0.58–0.62) |
+
+The encoder is capable; our components demonstrably work when hosted in the reference's
+training loop; our loop fails under every objective — including one whose target is
+board-shaped by construction — and lands *below* what an untrained GRU carries for free.
+⇒ **The defect is in our training loop, not in the objective, the encoder, the value
+machinery, or any component the forward ladder swapped.** No further objective-level
+knob is worth testing.
+
+**Recommendation.** Stop repairing `iqlearn.py`'s loop. Build off-policy imitation on the
+reference's training loop, which the ladder has already shown will host our pieces at
+0.95+: V-trace λ-return targets, real IS ratios, 128-deep replay, an episode-aligned
+window buffer, the EMA target-net, and the per-action twin-Q critic **with the dense
+value loss** (which is what lifts that configuration from 0.708 to 0.969, and which also
+demonstrably bounds the value where the sparse form diverges past −100). The ladder
+harness in the session scratchpad is the working starting point; the remaining work is
+productionising it rather than diagnosing it.
+
+**Unfinished thread**: *which* aspect of our loop erases memory is still unidentified —
+BPTT, alignment, routing, buffer, windows, capacity and probe are all individually
+verified sound, so it is likely an interaction among them. Answering it is optional for
+the project goal (the recommendation above routes around it) but it is the one honest
+loose end.
