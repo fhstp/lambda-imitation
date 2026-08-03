@@ -95,11 +95,18 @@ def gvd_agent():
 
 
 def _reference_targets(V, f, dones, ratios, gamma, lam, rho_bar, c_bar):
-    """Numpy reference of the vector V-trace backward recursion."""
+    """Numpy reference of the vector V-trace backward recursion.
+
+    Terminal carry is (V[-1], V[-1]), NOT (0, 0): only the difference
+    (v_{T'} - V_{T'}) enters the recursion, and starting it at zero is what makes
+    the tail inject no bias.  A (0, 0) init would assert V(s_{T'}) = 0, an error
+    that decays only as (γλ)^k (29 % survives 20 steps at λ=0.95, 82 % at λ=1).
+    See differences_report.md §1.2 and tests/test_vtrace_bootstrap.py.
+    """
     T, B, n = V.shape
     targets = np.zeros_like(V)
-    v_next = np.zeros((B, n))
-    V_next = np.zeros((B, n))
+    v_next = V[-1].copy()
+    V_next = V[-1].copy()
     for t in reversed(range(T)):
         rho = np.minimum(rho_bar, ratios[t])[:, None]
         c = lam * np.minimum(c_bar, ratios[t])[:, None]
@@ -146,13 +153,15 @@ class TestSfVtraceTargets:
             jnp.array(V), jnp.array(f), jnp.array(dones), jnp.array(ratios),
             gamma, 0.0, 1.0, 1.0,
         )
-        V_next = np.concatenate([V[1:], np.zeros((1, B, n))], axis=0)
+        # the terminal carry is V[-1] (not 0), so the last step bootstraps off it
+        V_next = np.concatenate([V[1:], V[-1:]], axis=0)
         want = f + gamma * V_next  # rho=1: V + (f + γV' − V) = f + γV'
         assert jnp.allclose(got, want, atol=1e-6)
 
     def test_lambda_one_onpolicy_is_discounted_cumulant_sum(self):
-        # λ=1, ratios=1, no dones: target_t = Σ_{k≥t} γ^{k−t} f_k (zero
-        # terminal bootstrap) — the MC pseudo-return of the truncated window.
+        # λ=1, ratios=1, no dones: target_t = Σ_{k≥t} γ^{k−t} f_k + γ^{T−t} V[-1]
+        # — the MC pseudo-return of the window PLUS the terminal bootstrap
+        # (V[-1] stands in for V(s_T); a zero bootstrap would bias every step).
         rng = np.random.default_rng(2)
         T, B, n = 5, 1, 2
         V = rng.normal(size=(T, B, n)).astype(np.float32)
@@ -166,7 +175,7 @@ class TestSfVtraceTargets:
             gamma, 1.0, 1.0, 1.0,
         )
         want = np.zeros_like(f)
-        acc = np.zeros((B, n))
+        acc = V[-1].copy()          # terminal bootstrap, not zero
         for t in reversed(range(T)):
             acc = f[t] + gamma * acc
             want[t] = acc

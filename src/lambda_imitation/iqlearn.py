@@ -659,9 +659,14 @@ def sf_vtrace_targets(
         v_t     = V_t + rho_t * delta_t
                   + (1 - done_t) * gamma * c_t * (v_{t+1} - V_{t+1})
 
-    with zero terminal carry ``(v_{T'}, V_{T'}) = (0, 0)`` — the missing
-    bootstrap mass at the unroll tail is absorbed by the caller dropping the
-    last ``lambda_truncation`` steps, exactly as in the scalar version.
+    with terminal carry ``(v_{T'}, V_{T'}) = (V_{T'-1}, V_{T'-1})`` so the tail
+    correction ``(v_{T'} - V_{T'})`` is zero and no bootstrap bias propagates
+    backward.  (A ``(0, 0)`` init asserts ``V(s_{T'}) = 0``; that error decays
+    only as ``(γλ)^k``, so ``lambda_truncation`` does NOT absorb it for large λ —
+    29 % survives 20 steps at λ=0.95, 82 % at λ=1.  See
+    ``differences_report.md`` §1.2.)  The final step's own target still uses
+    ``V_{T'-1}`` as a stand-in for its successor and is dropped by
+    ``lambda_truncation``.
     Ratios are per-step scalars shared across features (broadcast via
     ``[..., None]``).
 
@@ -693,9 +698,14 @@ def sf_vtrace_targets(
         v_s = V_s + rho * delta_V + nd * gamma * c * (v_sp1 - V_sp1)
         return (v_s, V_s), v_s
 
+    # Terminal carry (v_{T'}, V_{T'}) = (V_{T'-1}, V_{T'-1}): what matters is that the
+    # correction term (v_{T'} - V_{T'}) is ZERO, so no tail bias propagates backward.
+    # A (0, 0) init instead asserts V(s_{T'}) = 0 and injects an error of -V(s_{T'})
+    # that decays only as (γλ)^k — 29 % of it survives 20 truncated steps at λ=0.95 and
+    # 82 % at λ=1. See differences_report.md §1.2.
     _carry, targets = jax.lax.scan(
         scan_target,
-        (jnp.zeros_like(V[0]), jnp.zeros_like(V[0])),
+        (V[-1], V[-1]),
         (V, dones, cumulants, ratios),
         reverse=True,
         unroll=8,  # fuse across timesteps -> fewer tiny per-step kernels
@@ -1957,9 +1967,13 @@ def create_iqlearn(
             v_s = V_s + rho * delta_V + (1 - done) * params.gamma * c * (v_sp1 - V_sp1)
             return (v_s, V_s), v_s
 
+        # Terminal carry = (V_last, V_last) so the tail correction is zero; a (0, 0)
+        # init asserts V(s_T)=0. This path uses a FULL trace (lam=1) where 82 % of that
+        # bias survives lambda_truncation, biasing every advantage positive.
+        # See differences_report.md §1.2.
         _carry, vs = jax.lax.scan(
             scan_target,
-            (jnp.zeros_like(V[0]), jnp.zeros_like(V[0])),
+            (V[-1], V[-1]),
             (V, dones, rewards, ratios),
             reverse=True,
             unroll=8,
@@ -2564,9 +2578,11 @@ def create_iqlearn(
             v_s = V_s + rho * delta_V + (1 - done) * params.gamma * c * (v_sp1 - V_sp1)
             return (v_s, V_s), v_s
 
+        # Terminal carry = (V_last, V_last): the tail correction (v-V) starts at zero so
+        # no bias propagates backward. See differences_report.md §1.2.
         _carry, targets = jax.lax.scan(
             scan_target,
-            (jnp.zeros_like(v[0]), jnp.zeros_like(v[0])),
+            (v[-1], v[-1]),
             (v, dones, rewards, ratios),
             reverse=True,
             unroll=8,  # fuse across timesteps -> fewer tiny per-step kernels
