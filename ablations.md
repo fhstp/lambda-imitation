@@ -606,3 +606,94 @@ carry, a target computable from stored actions+hit-bits alone. If our loop reach
 under it, the loop is sound and the entire story is that no RL objective here demands
 retention; if it stays ~0.55, the loop cannot shape the encoder and porting is the only
 option. That is the highest-value first move if certainty is wanted before porting.
+
+---
+
+## Part L — CORRECTIONS: a metric-extraction bug, and a silently-enabled objective
+
+Two errors invalidate numbers in Part K. Both are mine, both are mechanical, and the
+corrected data changes some conclusions and restores others.
+
+### L.1 Every Part-K number was the WRONG COLUMN
+
+The monitoring helper used `sed 's/.*fired AUROC=\([0-9.]*\).*/\1/'`. The greedy `.*`
+matches inside **`unfired AUROC=`**, so it reported the *unfired* (ship-inference)
+column, not the headline `fired_auroc`. Part J's ladder tables were re-extracted with
+`awk` after this bug was caught once on 2026-07-30 — but the same bug was then written
+into the helper used for all of Part K, and the fix was never applied there. Correct
+extraction anchors on `] fired AUROC=`.
+
+**Corrected reference levels** (these are the numbers to judge against):
+
+| | fired_auroc |
+|---|---|
+| **encoder FROZEN at random init** (`diag_fefrozen`, 5 probes) | **0.644–0.653** |
+| untrained agent, 200 training steps (3 seeds) | 0.599 / 0.599 / 0.621 |
+| supervised ceiling on this same encoder (Part I) | 0.925 |
+| ladder terminal rung + dense loss | 0.953–0.969 |
+
+**Corrected arm results** (was → is):
+
+| arm | Part K reported | actually |
+|---|---|---|
+| `stab_ctrl` / `stab_tau` | 0.537 / 0.523 | 0.544 / 0.534 |
+| `stab_slowfe` / `stab_combo` | 0.549 / 0.555 | **0.615 / 0.618** |
+| `long_stable_ctrl` | 0.543 | **0.582 0.577 0.583 0.579** |
+| `ovn_sparse` | 0.537 | **0.597 0.577 0.588 0.585** |
+| `ovn_refrew` | 0.527 (flat) | 0.561 → 0.528 (declining) |
+| **`mc_bothmc`** (λ 0.95/0.99) | 0.548 "flat" | **0.569 → 0.590 → 0.596 → 0.610 → 0.626 (CLIMBING)** |
+| `dense_gvd_fix` | 0.549 | 0.560 … 0.620 (noisy, peaks 0.62) |
+| `loopval_gvdspatial` | 0.531 | 0.569 0.573 0.569 0.579 |
+| `loopval_plainarch` (20 probes) | 0.513–0.533 | 0.544 → **0.512** (monotone decline) |
+| `diag_decay` | 0.530 | 0.549 0.565 0.575 0.573 0.562 |
+| `diag_fefrozen` | 0.588 | **0.648** |
+
+### L.2 `--gvd` defaulted to True — every Part-K arm trained a GVD branch
+
+`battleship_board_probe.py:157` had `set_defaults(gvd=True)`, so the successor-feature
+branch (2 heads, own Adams at 1.8e-4, own EMA targets, sparse per-action V-trace TD, and
+the reward-free discrepancy) shaped the shared encoder in **every** arm. The arms labelled
+"value-only", "reference-matching" and "no 1-step critic" were none of those things, and
+`loopval_gvdscalar` was configuration-identical to the arms used as its controls. See
+`differences_report.md` §1.1. Defaults are now ladder-matched with a startup parity
+banner (commit `3cdaae8`).
+
+### L.3 A third defect: the V-trace tail bootstrap
+
+Independently of the above, the recursion asserted `V(s_{T+1}) = 0`, biasing λ-return
+targets by +29 at λ=0.95 and +81 at λ=1 (the actor's setting) — see
+`differences_report.md` §1.2, fixed in `20572f6`. Every Part-K arm used λ2=0.95.
+
+### L.4 What the corrected data supports
+
+**Holds, and more strongly than K.9 allowed.** A frozen random encoder scores **0.65**;
+no trained arm exceeds it (one isolated spike to 0.673 aside), most sit at 0.52–0.60, and
+`loopval_plainarch` declines monotonically 0.544 → 0.512 over 1.94M steps. K.9 softened
+"training erases memory" to "leaves it at the floor" on the basis of a 0.53-vs-0.58
+comparison; the true comparison is **0.56 vs 0.65**, so the stronger claim stands:
+**training in our loop degrades the encoder below random initialisation.**
+
+**Overturned.** K.6's "no objective changes anything, everything is flat at 0.52–0.55" is
+false. The spread is 0.51–0.63 and at least one configuration was *climbing* when it was
+killed: `mc_bothmc` (both λ near-Monte-Carlo, 1-step critic off) rose 0.569→0.626, and it
+is exactly the configuration the L.3 bug penalised most. `stab_slowfe`/`stab_combo`
+(0.615/0.618) and `ovn_sparse` (~0.59) are also materially above what was reported.
+
+**Unaffected.** The encoder's capability (0.925 supervised), the equal init memory
+half-life vs the reference, `(o_t, a_{t-1})` alignment, BPTT credit flow, buffer
+coherence, and the ladder's own 0.953–0.969 — all measured by other means.
+
+### L.5 Status
+
+`ablations.md` K.5/K.8's recommendation ("stop repairing the loop, port onto the
+reference") rested on Part-K numbers that were the wrong column, from runs with a
+silently-enabled objective and biased targets. **That recommendation is withdrawn
+pending re-measurement.** Running now on corrected defaults + fixed bootstrap:
+`loop_only` (aux memory loss as the *only* encoder gradient — the genuine loop test; the
+earlier attempt used `--stop-critic-fe`, which detaches the aux head itself and therefore
+measured a frozen encoder) and `nearmc` (the discarded climbing configuration).
+
+**Process note.** The same greedy-regex bug produced wrong numbers twice, weeks apart,
+because the fix was applied to one extraction site and not to the shared helper. Metric
+extraction is now a single reviewed script (`scratchpad/extract.sh`) anchored on
+`] fired AUROC=`, and every table above was regenerated from raw logs with it.
