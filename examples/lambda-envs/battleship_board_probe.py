@@ -51,7 +51,7 @@ g.add_argument("--cols", type=int, default=10, help="board cols (default 10)")
 g.add_argument("--dense-reward", dest="dense_reward", action="store_true",
                help="reward every hit (default: sparse terminal reward)")
 parser.set_defaults(dense_reward=False)
-g.add_argument("--terminal-bonus", dest="terminal_bonus", type=float, default=None,
+g.add_argument("--terminal-bonus", dest="terminal_bonus", type=float, default=0.0,   # LADDER-MATCHED (R7+)
                help="sparse-mode reward on the clearing step (default None = "
                     "env default rows*cols; 0.0 = pure -1/step, which is what "
                     "surfaces the spatial-Q spike).")
@@ -93,12 +93,13 @@ g.add_argument("--paper-arch", dest="paper_arch", action="store_true",
                     "single-hidden-layer actor/critic heads of width H. "
                     "Overrides --projection-dim and the head dims; the "
                     "prev-action one-hot is still fed via use_prev_action.")
-parser.set_defaults(paper_arch=False)
+g.add_argument("--no-paper-arch", dest="paper_arch", action="store_false")
+parser.set_defaults(paper_arch=True)    # LADDER-MATCHED: the reference encoder
 # Value-stability knobs (previously hard-coded in Hyperparameters).  Defaults
 # reproduce the prior behaviour exactly so existing launches are unchanged.
 g.add_argument("--fe-lr", type=float, default=1e-4, help="feature-extractor lr (default 1e-4)")
 g.add_argument("--actor-lr", type=float, default=1e-4, help="actor lr (default 1e-4)")
-g.add_argument("--critic-lr", type=float, default=2e-4, help="critic lr (default 2e-4)")
+g.add_argument("--critic-lr", type=float, default=1e-4, help="critic lr (default 1e-4, LADDER-MATCHED: equal to fe/actor; 2e-4 gave the value head a 2x head start)")
 g.add_argument("--alpha", type=float, default=0.1, help="entropy temperature (default 0.1)")
 g.add_argument("--autotune-alpha", action="store_true",
                help="auto-adjust alpha to match --target-entropy (SAC discrete; "
@@ -108,7 +109,7 @@ g.add_argument("--target-entropy", type=float, default=0.0,
                     "For discrete a common heuristic is ~0.5–0.98·ln(num_actions).")
 g.add_argument("--gamma", type=float, default=0.99, help="discount factor (default 0.99)")
 g.add_argument("--tau", type=float, default=0.005, help="target-net EMA coefficient (default 0.005)")
-g.add_argument("--grad-clip", type=float, default=0.0,
+g.add_argument("--grad-clip", type=float, default=0.5,   # LADDER-MATCHED: every rung clips
                help="global grad-norm clip for FE/actor/critic/SF (0 = off, default). "
                     "Recommended for the recurrent BPTT unroll, e.g. 1.0–10.0.")
 g.add_argument("--cql-coef", type=float, default=0.0,
@@ -121,7 +122,7 @@ g.add_argument("--critic-layer-norm", dest="critic_layer_norm", action="store_tr
 g.add_argument("--no-critic-layer-norm", dest="critic_layer_norm", action="store_false",
                help="disable critic LayerNorm (control: LN can wash out small "
                     "per-action Q differences).")
-parser.set_defaults(critic_layer_norm=True)
+parser.set_defaults(critic_layer_norm=False)    # LADDER-MATCHED: no rung has LayerNorm
 g.add_argument("--behaviour-epsilon", type=float, default=0.0,
                help="fraction of online-collection steps driven by a scripted "
                     "hunt/target behaviour policy instead of the actor (0 = off, "
@@ -131,11 +132,11 @@ g.add_argument("--behaviour-epsilon", type=float, default=0.0,
                     "FE latent, so it must reconstruct the board from memory.")
 g.add_argument("--approximate-lambda", dest="approximate_lambda", action="store_true")
 g.add_argument("--no-approximate-lambda", dest="approximate_lambda", action="store_false")
-parser.set_defaults(approximate_lambda=False)
-g.add_argument("--lambda1", type=float, default=0.05,
+parser.set_defaults(approximate_lambda=True)    # LADDER-MATCHED: the double critic is the mechanism
+g.add_argument("--lambda1", type=float, default=0.1,   # LADDER-MATCHED
                help="short-horizon λ for the value λ-critic (reference uses 0.1). "
                     "Only active with --approximate-lambda.")
-g.add_argument("--lambda2", type=float, default=0.75,
+g.add_argument("--lambda2", type=float, default=0.95,  # LADDER-MATCHED
                help="long-horizon λ for the value λ-critic (reference uses 0.95). "
                     "Only active with --approximate-lambda.")
 g.add_argument("--lambda-coef", dest="lambda_coef", type=float, default=1.0,
@@ -148,13 +149,13 @@ g.add_argument("--fake-onpolicy-loss", dest="fake_onpolicy_loss", action="store_
                     "successor-feature losses alike)")
 g.add_argument("--no-fake-onpolicy-loss", dest="fake_onpolicy_loss",
                action="store_false")
-parser.set_defaults(fake_onpolicy_loss=True)
+parser.set_defaults(fake_onpolicy_loss=False)   # LADDER-MATCHED: real IS ratios
 g.add_argument("--gvd", dest="gvd", action="store_true",
                help="enable the GVD successor-feature branches (reward-free "
                     "memory pressure; an agent trained with --gvd must be "
                     "reloaded with --gvd)")
 g.add_argument("--no-gvd", dest="gvd", action="store_false")
-parser.set_defaults(gvd=True)
+parser.set_defaults(gvd=False)          # LADDER-MATCHED: no rung has SF heads
 g.add_argument("--gvd-coef", type=float, default=0.2, help="GVD discrepancy coefficient (default 1.0)")
 g.add_argument("--gvd-features", type=int, default=16,
                help="random-projection width of the GVD feature map; total dim "
@@ -215,7 +216,8 @@ g.add_argument("--vtrace-actor", dest="vtrace_actor", action="store_true",
                     "baseline from the twin-Q critic. Removes the value-greedy "
                     "policy improvement (the deadly-triad divergence driver); "
                     "critic/GVD losses unchanged. Discrete only.")
-parser.set_defaults(vtrace_actor=False)
+g.add_argument("--no-vtrace-actor", dest="vtrace_actor", action="store_false")
+parser.set_defaults(vtrace_actor=True)          # LADDER-MATCHED (rung R12+)
 g.add_argument("--vtrace-center-advantage", dest="vtrace_center_advantage",
                action="store_true",
                help="subtract the batch-mean advantage in the V-trace actor "
@@ -230,19 +232,21 @@ g.add_argument("--vtrace-normalize-advantage", dest="vtrace_normalize_advantage"
                     "--vtrace-center-advantage): centering alone leaves the "
                     "advantages at a tiny absolute scale under low-variance "
                     "returns, so the policy freezes at ~uniform.")
-parser.set_defaults(vtrace_normalize_advantage=False)
-g.add_argument("--ppo-clip-eps", dest="ppo_clip_eps", type=float, default=0.0,
+g.add_argument("--no-vtrace-normalize-advantage", dest="vtrace_normalize_advantage",
+               action="store_false")
+parser.set_defaults(vtrace_normalize_advantage=True)   # LADDER-MATCHED (always on)
+g.add_argument("--ppo-clip-eps", dest="ppo_clip_eps", type=float, default=0.2,
                help="PPO clipped-surrogate epsilon for the V-trace actor "
                     "(0 = plain PG, no trust region). LOAD-BEARING: without it "
                     "the unclipped off-policy PG collapses the policy to a "
                     "deterministic board-blind firing order within a few steps "
                     "and the encoder's board memory dies with it.")
-g.add_argument("--rho-bar", dest="rho_bar", type=float, default=1.05,
+g.add_argument("--rho-bar", dest="rho_bar", type=float, default=1.0,
                help="V-trace rho truncation cap (default 1.05). rho=min(rho_bar, "
                     "pi/mu) is one-sided: on stale data the upside is clipped "
                     "but the downside is not, so E[rho]<1 attenuates the reward "
                     "correction. Raise it if replay data is heavily reused.")
-g.add_argument("--c-bar", dest="c_bar", type=float, default=1.05,
+g.add_argument("--c-bar", dest="c_bar", type=float, default=1.0,
                help="V-trace c truncation cap (default 1.05); see --rho-bar.")
 g.add_argument("--mask-first-episode-only", dest="mask_first_episode_only",
                action="store_true",
@@ -251,8 +255,10 @@ g.add_argument("--mask-first-episode-only", dest="mask_first_episode_only",
                     "episode's window spills into the next episode's opening "
                     "steps, over-representing early/low-memory states and "
                     "biasing the FE gradient away from memory-rich late ones.")
-parser.set_defaults(mask_first_episode_only=False)
-g.add_argument("--dense-value-coef", dest="dense_value_coef", type=float, default=0.0,
+g.add_argument("--no-mask-first-episode-only", dest="mask_first_episode_only",
+               action="store_false")
+parser.set_defaults(mask_first_episode_only=True)      # LADDER-MATCHED (R4b+)
+g.add_argument("--dense-value-coef", dest="dense_value_coef", type=float, default=1.0,
                help="coefficient on the DENSE value loss: regress "
                     "V(s)=sum_a pi(a|s)*Q(s,a) against the same V-trace target "
                     "as the taken-action regression (expected-SARSA-style "
@@ -279,7 +285,8 @@ g.add_argument("--dense-discrepancy", dest="dense_discrepancy",
                     "argument as --dense-value-coef, and it is what the "
                     "reference does: its discrepancy term is on the scalar V "
                     "heads, not per-action Q.")
-parser.set_defaults(dense_discrepancy=False)
+g.add_argument("--no-dense-discrepancy", dest="dense_discrepancy", action="store_false")
+parser.set_defaults(dense_discrepancy=True)     # LADDER-MATCHED: ld is on V, not Q(s,a_t)
 g.add_argument("--aux-memory-coef", dest="aux_memory_coef", type=float, default=0.0,
                help="DIAGNOSTIC ONLY (ablations.md K.9): weight on a self-supervised "
                     "auxiliary loss predicting the within-window accumulated hit-map "
@@ -308,8 +315,8 @@ g.add_argument("--alpha-anneal-final", dest="alpha_anneal_final", type=float,
                     "(round 1) to this value (final round) across training; "
                     "None (default) = fixed alpha. Requires autotune off.")
 g.add_argument("--batch-size", type=int, default=128)
-g.add_argument("--sequence-length", type=int, default=80)
-g.add_argument("--burn-in-length", type=int, default=5)
+g.add_argument("--sequence-length", type=int, default=100)  # LADDER-MATCHED: whole episodes
+g.add_argument("--burn-in-length", type=int, default=0)     # LADDER-MATCHED: zero carry, no burn-in
 g.add_argument("--burn-in-from-stored-carry", dest="burn_in_from_stored_carry",
                action="store_true",
                help="store the online carry per transition and initialise the "
@@ -318,8 +325,10 @@ g.add_argument("--burn-in-from-stored-carry", dest="burn_in_from_stored_carry",
                     "carry_dim x buffer_size x 4 bytes extra)")
 g.add_argument("--no-burn-in-from-stored-carry", dest="burn_in_from_stored_carry",
                action="store_false")
-parser.set_defaults(burn_in_from_stored_carry=True)
+parser.set_defaults(burn_in_from_stored_carry=False)   # LADDER-MATCHED: zero carry at episode starts
 g.add_argument("--online-buffer-size", type=int, default=200_000)
+g.add_argument("--online-batch-size", type=int, default=128,
+               help="sequences per gradient update (was hardcoded at 128). With 1 update per env step this sets the per-transition gradient REUSE = batch x window; the ladder ran reuse 4 and never above 64 (differences_report.md sec 3).")
 g.add_argument("--episode-aligned-sampling", dest="episode_aligned_sampling",
                action="store_true",
                help="sample training windows that START at an episode start "
@@ -328,7 +337,9 @@ g.add_argument("--episode-aligned-sampling", dest="episode_aligned_sampling",
                     "drift-free, no stored-carry staleness. Pair with "
                     "--no-burn-in-from-stored-carry --burn-in-length 0 and "
                     "--sequence-length >= the longest episode (rows*cols).")
-parser.set_defaults(episode_aligned_sampling=False)
+g.add_argument("--no-episode-aligned-sampling", dest="episode_aligned_sampling",
+               action="store_false")
+parser.set_defaults(episode_aligned_sampling=True)     # LADDER-MATCHED (R4b+)
 g.add_argument("--use-sac", dest="use_sac", action="store_true",
                help="whether or not to use a SAC entropy term for update"
                     "or just use entropy globally in loss")
@@ -444,6 +455,71 @@ if os.environ.get("WANDB_SWEEP_ID"):
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+# ── ladder-parity banner ─────────────────────────────────────────────────────
+#
+# Every value below is what the forward-ladder harness ran in the rung that
+# reached order-invariant fired_auroc 0.95-0.97 (see differences_report.md).
+# The CLI defaults above are set to match it, and ANY divergence is printed
+# loudly at startup.
+#
+# This exists because `--gvd` silently defaulted to True: a whole weekend of
+# runs described as "value-only" and "reference-matching" in fact trained a
+# successor-feature branch into the shared encoder, and the confound was only
+# found by auditing the source. With ~90 CLI flags, nobody re-reads the default
+# list while focused on the two flags an experiment is actually varying.
+_LADDER_PARITY = {
+    "gvd": False, "fake_onpolicy_loss": False, "vtrace_actor": True,
+    "vtrace_normalize_advantage": True, "ppo_clip_eps": 0.2,
+    "approximate_lambda": True, "episode_aligned_sampling": True,
+    "mask_first_episode_only": True, "burn_in_from_stored_carry": False,
+    "critic_layer_norm": False, "dense_value_coef": 1.0,
+    "dense_discrepancy": True, "lambda1": 0.1, "lambda2": 0.95,
+    "sequence_length": 100, "burn_in_length": 0, "grad_clip": 0.5,
+    "rho_bar": 1.0, "c_bar": 1.0, "fe_lr": 1e-4, "actor_lr": 1e-4,
+    "critic_lr": 1e-4, "gamma": 0.99, "terminal_bonus": 0.0, "paper_arch": True,
+}
+# Components with NO ladder counterpart at all: these cannot be "matched", so
+# they are reported separately whenever they are active.
+_NO_LADDER_COUNTERPART = {
+    "gvd": lambda v: v,                       # successor-feature branch
+    "sac_critic_coef": lambda v: v > 0,       # 1-step Bellman head
+    "aux_memory_coef": lambda v: v > 0,       # diagnostic memory loss
+    "sparse_value_loss": lambda v: v,         # ladder REPLACES it with the dense form
+    "autotune_alpha": lambda v: v,
+}
+
+
+def _print_ladder_parity(args):
+    div = []
+    for k, ref in _LADDER_PARITY.items():
+        got = getattr(args, k, None)
+        if got is None:
+            continue
+        same = abs(got - ref) < 1e-12 if isinstance(ref, float) else got == ref
+        if not same:
+            div.append(f"    {k:28s} {got!r:>10}   (ladder: {ref!r})")
+    extra = [f"    {k:28s} {getattr(args, k)!r}"
+             for k, act in _NO_LADDER_COUNTERPART.items()
+             if hasattr(args, k) and act(getattr(args, k))]
+    print("=" * 74)
+    if div:
+        print(f"LADDER PARITY: {len(div)} setting(s) DIVERGE from the 0.95-0.97 config")
+        print("\n".join(div))
+    else:
+        print("LADDER PARITY: all matched settings agree with the 0.95-0.97 config")
+    if extra:
+        print("  ACTIVE COMPONENTS WITH NO LADDER COUNTERPART (untested territory):")
+        print("\n".join(extra))
+    # the largest quantitative gap in the study, printed so it cannot be missed
+    win = args.burn_in_length + args.sequence_length + 20   # +lambda_truncation
+    reuse = args.online_batch_size * win
+    print(f"  gradient reuse = batch {args.online_batch_size} x window {win} "
+          f"x 1 update/env-step = {reuse:,} transitions touched per collected one")
+    print(f"     (ladder winning rung: 4;  highest ever tested: 64)")
+    print("=" * 74, flush=True)
+
+_print_ladder_parity(args)
 
 # ── wandb (optional) ─────────────────────────────────────────────────────────
 #
@@ -1196,7 +1272,7 @@ if not args.vis_only:
     # ── hyperparameters ──────────────────────────────────────────────────────
 
     hp = Hyperparameters(
-        online_batch_size=128,
+        online_batch_size=args.online_batch_size,
         online_buffer_size=args.online_buffer_size,
         target_entropy=args.target_entropy,
         grad_clip=args.grad_clip,
