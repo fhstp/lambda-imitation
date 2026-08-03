@@ -593,6 +593,13 @@ class Hyperparameters(NamedTuple):
     # can shape the encoder toward retention at all, not a legitimate agent
     # objective.  0.0 = off.  See ablations.md Part K.9.
     aux_memory_coef: float = 0.0
+    # If True, do NOT stop-gradient the λ-critic heads in loss_ld: the heads absorb
+    # part of the discrepancy gradient instead of the encoder taking 100 % of it.
+    # The ladder (which reaches 0.95-0.97) splits it 58 % encoder / 42 % heads; ours
+    # routes everything onto the encoder, so the only way to shrink the discrepancy
+    # is to move the latent into the region where two FROZEN heads agree — a
+    # state-independent direction. See differences_report.md §3 row 2.
+    ld_train_heads: bool = False
     # Scalar multiplier on the GVD successor-feature cumulant. The SF value is
     # E[Σ γ^t c_t]; for a raw hit cumulant (c∈{0,1}) that grows to ~O(1/(1-γ)),
     # whose large TD targets drive the SF heads into deadly-triad divergence
@@ -2203,16 +2210,18 @@ def create_iqlearn(
                 "dense_discrepancy needs the target actor to weight the "
                 "expectation over actions"
             )
-            v1 = get_v(target_actor_state, jax.lax.stop_gradient(lambda1_critic),
+            _frz = (lambda x: x) if params.ld_train_heads else jax.lax.stop_gradient
+            v1 = get_v(target_actor_state, _frz(lambda1_critic),
                        lambda1_graph, jnp.array(0.0), latents, jnp.array(0),
                        False, False, mask=mask)
-            v2 = get_v(target_actor_state, jax.lax.stop_gradient(lambda2_critic),
+            v2 = get_v(target_actor_state, _frz(lambda2_critic),
                        lambda2_graph, jnp.array(0.0), latents, jnp.array(0),
                        False, False, mask=mask)
             loss = optax.losses.huber_loss(v1, v2).mean()
         else:
-            q1 = get_q(jax.lax.stop_gradient(lambda1_critic), lambda1_graph, latents, actions)
-            q2 = get_q(jax.lax.stop_gradient(lambda2_critic), lambda2_graph, latents, actions)
+            _frz = (lambda x: x) if params.ld_train_heads else jax.lax.stop_gradient
+            q1 = get_q(_frz(lambda1_critic), lambda1_graph, latents, actions)
+            q2 = get_q(_frz(lambda2_critic), lambda2_graph, latents, actions)
             loss = optax.losses.huber_loss(q1, q2).mean()
         return loss, {"ld_loss": loss}
 

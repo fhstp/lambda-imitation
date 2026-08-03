@@ -295,6 +295,10 @@ g.add_argument("--aux-memory-coef", dest="aux_memory_coef", type=float, default=
                     "objective — it tests whether this training loop can shape the "
                     "encoder toward retention at all, and is NOT a legitimate agent "
                     "objective. 0 = off.")
+g.add_argument("--ld-train-heads", dest="ld_train_heads", action="store_true",
+               help="let the lambda-critic heads absorb part of the discrepancy gradient instead of the encoder taking 100%% of it (the ladder splits it 58/42). "
+                    "With the heads frozen, the only way to shrink the discrepancy is to move the latent into their state-independent agreement region.")
+parser.set_defaults(ld_train_heads=False)
 g.add_argument("--sac-critic-coef", dest="sac_critic_coef", type=float, default=1.0,
                help="weight on the main SAC critic's 1-STEP Bellman loss "
                     "(default 1.0; 0 drops it). A 1-step target V(s)=r+gV(s') is "
@@ -475,6 +479,7 @@ _LADDER_PARITY = {
     "mask_first_episode_only": True, "burn_in_from_stored_carry": False,
     "critic_layer_norm": False, "dense_value_coef": 1.0,
     "dense_discrepancy": True, "lambda1": 0.1, "lambda2": 0.95,
+    "lambda_coef": 1.0,
     "sequence_length": 100, "burn_in_length": 0, "grad_clip": 0.5,
     "rho_bar": 1.0, "c_bar": 1.0, "fe_lr": 1e-4, "actor_lr": 1e-4,
     "critic_lr": 1e-4, "gamma": 0.99, "terminal_bonus": 0.0, "paper_arch": True,
@@ -593,6 +598,7 @@ if args.wandb and not args.vis_only:
             "dense_discrepancy": args.dense_discrepancy,
             "sac_critic_coef": args.sac_critic_coef,
             "aux_memory_coef": args.aux_memory_coef,
+            "ld_train_heads": args.ld_train_heads,
             "alpha_anneal_final": args.alpha_anneal_final,
             "batch_size": args.batch_size,
             "sequence_length": args.sequence_length,
@@ -1302,6 +1308,7 @@ if not args.vis_only:
         dense_discrepancy=args.dense_discrepancy,
         sac_critic_coef=args.sac_critic_coef,
         aux_memory_coef=args.aux_memory_coef,
+        ld_train_heads=args.ld_train_heads,
         gvd_cumulant_diff=args.gvd_cumulant_diff,
         gvd_cumulant_scale=args.gvd_cumulant_scale,
         random_behaviour=args.random_behaviour,
