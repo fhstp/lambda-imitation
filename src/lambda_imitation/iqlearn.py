@@ -600,6 +600,14 @@ class Hyperparameters(NamedTuple):
     # is to move the latent into the region where two FROZEN heads agree — a
     # state-independent direction. See differences_report.md §3 row 2.
     ld_train_heads: bool = False
+    # If True, use squared error (not Huber) for the λ-critic TD losses. Huber caps the
+    # per-sample gradient of "fit my own λ-target" at 1 — the same cap the discrepancy
+    # term has — and since agreeing with the other head is a 1-D constraint while
+    # fitting a target is not, collapse becomes the cheap solution: measured
+    # lam0.1_v == lam0.95_v to 2 dp with ld_loss ~0.002 even when the TD terms are
+    # weighted 2:1. The reference uses a SQUARED value loss, so with TD errors of
+    # 10-20 units target-fitting dominates agreement and the heads cannot collapse.
+    lambda_mse: bool = False
     # Scalar multiplier on the GVD successor-feature cumulant. The SF value is
     # E[Σ γ^t c_t]; for a raw hit cumulant (c∈{0,1}) that grows to ~O(1/(1-γ)),
     # whose large TD targets drive the SF heads into deadly-triad divergence
@@ -2602,9 +2610,11 @@ def create_iqlearn(
             f"lambda{lam}_critic:": q[: -params.lambda_truncation].mean(),
             f"lambda{lam}_target:": targets[: -params.lambda_truncation].mean(),
         }
+        _vloss = ((lambda a, b: (a - b) ** 2) if params.lambda_mse
+                  else optax.losses.huber_loss)
         loss = jnp.array(0.0)
         if params.sparse_value_loss:
-            loss = loss + _seq_loss_mean(optax.losses.huber_loss(q, tgt), dones)
+            loss = loss + _seq_loss_mean(_vloss(q, tgt), dones)
         if params.dense_value_coef > 0.0:
             # DENSE term: regress the ONLINE head's expected value
             # V(s) = Σ_a π(a|s)·min(Q1,Q2)(s,a) against the same V-trace target,
@@ -2623,7 +2633,7 @@ def create_iqlearn(
                 False,
                 mask=mask_flat,
             ).reshape(Tp, B)
-            l_dense = _seq_loss_mean(optax.losses.huber_loss(v_dense, tgt), dones)
+            l_dense = _seq_loss_mean(_vloss(v_dense, tgt), dones)
             loss = loss + params.dense_value_coef * l_dense
             metrics[f"lambda{lam}_dense_loss"] = l_dense
             metrics[f"lambda{lam}_dense_v"] = v_dense[: -params.lambda_truncation].mean()

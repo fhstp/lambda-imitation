@@ -295,6 +295,9 @@ g.add_argument("--aux-memory-coef", dest="aux_memory_coef", type=float, default=
                     "objective — it tests whether this training loop can shape the "
                     "encoder toward retention at all, and is NOT a legitimate agent "
                     "objective. 0 = off.")
+g.add_argument("--lambda-mse", dest="lambda_mse", action="store_true",
+               help="squared error instead of Huber for the lambda-critic TD losses. Huber caps target-fitting gradient at 1, the same as the discrepancy term, which makes head COLLAPSE the cheap solution; the reference uses a squared value loss so large TD errors dominate agreement.")
+parser.set_defaults(lambda_mse=False)
 g.add_argument("--ld-train-heads", dest="ld_train_heads", action="store_true",
                help="let the lambda-critic heads absorb part of the discrepancy gradient instead of the encoder taking 100%% of it (the ladder splits it 58/42). "
                     "With the heads frozen, the only way to shrink the discrepancy is to move the latent into their state-independent agreement region.")
@@ -599,6 +602,7 @@ if args.wandb and not args.vis_only:
             "sac_critic_coef": args.sac_critic_coef,
             "aux_memory_coef": args.aux_memory_coef,
             "ld_train_heads": args.ld_train_heads,
+            "lambda_mse": args.lambda_mse,
             "alpha_anneal_final": args.alpha_anneal_final,
             "batch_size": args.batch_size,
             "sequence_length": args.sequence_length,
@@ -1309,6 +1313,7 @@ if not args.vis_only:
         sac_critic_coef=args.sac_critic_coef,
         aux_memory_coef=args.aux_memory_coef,
         ld_train_heads=args.ld_train_heads,
+        lambda_mse=args.lambda_mse,
         gvd_cumulant_diff=args.gvd_cumulant_diff,
         gvd_cumulant_scale=args.gvd_cumulant_scale,
         random_behaviour=args.random_behaviour,
