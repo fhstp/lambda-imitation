@@ -270,6 +270,9 @@ class SACState(NamedTuple):
     gvd_sf2_target: nnx.GraphState = None
     gvd_sf1_optimizer_state: optax.OptState = None
     gvd_sf2_optimizer_state: optax.OptState = None
+    # DIAGNOSTIC auxiliary memory head (params.aux_memory_coef > 0).
+    aux_head: nnx.GraphState = None
+    aux_head_optimizer_state: optax.OptState = None
 
 
 class SACFunctions(NamedTuple):
@@ -581,6 +584,15 @@ class Hyperparameters(NamedTuple):
     # steps-remaining and therefore require integrating past hits).
     # 0.0 drops it, leaving the FE shaped only by the λ-critics (+ discrepancy).
     sac_critic_coef: float = 1.0
+    # ---- DIAGNOSTIC: auxiliary memory loss --------------------------------
+    # Weight on a self-supervised auxiliary loss that predicts the WITHIN-WINDOW
+    # accumulated hit-map from the recurrent carry (BCE).  The target is built
+    # only from data already in the buffer — the executed actions and the
+    # per-step hit bit — so no privileged information is used; but it is a
+    # memory-FORCING objective, i.e. a DIAGNOSTIC of whether our training loop
+    # can shape the encoder toward retention at all, not a legitimate agent
+    # objective.  0.0 = off.  See ablations.md Part K.9.
+    aux_memory_coef: float = 0.0
     # Scalar multiplier on the GVD successor-feature cumulant. The SF value is
     # E[Σ γ^t c_t]; for a raw hit cumulant (c∈{0,1}) that grows to ~O(1/(1-γ)),
     # whose large TD targets drive the SF heads into deadly-triad divergence
@@ -1147,6 +1159,19 @@ def create_iqlearn(
         gvd_sf2_graph, gvd_sf2_state = nnx.split(gvd_sf2_model)
 
     critic_state = TwinCriticState(critic_q1_state, critic_q2_state)
+    # DIAGNOSTIC auxiliary memory head: latent -> per-cell logits.  fold_in on a
+    # distinct constant keeps every other RNG stream bit-identical when off.
+    use_aux_memory = params.aux_memory_coef > 0.0
+    if use_aux_memory:
+        aux_head_model = Head(
+            feature_dim,
+            (feature_dim,),
+            action_dim,
+            layer_norm=critic_layer_norm,
+            rngs=nnx.Rngs(jax.random.fold_in(key, 0x4A17)),
+        )
+        aux_head_graph, aux_head_state = nnx.split(aux_head_model)
+
     critic_graph = TwinCriticGraph(critic_q1_graph, critic_q2_graph)
     if approximate_lambda:
         lambda1_critic_state = TwinCriticState(
@@ -1170,6 +1195,10 @@ def create_iqlearn(
             return optax.chain(optax.clip_by_global_norm(params.grad_clip),
                                optax.adam(lr))
         return optax.adam(lr)
+
+    if use_aux_memory:
+        aux_head_optimizer = _mk_opt(params.critic_lr)
+        aux_head_optimizer_state = aux_head_optimizer.init(aux_head_state)
 
     fe_optimizer = _mk_opt(params.fe_lr)
     actor_optimizer = _mk_opt(params.actor_lr)
@@ -1239,6 +1268,10 @@ def create_iqlearn(
         # SF targets start equal to online weights, like all other targets.
         gvd_sf1_target=remove_weak_types(gvd_sf1_state) if use_gvd else None,
         gvd_sf2_target=remove_weak_types(gvd_sf2_state) if use_gvd else None,
+        aux_head=remove_weak_types(aux_head_state) if use_aux_memory else None,
+        aux_head_optimizer_state=(
+            remove_weak_types(aux_head_optimizer_state) if use_aux_memory else None
+        ),
         gvd_sf1_optimizer_state=(
             remove_weak_types(gvd_sf1_optimizer_state) if use_gvd else None
         ),
@@ -2790,6 +2823,7 @@ def create_iqlearn(
         lambda2_critic_state,
         gvd_sf1_state,
         gvd_sf2_state,
+        aux_head_state,
         target_feature_extractor_state,
         actor_target_state,
         critic_target_state,
@@ -3080,6 +3114,32 @@ def create_iqlearn(
             metrics.update(m_gvd)
             loss += l_sf1 + l_sf2 + params.gvd_coef * l_gvd
 
+        if use_aux_memory:
+            # DIAGNOSTIC (ablations.md K.9): can this loop shape the encoder toward
+            # retention at all?  Target = the WITHIN-WINDOW accumulated hit-map,
+            # built only from stored actions + per-step hit bits (no privileged
+            # info).  obs layout is [hit | mask], and the hit bit at step s is the
+            # RESULT of a_{s-1}, so cell a_{s-1} is marked when hit_s is set; the
+            # cumulative OR over s <= t is exactly what a memory must hold at t.
+            obs_tm = jnp.swapaxes(observations, 0, 1)[_BL:]      # (T', B, obs)
+            hit_tm = obs_tm[..., 0]                              # (T', B)
+            a_prev = jnp.concatenate(
+                [jnp.zeros_like(actions_tm[:1]), actions_tm[:-1]], axis=0)
+            oh = jax.nn.one_hot(
+                jnp.round(a_prev[..., 0]).astype(jnp.int32), action_dim)
+            contrib = (oh * hit_tm[..., None]).at[0].set(0.0)    # no predecessor at t=0
+            hit_map = jnp.clip(jnp.cumsum(contrib, axis=0), 0.0, 1.0)
+            Tp, Bb = hit_tm.shape
+            logits = nnx.merge(aux_head_graph, aux_head_state)(
+                critic_latent.reshape(Tp * Bb, -1)
+            ).reshape(Tp, Bb, action_dim)
+            per_step = optax.sigmoid_binary_cross_entropy(
+                logits, jax.lax.stop_gradient(hit_map)).mean(-1)
+            l_aux = _seq_loss_mean(per_step, terminated_tm)
+            loss = loss + params.aux_memory_coef * l_aux
+            metrics["aux_memory_loss"] = l_aux
+            metrics["aux_memory_target_rate"] = hit_map.mean()
+
         return loss, metrics
 
     def update_step(sac: SACState, key: jax.Array) -> Tuple[SACState, dict]:
@@ -3116,8 +3176,9 @@ def create_iqlearn(
             grads_lambda2_critic,
             grads_gvd_sf1,
             grads_gvd_sf2,
+            grads_aux_head,
         ), metrics = jax.grad(
-            loss_combined, argnums=[0, 1, 2, 3, 4, 5, 6], has_aux=True
+            loss_combined, argnums=[0, 1, 2, 3, 4, 5, 6, 7], has_aux=True
         )(
             sac.feature_extractor,
             sac.actor,
@@ -3126,6 +3187,7 @@ def create_iqlearn(
             sac.lambda2_critic,
             sac.gvd_sf1,
             sac.gvd_sf2,
+            sac.aux_head,
             sac.feature_extractor_target,
             sac.actor_target,
             sac.critic_target,
@@ -3170,6 +3232,12 @@ def create_iqlearn(
                 grads_gvd_sf2, sac.gvd_sf2_optimizer_state
             )
             new_gvd_sf2 = optax.apply_updates(sac.gvd_sf2, updates)  # type: ignore
+
+        if use_aux_memory:
+            updates, new_aux_opt = aux_head_optimizer.update(
+                grads_aux_head, sac.aux_head_optimizer_state
+            )
+            new_aux_head = optax.apply_updates(sac.aux_head, updates)  # type: ignore
 
         if params.autotune_alpha:
             grads_alpha = jax.grad(loss_alpha)(sac.log_alpha, -metrics["entropy"])
@@ -3273,6 +3341,10 @@ def create_iqlearn(
                 ),
                 gvd_sf2_optimizer_state=(
                     new_gvd_sf2_opt if use_gvd else sac.gvd_sf2_optimizer_state
+                ),
+                aux_head=new_aux_head if use_aux_memory else sac.aux_head,
+                aux_head_optimizer_state=(
+                    new_aux_opt if use_aux_memory else sac.aux_head_optimizer_state
                 ),
             ),
             metrics,

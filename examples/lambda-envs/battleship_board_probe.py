@@ -280,6 +280,14 @@ g.add_argument("--dense-discrepancy", dest="dense_discrepancy",
                     "reference does: its discrepancy term is on the scalar V "
                     "heads, not per-action Q.")
 parser.set_defaults(dense_discrepancy=False)
+g.add_argument("--aux-memory-coef", dest="aux_memory_coef", type=float, default=0.0,
+               help="DIAGNOSTIC ONLY (ablations.md K.9): weight on a self-supervised "
+                    "auxiliary loss predicting the within-window accumulated hit-map "
+                    "from the recurrent carry. The target uses only stored actions + "
+                    "hit bits (no privileged info), but it is a memory-FORCING "
+                    "objective — it tests whether this training loop can shape the "
+                    "encoder toward retention at all, and is NOT a legitimate agent "
+                    "objective. 0 = off.")
 g.add_argument("--sac-critic-coef", dest="sac_critic_coef", type=float, default=1.0,
                help="weight on the main SAC critic's 1-STEP Bellman loss "
                     "(default 1.0; 0 drops it). A 1-step target V(s)=r+gV(s') is "
@@ -508,6 +516,7 @@ if args.wandb and not args.vis_only:
             "sparse_value_loss": args.sparse_value_loss,
             "dense_discrepancy": args.dense_discrepancy,
             "sac_critic_coef": args.sac_critic_coef,
+            "aux_memory_coef": args.aux_memory_coef,
             "alpha_anneal_final": args.alpha_anneal_final,
             "batch_size": args.batch_size,
             "sequence_length": args.sequence_length,
@@ -1216,6 +1225,7 @@ if not args.vis_only:
         sparse_value_loss=args.sparse_value_loss,
         dense_discrepancy=args.dense_discrepancy,
         sac_critic_coef=args.sac_critic_coef,
+        aux_memory_coef=args.aux_memory_coef,
         gvd_cumulant_diff=args.gvd_cumulant_diff,
         gvd_cumulant_scale=args.gvd_cumulant_scale,
         random_behaviour=args.random_behaviour,
