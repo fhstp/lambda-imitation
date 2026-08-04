@@ -697,3 +697,97 @@ measured a frozen encoder) and `nearmc` (the discarded climbing configuration).
 because the fix was applied to one extraction site and not to the shared helper. Metric
 extraction is now a single reviewed script (`scratchpad/extract.sh`) anchored on
 `] fired AUROC=`, and every table above was regenerated from raw logs with it.
+
+---
+
+## Part M — Resolved: the loop is sound; the value-side λ-discrepancy collapses
+
+All numbers below use the anchored extractor (L.1), ladder-matched defaults (`3cdaae8`),
+GVD off unless stated, and the fixed V-trace bootstrap (`20572f6`).
+
+### M.1 The loop is sound — 0.95, matching the ladder
+
+`loop_only`: the within-window accumulated-hit-map BCE as the **only** gradient reaching
+the encoder (value coefficients zeroed, actor detached — *not* `--stop-critic-fe`, which
+detaches the aux head itself and silently measures a frozen encoder).
+
+| probes (16, 1M steps) | 0.872 → 0.921 → 0.942 → … → **0.949–0.959** |
+|---|---|
+
+Auxiliary BCE → **0.000** (no-memory marginal baseline 0.285). This lands on the
+encoder's supervised ceiling (0.925, Part I) and the ladder's own level (0.953–0.969).
+
+⇒ **Our BPTT, buffer, episode-aligned window sampling, carry handling, masking, optimiser
+and probe are all correct.** A memory-demanding gradient produces a near-perfect board
+memory *through this loop*. Every "port onto the reference loop" recommendation
+(K.5, K.8) is **retired**: there is no broken machinery to escape.
+
+### M.2 The λ-discrepancy has no working operating point
+
+Four configurations, all with the SHORT-vs-LONG contrast λ=(0.1, 0.95):
+
+| arm | heads | ld:TD | λ TD loss | `|λ0.1_v − λ0.95_v|` | `ld_loss` | auroc |
+|---|---|---|---|---|---|---|
+| `rebal_ld` | frozen | 3:2 | Huber | — | **1.3e7** | 0.518 |
+| `rebal_heads` | trainable | 3:2 | Huber | 0.00 | 0.0028 | 0.539 |
+| `heads_bal` | trainable | 1:1 | Huber | 0.00 | 0.0033 | 0.533 |
+| `heads_def` | trainable | 1:2 | Huber | 0.00 | 0.0016 | 0.587 |
+| `mse_heads` | trainable | 1:2 | **squared** | **0.001** | 0.0057 | 0.590 |
+| `mse_frozen` | frozen | 1:2 | **squared** | **0.035** | 0.021 | 0.566 |
+
+- **Frozen heads** ⇒ the encoder absorbs 100 % of the discrepancy gradient and the
+  λ-critics diverge (values to +1.3e7 at ld-dominant weighting), or — at TD-dominant
+  weighting — the *encoder* moves the latent into the heads' agreement region (`mse_frozen`,
+  separation 0.035). Both are state-independent directions.
+- **Trainable heads** ⇒ the two heads collapse onto each other exactly, at every
+  weighting tried including TD-dominant 1:2, and under **both** Huber and squared losses.
+
+A hypothesis worth recording as **refuted**: that Huber's per-sample gradient cap made
+agreement (a 1-D constraint) cheaper than target-fitting, and that the reference's squared
+value loss prevents this. Squared loss changes nothing (`mse_heads`, separation 0.001).
+
+The heads collapse *while ignoring their own targets*: at `v ≈ −36` the λ=0.1 and λ=0.95
+targets differ by ~10 units, yet both heads output −36.2. Agreement is exactly
+satisfiable; the λ=0.95 target is not (the value sits at −36 against a true ≈ −60). So the
+discrepancy always wins, regardless of loss form or weight.
+
+### M.3 Why value-side pressure cannot demand a spatial map (user's framing, and it fits)
+
+Our encoder sees `[hit | one_hot(a_{t-1})]` and **never the coverage mask**, so predicting
+the value requires *counting* steps and hits — a scalar suffices. Under a near-uniform
+policy the expected steps-to-clear depends on *how many* ship cells remain, not *where*
+they are. Part D measured the ceiling on this directly: spatial memory adds **+1.4 % R²**
+to return prediction where the memoryless observation explains ~95 %.
+
+⇒ value-side objectives at high entropy yield **counter-shaped** memory, which a
+board-decoding probe barely rewards. Every arm confirms it: the best legitimate-objective
+result is `heads_def` ≈ 0.59, all of them play randomly (entropy 3.7, ~90 shots), and
+none exceeds the **frozen random encoder at 0.65**.
+
+The apparent counterexample — the reference reaching 0.92 with a frozen random policy and
+the discrepancy off (Part E) — is consistent with the byproduct story: when the input is
+`one_hot(a)·hit`, the cheapest way for a GRU to accumulate a hit *count* is to sum those
+vectors, which *is* the hit map. Whether counting yields a map or a scalar depends on the
+path of least resistance; in the reference it is the map, in ours it is not.
+
+### M.4 Where this leaves the project
+
+**Fixed this arc** (all on `dense-value-loss`): the V-trace tail bootstrap (§L.3),
+`--gvd` defaulting True (§L.2), the metric extractor (§L.1), plus ladder-matched defaults
+and a startup parity banner so a silent divergence cannot recur. New evidence-backed
+knobs: `--dense-value-coef`/`--dense-discrepancy` (the dense value loss demonstrably
+prevents the value divergence: −55 vs −152 in a matched pair), `--sac-critic-coef`,
+`--ld-train-heads`, `--lambda-mse`, `--aux-memory-coef`, `--online-batch-size`.
+
+**Recommendation.** Stop pursuing memory formation from value-side objectives on
+random-policy data. The loop is verified sound (M.1), so the missing ingredient is a
+*reason* for the representation to be spatial — i.e. a policy that must target, which is
+Part B's chicken-and-egg. That is exactly what off-policy **imitation** supplies, and it
+is the project's stated goal: expert demonstrations provide targeting behaviour instead of
+waiting for it to bootstrap out of random play. The scripted ε-greedy hunt/target expert
+and its `_prefill_jit` wiring are parked on `archive/offpolicy-ladder-knobs` and should be
+revived on top of the current branch.
+
+Still open (in `differences_report.md` §3, none yet implicated): gradient reuse 15,360 vs
+4 (a 16× cut to 960 changed nothing), the λ-critic head width (64 vs 512), LayerNorm in
+the value heads, and the fused-GRU recurrent scale (1/√3).
