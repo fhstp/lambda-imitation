@@ -104,12 +104,13 @@ class Head(nnx.Module):
         rngs: nnx.Rngs,
     ):
         dims = [feature_dim] + list(hidden_dims) + [output_dim]
-        self.layers = nnx.data(
-            [nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)]
-        )
-        self.norms = nnx.data(
-            [nnx.LayerNorm(d, rngs=rngs) for d in hidden_dims] if layer_norm else []
-        )
+        self.layers = [
+            nnx.Linear(dims[i], dims[i + 1], rngs=rngs)
+            for i in range(len(dims) - 1)
+        ]
+        self.norms = [
+            nnx.LayerNorm(d, rngs=rngs) for d in hidden_dims
+        ] if layer_norm else []
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Map a feature batch to the output space.

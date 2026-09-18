@@ -373,6 +373,9 @@ class RecurrentFeatureExtractor(nnx.Module):
                 rngs=rngs,
             )
             self.output_dim = memory_hidden_dim
+        if self.cell is not None:
+            # Initialization RNGs are not differentiable optimizer state.
+            self.cell.rngs = None
 
     def __call__(
         self,
