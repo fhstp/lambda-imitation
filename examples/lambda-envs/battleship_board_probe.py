@@ -46,8 +46,8 @@ from functools import partial
 parser = argparse.ArgumentParser(description="Battleship board probe visualisation.")
 
 g = parser.add_argument_group("environment")
-g.add_argument("--rows", type=int, default=10, help="board rows (default 10)")
-g.add_argument("--cols", type=int, default=10, help="board cols (default 10)")
+g.add_argument("--rows", type=int, default=5, help="board rows (default 10)")
+g.add_argument("--cols", type=int, default=5, help="board cols (default 10)")
 g.add_argument("--dense-reward", dest="dense_reward", action="store_true",
                help="reward every hit (default: sparse terminal reward)")
 parser.set_defaults(dense_reward=False)
@@ -55,7 +55,7 @@ g.add_argument("--terminal-bonus", dest="terminal_bonus", type=float, default=No
                help="sparse-mode reward on the clearing step (default None = "
                     "env default rows*cols; 0.0 = pure -1/step, which is what "
                     "surfaces the spatial-Q spike).")
-g.add_argument("--ship-lengths", default="5,4,3,2", metavar="L1,L2,…",
+g.add_argument("--ship-lengths", default="3,2", metavar="L1,L2,…",
                help="comma-separated ship lengths (default 5,4,3,2).  Use "
                     "shorter ships for small-board curriculum stages, e.g. "
                     "'3,2' on a 5x5 board.")
