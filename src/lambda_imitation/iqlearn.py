@@ -1788,7 +1788,7 @@ def create_iqlearn(
         # effect.  The λ-critics still train via their V-trace losses.
         q1 = get_q(jax.lax.stop_gradient(lambda1_critic), lambda1_graph, latents, actions)
         q2 = get_q(jax.lax.stop_gradient(lambda2_critic), lambda2_graph, latents, actions)
-        loss = optax.losses.huber_loss(q1, q2).mean()
+        loss = ((q1-q2)**2).mean()
         return loss, {"ld_loss": loss}
 
     # ------------------------------------------------------------------
