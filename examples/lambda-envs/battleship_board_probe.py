@@ -59,12 +59,13 @@ g.add_argument("--ship-lengths", default="5,4,3,2", metavar="L1,L2,…",
                help="comma-separated ship lengths (default 5,4,3,2).  Use "
                     "shorter ships for small-board curriculum stages, e.g. "
                     "'3,2' on a 5x5 board.")
-g.add_argument("--full-obs", action="store_true",
+g.add_argument("--full-obs", dest="full_obs", action="store_true",
                help="DIAGNOSTIC: append the full per-cell hits_misses grid to "
                     "the observation so the FE sees Markov state (no memory "
                     "needed).  Tests whether the SAC+GVD policy machinery can "
                     "learn good play *given* the board — isolating the failure "
                     "to the memory-incentive gap.")
+parser.set_defaults(full_obs=False)
 
 g = parser.add_argument_group("agent training")
 g.add_argument("--rounds", type=int, default=100, help="training rounds (default 100)")
@@ -93,12 +94,12 @@ g.add_argument("--paper-arch", dest="paper_arch", action="store_true",
                     "single-hidden-layer actor/critic heads of width H. "
                     "Overrides --projection-dim and the head dims; the "
                     "prev-action one-hot is still fed via use_prev_action.")
-parser.set_defaults(paper_arch=False)
+parser.set_defaults(paper_arch=True)
 # Value-stability knobs (previously hard-coded in Hyperparameters).  Defaults
 # reproduce the prior behaviour exactly so existing launches are unchanged.
 g.add_argument("--fe-lr", type=float, default=1e-4, help="feature-extractor lr (default 1e-4)")
 g.add_argument("--actor-lr", type=float, default=1e-4, help="actor lr (default 1e-4)")
-g.add_argument("--critic-lr", type=float, default=2e-4, help="critic lr (default 2e-4)")
+g.add_argument("--critic-lr", type=float, default=1e-4, help="critic lr (default 2e-4)")
 g.add_argument("--alpha", type=float, default=0.1, help="entropy temperature (default 0.1)")
 g.add_argument("--autotune-alpha", action="store_true",
                help="auto-adjust alpha to match --target-entropy (SAC discrete; "
@@ -111,18 +112,13 @@ g.add_argument("--tau", type=float, default=0.005, help="target-net EMA coeffici
 g.add_argument("--grad-clip", type=float, default=0.0,
                help="global grad-norm clip for FE/actor/critic/SF (0 = off, default). "
                     "Recommended for the recurrent BPTT unroll, e.g. 1.0–10.0.")
-g.add_argument("--cql-coef", type=float, default=0.0,
-               help="CQL-style action-discrimination penalty on the critic "
-                    "(logsumexp_a Q − Q_taken over legal actions), scaled by this "
-                    "coef (0 = off, default).  Counteracts a critic that collapses "
-                    "to an action-independent (flat) Q; try e.g. 0.5–5.0.")
 g.add_argument("--critic-layer-norm", dest="critic_layer_norm", action="store_true",
                help="use LayerNorm in the critic MLP (default on).")
 g.add_argument("--no-critic-layer-norm", dest="critic_layer_norm", action="store_false",
                help="disable critic LayerNorm (control: LN can wash out small "
                     "per-action Q differences).")
 parser.set_defaults(critic_layer_norm=True)
-g.add_argument("--behaviour-epsilon", type=float, default=0.0,
+g.add_argument("--behaviour-epsilon", type=float, default=0,
                help="fraction of online-collection steps driven by a scripted "
                     "hunt/target behaviour policy instead of the actor (0 = off, "
                     "default).  Generates board-exploiting trajectories so the "
@@ -131,13 +127,13 @@ g.add_argument("--behaviour-epsilon", type=float, default=0.0,
                     "FE latent, so it must reconstruct the board from memory.")
 g.add_argument("--approximate-lambda", dest="approximate_lambda", action="store_true")
 g.add_argument("--no-approximate-lambda", dest="approximate_lambda", action="store_false")
-parser.set_defaults(approximate_lambda=False)
+parser.set_defaults(approximate_lambda=True)
 g.add_argument("--gvd", dest="gvd", action="store_true",
                help="enable the GVD successor-feature branches (reward-free "
                     "memory pressure; an agent trained with --gvd must be "
                     "reloaded with --gvd)")
 g.add_argument("--no-gvd", dest="gvd", action="store_false")
-parser.set_defaults(gvd=True)
+parser.set_defaults(gvd=False)
 g.add_argument("--gvd-coef", type=float, default=0.2, help="GVD discrepancy coefficient (default 1.0)")
 g.add_argument("--gvd-features", type=int, default=16,
                help="random-projection width of the GVD feature map; total dim "
@@ -157,8 +153,8 @@ g.add_argument("--stop-actor-fe", dest="stop_actor_fe", action="store_true",
                     "on the shared recurrent memory")
 parser.set_defaults(stop_actor_fe=False)
 g.add_argument("--batch-size", type=int, default=128)
-g.add_argument("--sequence-length", type=int, default=80)
-g.add_argument("--burn-in-length", type=int, default=5)
+g.add_argument("--sequence-length", type=int, default=50)
+g.add_argument("--burn-in-length", type=int, default=10)
 g.add_argument("--burn-in-from-stored-carry", dest="burn_in_from_stored_carry",
                action="store_true",
                help="store the online carry per transition and initialise the "
@@ -167,8 +163,8 @@ g.add_argument("--burn-in-from-stored-carry", dest="burn_in_from_stored_carry",
                     "carry_dim x buffer_size x 4 bytes extra)")
 g.add_argument("--no-burn-in-from-stored-carry", dest="burn_in_from_stored_carry",
                action="store_false")
-parser.set_defaults(burn_in_from_stored_carry=True)
-g.add_argument("--online-buffer-size", type=int, default=200_000)
+parser.set_defaults(burn_in_from_stored_carry=False)
+g.add_argument("--online-buffer-size", type=int, default=100_000)
 g.add_argument("--use-sac", dest="use_sac", action="store_true",
                help="whether or not to use a SAC entropy term for update"
                     "or just use entropy globally in loss")
@@ -196,7 +192,7 @@ g.add_argument("--probe-eval-vis", dest="probe_eval_vis", action="store_true",
                help="also render episode/accuracy/retention images + an mp4 for each "
                     "periodic probe eval and log them to W&B (default on)")
 g.add_argument("--no-probe-eval-vis", dest="probe_eval_vis", action="store_false")
-parser.set_defaults(probe_eval_vis=True)
+parser.set_defaults(probe_eval_vis=False)
 
 g = parser.add_argument_group("I/O & visualisation")
 g.add_argument("--output-dir", default="./battleship_probe_output")
@@ -223,7 +219,7 @@ g.add_argument("--vis-frames", type=int, default=8, help="frames per episode")
 
 g = parser.add_argument_group("logging")
 g.add_argument("--wandb", action="store_true", help="enable Weights & Biases logging")
-g.add_argument("--wandb-project", default="offline-lambda-battleship-probe", metavar="PROJECT",
+g.add_argument("--wandb-project", default="offline-lambda-battleship-results", metavar="PROJECT",
                help="W&B project name (default: offline-lambda-battleship-probe)")
 g.add_argument("--wandb-run-name", default=None, metavar="NAME", help="W&B run name (default: auto)")
 
@@ -324,6 +320,7 @@ if args.wandb and not args.vis_only:
             "gvd_stop_fe": args.gvd_stop_fe,
             "stop_actor_fe": args.stop_actor_fe,
             "batch_size": args.batch_size,
+            "online_batch_size": args.batch_size,
             "sequence_length": args.sequence_length,
             "burn_in_length": args.burn_in_length,
             "burn_in_from_stored_carry": args.burn_in_from_stored_carry,
@@ -417,6 +414,7 @@ def _auroc(scores, labels):
 # as module globals — all defined before any figure is actually drawn.
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
@@ -853,11 +851,9 @@ if not args.vis_only:
         sys.exit("lambda-envs required.  pip install lambda-envs")
 
     from lambda_imitation.iqlearn import Hyperparameters
-    from lambda_imitation.utils import (
-        battleship_projection,
-        create_iqlearn_from_env,
-        env_spec_from_gymnax,
-    )
+    from lambda_imitation.utils import (battleship_projection,
+                                        create_iqlearn_from_env,
+                                        env_spec_from_gymnax)
 
     # ── env setup ──────────────────────────────────────────────────────────────
     #
@@ -992,18 +988,18 @@ if not args.vis_only:
     # ── hyperparameters ──────────────────────────────────────────────────────
 
     hp = Hyperparameters(
-        online_batch_size=128,
+        online_batch_size=args.batch_size,
         online_buffer_size=args.online_buffer_size,
         target_entropy=args.target_entropy,
         fe_lr=args.fe_lr, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
-        lambda_critic_lr=1e-4, alpha_lr=1e-4,
+        lambda_critic_lr=args.critic_lr, alpha_lr=1e-4,
         alpha=args.alpha, autotune_alpha=args.autotune_alpha,
         batch_size=args.batch_size, gamma=args.gamma, tau=args.tau,
-        lambda1=0.05, lambda2=0.75,
-        c_bar=1.05, rho_bar=1.05, lambda_truncation=20,
+        lambda1=0.05, lambda2=0.95,
+        c_bar=1.00, rho_bar=1.00, lambda_truncation=20,
         sequence_length=args.sequence_length,
         burn_in_length=args.burn_in_length,
-        lambda_coef=1.0, fake_onpolicy_loss=True,
+        lambda_coef=0.5, fake_onpolicy_loss=False,
         gvd_coef=args.gvd_coef,
         gvd_lambda1=args.gvd_lambda1,
         gvd_lambda2=args.gvd_lambda2,
@@ -1072,8 +1068,8 @@ if not args.vis_only:
             memory_hidden_dim=args.memory_hidden_dim,
             actor_dims=actor_dims,
             critic_dims=critic_dims,
-            lambda1_critic_dims=(64,64,64),
-            lambda2_critic_dims=(64,64,64),
+            lambda1_critic_dims=critic_dims,
+            lambda2_critic_dims=critic_dims,
             train_steps=args.train_steps,
             approximate_lambda=args.approximate_lambda,
             use_prev_action=True,
@@ -1181,7 +1177,7 @@ if not args.vis_only:
     state, fns, debug_fns = _build_agent(args.seed)
     evaluate = _make_evaluate(fns)
     # Critic-greedy eval is discrete-only (needs the all-actions critic).
-    evaluate_critic = (
+    evaluate_critic = None if True else (
         _make_evaluate_critic(debug_fns)
         if getattr(debug_fns, "predict_qpi", None) is not None else None
     )
@@ -1723,7 +1719,7 @@ if not args.vis_only:
             for rnd in tqdm(range(1, args.rounds + 1), desc=f"Group {group_idx + 1}"):
                 batched, env_state, _ec, metrics = pending
                 keys, eval_keys = _split_each(keys)
-                returns, steps, cleared = _evaluate_v(batched, eval_keys, 10)
+                returns, steps, cleared = _evaluate_v(batched, eval_keys, 50)
                 returns = np.array(returns); steps = np.array(steps); cleared = np.array(cleared)
                 cg = None
                 if evaluate_critic is not None:
