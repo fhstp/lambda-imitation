@@ -51,6 +51,11 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 
+# ``nnx.data`` — explicit "this attribute is pytree data" marker — only exists
+# from Flax 0.11 on.  On older Flax (0.10.x) a plain Python list of sub-modules
+# is already traversed as data, so the marker is a no-op there.
+_nnx_data = getattr(nnx, "data", lambda x: x)
+
 from .buffer import Buffer, create_buffer, create_sequence_sample
 
 # Bounds for the squashed log-standard-deviation of the policy distribution.
@@ -104,10 +109,10 @@ class Head(nnx.Module):
         rngs: nnx.Rngs,
     ):
         dims = [feature_dim] + list(hidden_dims) + [output_dim]
-        self.layers = nnx.data(
+        self.layers = _nnx_data(
             [nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)]
         )
-        self.norms = nnx.data(
+        self.norms = _nnx_data(
             [nnx.LayerNorm(d, rngs=rngs) for d in hidden_dims] if layer_norm else []
         )
 

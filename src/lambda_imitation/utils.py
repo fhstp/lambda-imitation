@@ -374,6 +374,15 @@ class RecurrentFeatureExtractor(nnx.Module):
             )
             self.output_dim = memory_hidden_dim
 
+        # Flax <=0.10 recurrent cells keep a reference to the ``nnx.Rngs`` they
+        # were built with; it is only read by the cell's own
+        # ``initialize_carry``, which this class overrides.  Left in place it
+        # rides along in the ``nnx.split`` state as uint32 / PRNG-key leaves and
+        # makes ``jax.grad`` over that state fail.  Drop it — the cells
+        # themselves are deterministic.
+        if self.cell is not None and hasattr(self.cell, "rngs"):
+            del self.cell.rngs
+
     def __call__(
         self,
         carry: jax.Array,
