@@ -97,9 +97,9 @@ g.add_argument("--paper-arch", dest="paper_arch", action="store_true",
 parser.set_defaults(paper_arch=True)
 # Value-stability knobs (previously hard-coded in Hyperparameters).  Defaults
 # reproduce the prior behaviour exactly so existing launches are unchanged.
-g.add_argument("--fe-lr", type=float, default=1e-6, help="feature-extractor lr (default 1e-4)")
-g.add_argument("--actor-lr", type=float, default=1e-5, help="actor lr (default 1e-4)")
-g.add_argument("--critic-lr", type=float, default=1e-5, help="critic lr (default 2e-4)")
+g.add_argument("--fe-lr", type=float, default=1e-5, help="feature-extractor lr (default 1e-4)")
+g.add_argument("--actor-lr", type=float, default=1e-4, help="actor lr (default 1e-4)")
+g.add_argument("--critic-lr", type=float, default=1e-4, help="critic lr (default 2e-4)")
 g.add_argument("--lambda-coef", type=float, default=0.1, help="GVD discrepancy coefficient (default 1.0)")
 g.add_argument("--alpha", type=float, default=0.1, help="entropy temperature (default 0.1)")
 g.add_argument("--autotune-alpha", action="store_true",
