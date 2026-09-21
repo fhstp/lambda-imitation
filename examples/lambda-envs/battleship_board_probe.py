@@ -97,9 +97,10 @@ g.add_argument("--paper-arch", dest="paper_arch", action="store_true",
 parser.set_defaults(paper_arch=True)
 # Value-stability knobs (previously hard-coded in Hyperparameters).  Defaults
 # reproduce the prior behaviour exactly so existing launches are unchanged.
-g.add_argument("--fe-lr", type=float, default=1e-4, help="feature-extractor lr (default 1e-4)")
-g.add_argument("--actor-lr", type=float, default=1e-4, help="actor lr (default 1e-4)")
-g.add_argument("--critic-lr", type=float, default=1e-4, help="critic lr (default 2e-4)")
+g.add_argument("--fe-lr", type=float, default=1e-6, help="feature-extractor lr (default 1e-4)")
+g.add_argument("--actor-lr", type=float, default=1e-5, help="actor lr (default 1e-4)")
+g.add_argument("--critic-lr", type=float, default=1e-5, help="critic lr (default 2e-4)")
+g.add_argument("--lambda-coef", type=float, default=0.1, help="GVD discrepancy coefficient (default 1.0)")
 g.add_argument("--alpha", type=float, default=0.1, help="entropy temperature (default 0.1)")
 g.add_argument("--autotune-alpha", action="store_true",
                help="auto-adjust alpha to match --target-entropy (SAC discrete; "
@@ -313,6 +314,7 @@ if args.wandb and not args.vis_only:
             "approximate_lambda": args.approximate_lambda,
             "use_gvd": args.gvd,
             "gvd_coef": args.gvd_coef,
+            "lambda_coef": args.lambda_coef,
             "gvd_features": args.gvd_features,
             "gvd_lambda1": args.gvd_lambda1,
             "gvd_lambda2": args.gvd_lambda2,
@@ -999,7 +1001,7 @@ if not args.vis_only:
         c_bar=1.00, rho_bar=1.00, lambda_truncation=50,
         sequence_length=args.sequence_length,
         burn_in_length=args.burn_in_length,
-        lambda_coef=1.0, fake_onpolicy_loss=False,
+        lambda_coef=args.lambda_coef, fake_onpolicy_loss=False,
         gvd_coef=args.gvd_coef,
         gvd_lambda1=args.gvd_lambda1,
         gvd_lambda2=args.gvd_lambda2,
