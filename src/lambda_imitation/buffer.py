@@ -37,12 +37,17 @@ class Buffer(NamedTuple):
         pos: Write cursor.  The *next* call to ``add`` will write to slot
             ``pos % size``.  Increases monotonically (not wrapped).
         size: Maximum number of transitions the buffer can hold.
+        priorities: Optional per-slot sampling priority of shape ``(size,)``,
+            used by :func:`create_prioritised_sequence_sample` and written by
+            :func:`update_priorities`.  ``None`` (the default) means uniform
+            sampling, which is what every non-prioritised caller gets.
     """
 
     info: dict[str, jax.Array]
     sampling_ok: jax.Array
     pos: int
     size: int
+    priorities: jax.Array | None = None
 
 
 class BufferSample(NamedTuple):
@@ -147,16 +152,7 @@ def create_sequence_sample(
     base_indices = jnp.vstack((jnp.arange(sequence_size),) * sampling_size)
 
     def sample(buffer: Buffer, key: jax.Array) -> Tuple[BufferSample, jax.Array]:
-        x = buffer.sampling_ok.astype(jnp.int32)
-        padded = jnp.concatenate([x, x[:sequence_size]])
-        sampling_ok = jax.lax.reduce_window(
-            padded,
-            init_value=jnp.iinfo(padded.dtype).max,
-            computation=jax.lax.min,
-            window_dimensions=(sequence_size + 1,),
-            window_strides=(1,),
-            padding="VALID",
-        )
+        sampling_ok = _valid_window_mask(buffer.sampling_ok, sequence_size)
         probs = sampling_ok.astype(jnp.float32)
         probs = probs / probs.sum()
         indices = jax.random.choice(key, buffer_size, (sampling_size, 1), p=probs)
@@ -174,6 +170,126 @@ def create_sequence_sample(
                 next_info={},
             ),
             sequence_indices,
+        )
+
+    return sample
+
+
+def _valid_window_mask(sampling_ok: jax.Array, sequence_size: int) -> jax.Array:
+    """Per-start-index mask: True where a whole ``sequence_size`` window is valid.
+
+    Circular min-reduction over ``sampling_ok`` — the shared core of the uniform
+    and prioritised sequence samplers, so both agree on which windows exist.
+    """
+    x = sampling_ok.astype(jnp.int32)
+    padded = jnp.concatenate([x, x[:sequence_size]])
+    return jax.lax.reduce_window(
+        padded,
+        init_value=jnp.iinfo(padded.dtype).max,
+        computation=jax.lax.min,
+        window_dimensions=(sequence_size + 1,),
+        window_strides=(1,),
+        padding="VALID",
+    )
+
+
+def trace_priority(ratios: jax.Array, floor: float = 1e-3) -> jax.Array:
+    """Trace mass of each window: the geometric mean of its clipped ratios.
+
+    ``exp(mean_k log(clip(rho_k, floor, 1)))`` over the window's time axis
+    (the last one).  This is monotone in the raw product ``prod_k rho_k`` that
+    V-trace / Retrace actually apply to the window's tail, so it ranks windows
+    identically, but it cannot underflow: a strict product over a 50-step
+    window is exactly 0 for any window containing a single cut step, and
+    clipping without the log gives ``1e-3 ** 50 = 1e-150``.
+
+    Args:
+        ratios: ``(..., T)`` importance ratios, time last.
+        floor: Lower clip on each ratio; also sets the score of a fully cut
+            window (``= floor``), keeping priorities strictly positive so no
+            window is ever unreachable.
+
+    Returns:
+        ``(...)`` priorities in ``[floor, 1]``.
+    """
+    clipped = jnp.clip(ratios, floor, 1.0)
+    return jnp.exp(jnp.mean(jnp.log(clipped), axis=-1))
+
+
+def update_priorities(
+    buffer: Buffer, start_indices: jax.Array, values: jax.Array
+) -> Buffer:
+    """Write new priorities for the given window start slots.
+
+    Args:
+        buffer: Current buffer state.
+        start_indices: ``(batch,)`` window start slots, as returned by the
+            prioritised sampler (its ``indices[:, 0]``).
+        values: ``(batch,)`` new priorities, strictly positive.
+
+    Returns:
+        A new ``Buffer``.  Duplicate indices resolve to one of the writes
+        (XLA scatter semantics); priorities are a heuristic, so this is
+        deliberately not disambiguated.
+    """
+    return buffer._replace(
+        priorities=buffer.priorities.at[start_indices].set(values)
+    )
+
+
+def create_prioritised_sequence_sample(
+    buffer_size: int,
+    sampling_size: int,
+    sequence_size: int,
+    keys: list[str],
+    alpha: float = 0.0,
+) -> Callable[[Buffer, jax.Array], Tuple[BufferSample, jax.Array, jax.Array]]:
+    """Build a sequence sampler that draws windows in proportion to priority.
+
+    ``P(i) proportional to priority_i ** alpha`` over valid window starts
+    (invalid ones get zero mass).  ``alpha = 0`` is exactly uniform, so this
+    sampler is a drop-in replacement that reproduces
+    :func:`create_sequence_sample`'s draws for the same key.
+
+    Args:
+        buffer_size: Total slots in the buffer.
+        sampling_size: Sequences per batch.
+        sequence_size: Length of each sampled window.
+        keys: Buffer keys to gather.
+        alpha: Prioritisation exponent (0 = uniform, 1 = proportional).
+
+    Returns:
+        ``sample(buffer, key) -> (BufferSample, sequence_indices, probs)`` where
+        ``probs`` are the draw probabilities of the selected windows — the
+        quantity the caller needs to form importance-sampling weights
+        ``w_i = (N * P_i) ** -beta`` correcting the bias this sampling adds.
+    """
+    base_indices = jnp.vstack((jnp.arange(sequence_size),) * sampling_size)
+
+    def sample(
+        buffer: Buffer, key: jax.Array
+    ) -> Tuple[BufferSample, jax.Array, jax.Array]:
+        valid = _valid_window_mask(buffer.sampling_ok, sequence_size).astype(
+            jnp.float32
+        )
+        if alpha == 0.0:
+            scores = valid
+        else:
+            scores = valid * jnp.power(buffer.priorities, alpha)
+        probs = scores / jnp.maximum(scores.sum(), 1e-12)
+        indices = jax.random.choice(key, buffer_size, (sampling_size, 1), p=probs)
+        sequence_indices = (indices + base_indices) % buffer_size
+
+        return (
+            BufferSample(
+                this_info=jax.tree.map(
+                    lambda arr: arr[sequence_indices],
+                    {k: buffer.info[k] for k in keys},
+                ),
+                next_info={},
+            ),
+            sequence_indices,
+            probs[indices[:, 0]],
         )
 
     return sample
@@ -229,6 +345,9 @@ def create_buffer(
         sampling_ok=jnp.zeros((size,), dtype=jnp.bool),
         pos=0,
         size=size,
+        # Max priority for unvisited slots, so every window is tried at least
+        # once before its priority is measured (standard PER optimism).
+        priorities=jnp.ones((size,)),
     )
 
     def add(buffer: Buffer, infos: dict[str, jax.Array], terminated: bool) -> Buffer:
@@ -280,6 +399,13 @@ def create_buffer(
             sampling_ok=sampling_ok,
             pos=buffer.pos + 1,
             size=buffer.size,
+            # A freshly written slot has never been evaluated: give it max
+            # priority so it is not starved before it is measured once.
+            priorities=(
+                None
+                if buffer.priorities is None
+                else buffer.priorities.at[pos].set(1.0)
+            ),
         )
 
     sample = create_sample(size, sampling_size, this_step_infos, next_step_infos)
