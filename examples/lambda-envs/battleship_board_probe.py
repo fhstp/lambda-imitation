@@ -152,6 +152,48 @@ g.add_argument("--stop-actor-fe", dest="stop_actor_fe", action="store_true",
                     "(SAC-AE recipe); removes actor-vs-critic gradient conflict "
                     "on the shared recurrent memory")
 parser.set_defaults(stop_actor_fe=False)
+g.add_argument("--stop-critic-fe", dest="stop_critic_fe", action="store_true",
+               help="stop-gradient the FE latents feeding the SAC twin-Q "
+                    "critic: its Bellman regression no longer backprops into "
+                    "the shared memory.  The λ-critics and the λ-discrepancy "
+                    "keep training the FE, so this isolates SAC "
+                    "value-magnitude inflation as a memory-wrecking path.")
+parser.set_defaults(stop_critic_fe=False)
+g.add_argument("--ld-center", dest="ld_center", action="store_true",
+               help="minimise var(Q1-Q2) instead of mean((Q1-Q2)^2): subtract "
+                    "the batch mean from the λ-discrepancy first.  The "
+                    "uncentred term is dominated by a constant offset between "
+                    "the λ-critics (state-independent, so it teaches the memory "
+                    "nothing) that grows with their value drift.")
+parser.set_defaults(ld_center=False)
+g.add_argument("--retrace", dest="retrace", action="store_true",
+               help="regress the λ-critics onto Retrace(λ) targets instead of "
+                    "V-trace ones.  V-trace scales the current step's delta by "
+                    "ρ, so with a near-deterministic actor (ρ=0 on ~97%% of "
+                    "transitions here) the target loses the reward entirely and "
+                    "the value level drifts; Retrace keeps the 1-step term at "
+                    "coefficient 1 and only cuts multi-step propagation.")
+parser.set_defaults(retrace=False)
+g.add_argument("--per-alpha", type=float, default=0.0,
+               help="prioritised sequence replay: draw windows with "
+                    "probability ∝ priority^alpha, where priority is the "
+                    "window's trace mass (geometric mean of its clipped "
+                    "importance ratios).  0 = uniform (default).  Targets the "
+                    "λ-discrepancy: with ρ=0 on most transitions every trace "
+                    "is cut and λ1/λ2 collapse to the same target, so only the "
+                    "windows where the policies agree carry any signal.")
+g.add_argument("--per-beta", type=float, default=0.4,
+               help="importance-sampling exponent correcting the prioritised "
+                    "draw (weights normalised by their batch max; default 0.4)")
+g.add_argument("--per-window", type=int, default=0,
+               help="window PREFIX length the priority is computed over "
+                    "(0 = the whole --lambda-truncation span).  Measured: over "
+                    "50 steps the grounded fraction concentrates and the score "
+                    "is flat across windows (ESS 1.00).  The trace is "
+                    "multiplicative, so survival of the FIRST few steps is what "
+                    "varies — 4 to 8 is the useful range.")
+g.add_argument("--per-ratio-floor", type=float, default=1e-3,
+               help="lower clip on each ratio in the priority (default 1e-3)")
 g.add_argument("--batch-size", type=int, default=128)
 g.add_argument("--sequence-length", type=int, default=50)
 g.add_argument("--burn-in-length", type=int, default=10)
@@ -199,6 +241,12 @@ g.add_argument("--output-dir", default="./battleship_probe_output")
 g.add_argument("--skip-train", action="store_true", help="load agent from output-dir")
 g.add_argument("--skip-collect", action="store_true", help="load dataset from output-dir")
 g.add_argument("--skip-probe", action="store_true", help="load probe from output-dir")
+g.add_argument("--setup-only", action="store_true",
+               help="build the env / agent / probe helpers, then exit before "
+                    "Phase 1.  Used by other experiment scripts that import "
+                    "this module for its setup and run their own phases (see "
+                    "battleship_offline_bayes.py); the exit is a SystemExit "
+                    "the importer catches.")
 g.add_argument("--train-only", action="store_true",
                help="exit right after Phase-1 training (skip collect/probe/vis); "
                     "for stabilization sweeps that only watch training metrics")
@@ -337,6 +385,11 @@ if args.wandb and not args.vis_only:
             "probe_eval_steps": args.probe_eval_steps,
             "probe_eval_collect_steps": args.probe_eval_collect_steps,
             "use_sac": args.use_sac,
+            "stop_critic_fe": args.stop_critic_fe,
+            "ld_center": args.ld_center,
+            "retrace": args.retrace,
+            "per_alpha": args.per_alpha,
+            "per_beta": args.per_beta,
             "num_seeds": args.num_seeds,
             "concurrent_seeds": args.concurrent_seeds,
             "final_return_window": args.final_return_window,
@@ -870,6 +923,19 @@ if not args.vis_only:
                  f"{args.rows}x{args.cols} board; pass shorter --ship-lengths.")
     N = args.rows * args.cols  # number of actions / board cells
 
+    # terminal_bonus is only in newer lambda-envs; omit it when unset so the
+    # script still runs against an older install (the default None means "env
+    # default rows*cols" anyway).
+    _env_kwargs = dict(rows=args.rows, cols=args.cols,
+                       dense_reward=args.dense_reward,
+                       ship_lengths=ship_lengths)
+    if args.terminal_bonus is not None:
+        import inspect as _inspect
+        if "terminal_bonus" not in _inspect.signature(Battleship.__init__).parameters:
+            sys.exit("--terminal-bonus needs a lambda-envs whose Battleship "
+                     "takes terminal_bonus; installed version does not.")
+        _env_kwargs["terminal_bonus"] = args.terminal_bonus
+
     if args.full_obs:
         # DIAGNOSTIC env: obs = [last_hit_miss(1) | legal_mask(N) | hits_misses(N)].
         # The trailing per-cell hits_misses (0/1/2 → scaled) makes the obs Markov
@@ -885,15 +951,9 @@ if not args.vis_only:
                 hm = state.hits_misses.reshape(-1).astype(float) / 2.0  # {0,.5,1}
                 return jnp.concatenate([base, hm], axis=-1)
 
-        env = _BattleshipFullObs(rows=args.rows, cols=args.cols,
-                                 dense_reward=args.dense_reward,
-                                 terminal_bonus=args.terminal_bonus,
-                                 ship_lengths=ship_lengths)
+        env = _BattleshipFullObs(**_env_kwargs)
     else:
-        env = Battleship(rows=args.rows, cols=args.cols,
-                         dense_reward=args.dense_reward,
-                         terminal_bonus=args.terminal_bonus,
-                         ship_lengths=ship_lengths)
+        env = Battleship(**_env_kwargs)
     env_params = env.default_params
     spec = env_spec_from_gymnax(env, env_params)
     ROWS, COLS = args.rows, args.cols  # board dims (used by the shared renderers)
@@ -1006,6 +1066,13 @@ if not args.vis_only:
         gvd_sf_lr=args.gvd_sf_lr,
         gvd_stop_fe=args.gvd_stop_fe,
         stop_actor_fe=args.stop_actor_fe,
+        stop_critic_fe=args.stop_critic_fe,
+        ld_center=args.ld_center,
+        retrace=args.retrace,
+        per_alpha=args.per_alpha,
+        per_beta=args.per_beta,
+        per_ratio_floor=args.per_ratio_floor,
+        per_window=args.per_window,
     )
 
     # Battleship episodes end after at most rows*cols shots (legal-action
@@ -1188,8 +1255,16 @@ if not args.vis_only:
     # --probe-eval-interval rounds *during* agent training, reusing the same
     # collection / training / scoring code as the final full-quality probe.
 
-    @partial(jax.jit, static_argnames=["n_steps"])
-    def collect_rollout(agent_state, key, n_steps):
+    @partial(jax.jit, static_argnames=["n_steps", "policy_fn"])
+    def collect_rollout(agent_state, key, n_steps, policy_fn=None):
+        """Roll out and record (carry, board, hits/misses) per step.
+
+        ``policy_fn`` (static) replaces the actor as the acting policy:
+        ``(obs, env_state, key) -> (action_index, prob)``, e.g. the scripted
+        Bayes player in battleship_offline_bayes.py.  The FE is still run every
+        step (that is where the probed carry comes from) and the *executed*
+        action is what feeds back as the next prev-action input.
+        """
         key, rk = jax.random.split(key)
         obs, env_st = env.reset(rk, env_params)
         carry = zero_carry()
@@ -1213,6 +1288,11 @@ if not args.vis_only:
             ).astype(jnp.int32)
             use_random = jax.random.uniform(eps_key) < args.collect_epsilon
             action = jnp.where(use_random, random_action, policy_action)
+            if policy_fn is not None:
+                # Scripted policy acts instead (no epsilon layered on top — the
+                # scripted policy owns its own exploration).
+                scripted, _prob = policy_fn(obs, env_st, eps_key)
+                action = jnp.asarray(scripted, dtype=jnp.int32)
             # The next prev-action input is the *executed* action's one-hot
             # (handles the epsilon override transparently — encode whatever
             # was executed, not what predict proposed).
@@ -1236,8 +1316,10 @@ if not args.vis_only:
         )
         return data
 
-    def _collect_and_parse(agent_state, seed_offset, n_steps):
-        data = collect_rollout(agent_state, jax.random.key(args.seed + seed_offset), n_steps)
+    def _collect_and_parse(agent_state, seed_offset, n_steps, policy_fn=None):
+        data = collect_rollout(
+            agent_state, jax.random.key(args.seed + seed_offset), n_steps,
+            policy_fn=policy_fn)
         c = np.array(data["carries"])
         b = np.array(data["board_masks"])
         hm = np.array(data["hits_misses"])
@@ -1955,6 +2037,14 @@ if not args.vis_only:
         if _wandb is not None:
             _wandb.finish()
         print("Done (multi-seed).")
+        sys.exit(0)
+
+    if args.setup_only:
+        # Importer (e.g. battleship_offline_bayes.py) drives its own phases
+        # from here: env / env_params / hp / state / fns / debug_fns and every
+        # collect / probe / figure helper above are now module globals.
+        print("[setup-only] env, agent and probe helpers ready; "
+              "handing control to the importer.")
         sys.exit(0)
 
     if not args.skip_train:
