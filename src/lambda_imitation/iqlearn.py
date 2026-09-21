@@ -57,6 +57,11 @@ from flax import nnx
 _nnx_data = getattr(nnx, "data", lambda x: x)
 
 from .buffer import Buffer, create_buffer, create_sequence_sample
+from .buffer import (  # noqa: E402  (kept separate for readability)
+    create_prioritised_sequence_sample,
+    trace_priority,
+    update_priorities,
+)
 
 # Bounds for the squashed log-standard-deviation of the policy distribution.
 # The raw output is tanh-squashed and then rescaled into this range to keep
@@ -328,6 +333,11 @@ class SACFunctions(NamedTuple):
             action values for continuous spaces.  Manual rollout loops that
             enable ``use_prev_action`` use this to thread the prev-action
             across steps; obs-only callers never need it.
+        update_only: ``(state, n_steps, key) -> (state, metrics)`` -- run
+            ``n_steps`` gradient updates off the buffer alone, with no
+            environment interaction and no new transitions.  The offline
+            counterpart of :attr:`train`; pair it with :attr:`prefill_buffer`'s
+            ``behaviour_fn`` to train purely on a scripted policy's data.
     """
 
     predict: Callable
@@ -336,6 +346,7 @@ class SACFunctions(NamedTuple):
     prefill_buffer: Callable
     train_unrolled: Callable
     encode_action: Callable
+    update_only: Callable
 
 
 class DebugFunctions(NamedTuple):
@@ -474,6 +485,56 @@ class Hyperparameters(NamedTuple):
     # never by the policy-improvement gradient. The actor is a head on detached
     # features. Removes actor↔critic gradient conflict on the shared encoder.
     stop_actor_fe: bool = False
+    # If True, stop-gradient the online FE latents feeding the **SAC twin-Q
+    # critic** loss.  Those value heads then learn on detached features and
+    # never backprop into the shared FE.  The λ-critics and their discrepancy
+    # (loss_ld) are deliberately left on the live latent — they are the terms
+    # meant to shape the recurrent memory — so this knob isolates the SAC
+    # Bellman regression as a source of value-magnitude inflation in the
+    # encoder.  (The dense-value-loss branch's knob of the same name also
+    # detaches the λ side; this one does not.)
+    stop_critic_fe: bool = False
+    # If True, subtract the batch mean from the λ-discrepancy before squaring,
+    # i.e. minimise var(Q1-Q2) instead of mean((Q1-Q2)^2).  The uncentred term
+    # is dominated by a *constant* offset between the two λ-critics whenever
+    # their value scales drift apart (measured: sqrt(ld_loss) == |E[Q1]-E[Q2]|
+    # to 2 decimals, so var ~ 0).  That offset is state-independent, carries no
+    # information about the hidden state, and simply grows with value drift —
+    # centring keeps only the state-dependent part.
+    ld_center: bool = False
+    # If True, the λ-critics regress onto Retrace(λ) targets instead of V-trace
+    # ones.  V-trace multiplies the current step's delta by ρ, so when the
+    # target policy disagrees with the behaviour policy (measured here: ρ = 0 on
+    # ~97 % of transitions) its target collapses to V(s) — reward-free, and the
+    # value level drifts (E[Q] −18 → −256 against true returns of ≈ +5).
+    # Retrace keeps the k = t term outside the trace product, so the 1-step TD
+    # error always lands and small ratios only cut multi-step propagation.
+    retrace: bool = False
+    # Prioritised sequence replay.  Windows are drawn with probability
+    # proportional to ``priority ** per_alpha``, where the priority is the
+    # window's trace mass (the geometric mean of its clipped importance
+    # ratios, see buffer.trace_priority).  The point is the λ-discrepancy:
+    # with ρ = 0 on most transitions every trace is cut, λ1 and λ2 collapse to
+    # the same 1-step target, and a uniformly drawn window carries no
+    # discrepancy signal at all — the windows where the policies happen to
+    # agree are the only informative ones.  ``per_alpha = 0`` (default) is
+    # exactly uniform sampling and stores no priorities, so pre-existing
+    # checkpoints keep loading.  ``per_beta`` is the importance-sampling
+    # exponent correcting the bias this introduces (weights normalised by
+    # their batch max); ``per_ratio_floor`` clips each ratio from below so a
+    # fully cut window keeps a small but non-zero priority.
+    per_alpha: float = 0.0
+    per_beta: float = 0.4
+    per_ratio_floor: float = 1e-3
+    # Length of the window PREFIX the priority is computed over.  0 uses the
+    # whole ``lambda_truncation`` span, which measured flat: over 50 steps the
+    # fraction of grounded steps concentrates, so the score is ~identical for
+    # every window (ESS 1.00, priority constant to 3 digits — no
+    # prioritisation at all).  The trace is multiplicative, so a single cut
+    # step near the window START kills the whole tail: whether the first few
+    # steps survive is what actually varies between windows.  4-8 is the
+    # useful range.
+    per_window: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +557,73 @@ def extract_buffer_shapes(buffer: Buffer) -> dict[str, tuple[int, ...]]:
         ``buffer.info[k].shape[1:]`` for every key ``k``).
     """
     return {k: v.shape[1:] for k, v in buffer.info.items()}
+
+
+def retrace_targets(
+    q_taken: jax.Array,
+    v: jax.Array,
+    rewards: jax.Array,
+    dones: jax.Array,
+    ratios: jax.Array,
+    gamma: float,
+    lam: float,
+    c_bar: float,
+) -> jax.Array:
+    """Retrace(λ) targets for a Q-critic over a time-major sequence.
+
+    ``target_t = Q̄(s_t,a_t) + Σ_{k≥t} γ^(k-t) (Π_{j=t+1..k} c_j) δ_k`` with
+    ``δ_k = r_k + γ(1-done_k) V̄(s_{k+1}) - Q̄(s_k,a_k)`` and
+    ``c_j = λ·min(c_bar, ρ_j)`` (Munos et al. 2016).
+
+    The difference from V-trace that matters here: the ``k = t`` term sits
+    *outside* the trace product, so its coefficient is 1 regardless of the
+    ratios.  V-trace instead multiplies the current delta by ``ρ_t``, so when
+    the target policy disagrees with the behaviour policy (ρ → 0) its target
+    collapses to ``V(s_t)`` and carries no reward at all — which is how the
+    λ-critics' value level drifts free.  Under Retrace small ratios only cut
+    the tail: the estimator degrades to 1-step TD, which is safe but slow.
+
+    Implemented as a reverse ``jax.lax.scan`` carrying ``(acc_{t+1}, c_{t+1})``:
+
+        acc_t = δ_t + (1 - done_t) · γ · c_{t+1} · acc_{t+1}
+
+    with a zero terminal carry, so the trace is truncated at the unroll tail
+    (the caller drops the last ``lambda_truncation`` steps) and at every
+    episode boundary.
+
+    Args:
+        q_taken: ``(T', B)`` TARGET-critic Q for the action actually taken.
+        v: ``(T', B)`` TARGET-critic state values ``V̄(s_t) = E_π[Q̄(s_t,·)]``;
+            shifted internally to give the bootstrap ``V̄(s_{t+1})``.
+        rewards: ``(T', B)`` rewards.
+        dones: ``(T', B)`` termination flags (float 0/1).
+        ratios: ``(T', B)`` importance ratios ``π(a|s) / b(a|s)``.
+        gamma: Discount factor.
+        lam: λ for this head — the only place λ enters, controlling how far
+            credit propagates.
+        c_bar: Trace truncation cap (``min(c_bar, ρ)``).
+
+    Returns:
+        ``(T', B)`` Retrace targets, to be regressed against the ONLINE critic's
+        Q for the taken action.
+    """
+    v_next = jnp.concatenate([v[1:], jnp.zeros_like(v[:1])], axis=0)
+    deltas = rewards + (1.0 - dones) * gamma * v_next - q_taken
+
+    def scan_fn(carry, x):
+        acc_next, c_next = carry
+        delta, done, ratio = x
+        acc = delta + (1.0 - done) * gamma * c_next * acc_next
+        return (acc, lam * jnp.minimum(c_bar, ratio)), acc
+
+    _carry, accs = jax.lax.scan(
+        scan_fn,
+        (jnp.zeros_like(deltas[0]), jnp.zeros_like(deltas[0])),
+        (deltas, dones, ratios),
+        reverse=True,
+        unroll=8,
+    )
+    return q_taken + accs
 
 
 def sf_vtrace_targets(
@@ -819,17 +947,31 @@ def create_iqlearn(
         online_mc_this_keys.append(carry_key)
         if use_prev_action:
             online_mc_this_keys.append(prev_action_key)
-    online_buffer_lambda_sample = create_sequence_sample(
+    if params.per_alpha > 0 and params.fake_onpolicy_loss:
+        raise ValueError(
+            "per_alpha > 0 with fake_onpolicy_loss=True: the ratios are pinned "
+            "to 1, so every window priority is identical and prioritisation "
+            "silently degenerates to uniform sampling.  Set "
+            "fake_onpolicy_loss=False to prioritise by real trace mass."
+        )
+
+    online_buffer_lambda_sample = create_prioritised_sequence_sample(
         online_buffer.size,
         params.online_batch_size,
         params.burn_in_length + params.sequence_length + params.lambda_truncation,
         online_mc_this_keys,
+        alpha=params.per_alpha,
     )
     # Pre-initialise every behaviour_key slot to 1.0 so that slots which
     # have never been written by run_env_step (pre-fill and as-yet-unwritten
     # slots) contribute an IS denominator of 1.0 rather than 0.0.
     # Division by zero would otherwise produce NaN in the V-trace loss.
     # Real transitions overwrite their slot with the true policy probability.
+    # Priorities are an extra pytree leaf, so only carry them when they are
+    # actually used — otherwise agents checkpointed without them fail to load.
+    online_buffer = online_buffer._replace(
+        priorities=(jnp.ones((online_buffer.size,)) if params.per_alpha > 0 else None)
+    )
     online_buffer = online_buffer._replace(
         info={
             **online_buffer.info,
@@ -1706,6 +1848,7 @@ def create_iqlearn(
         alpha: jax.Array,
         key: jax.Array,
         next_mask: jax.Array | None = None,
+        weights: jax.Array | None = None,
     ) -> Tuple[jax.Array, dict]:
         """SAC Bellman MSE loss for the twin-critic (continuous and discrete).
 
@@ -1753,7 +1896,10 @@ def create_iqlearn(
         )
 
         q1, q2 = get_q_both(critic, critic_graph, latents, actions)
-        loss = 0.5 * (jnp.mean((q1 - target_q) ** 2) + jnp.mean((q2 - target_q) ** 2))
+        w = 1.0 if weights is None else weights
+        loss = 0.5 * (
+            jnp.mean(w * (q1 - target_q) ** 2) + jnp.mean(w * (q2 - target_q) ** 2)
+        )
         return loss, {"critic_loss": loss, "target_q": target_q.mean()}
 
     def loss_ld(
@@ -1781,7 +1927,10 @@ def create_iqlearn(
             actions: Action taken at each state.
 
         Returns:
-            ``(scalar_loss, {"ld_loss": loss})``.
+            ``(scalar_loss, {"ld_loss", "ld_mean", "ld_std"})`` — the loss is
+            ``var(Q1-Q2)`` when ``params.ld_center`` else ``mean((Q1-Q2)^2)``,
+            and the two metrics split it into the constant offset between the
+            λ-critics and the state-dependent disagreement.
         """
 
         # Freeze the λ-critic head params for this term so the discrepancy
@@ -1793,8 +1942,15 @@ def create_iqlearn(
         # effect.  The λ-critics still train via their V-trace losses.
         q1 = get_q(jax.lax.stop_gradient(lambda1_critic), lambda1_graph, latents, actions)
         q2 = get_q(jax.lax.stop_gradient(lambda2_critic), lambda2_graph, latents, actions)
-        loss = ((q1-q2)**2).mean()
-        return loss, {"ld_loss": loss}
+        d = q1 - q2
+        d_mean = d.mean()
+        # The two components of mean(d^2) = mean(d)^2 + var(d): the bias between
+        # the λ-critics, and the state-dependent disagreement.  Logged either
+        # way so the split stays visible in training metrics.
+        centered = d - d_mean
+        d_var = (centered**2).mean()
+        loss = d_var if params.ld_center else (d**2).mean()
+        return loss, {"ld_loss": loss, "ld_mean": d_mean, "ld_std": jnp.sqrt(d_var)}
 
     # ------------------------------------------------------------------
     # Online helpers: environment interaction and SAC update
@@ -2020,6 +2176,8 @@ def create_iqlearn(
         target_latents: jax.Array,
         key: jax.Array,
         masks: jax.Array | None = None,
+        ratios_in: jax.Array | None = None,
+        weights: jax.Array | None = None,
     ):
         """V-trace λ-return Huber loss for one λ-critic over a time-major sequence.
 
@@ -2091,7 +2249,11 @@ def create_iqlearn(
             mask=mask_flat,
         ).reshape(Tp, B)
         q = get_q(q_state, q_graph, _tb(latents), _tb(actions)).reshape(Tp, B)
-        if params.fake_onpolicy_loss:
+        if ratios_in is not None:
+            # Computed once by the caller: the ratios are λ-independent, and
+            # the prioritised sampler needs them for the window priority.
+            ratios = ratios_in
+        elif params.fake_onpolicy_loss:
             ratios = jnp.ones_like(behaviour_probs)
         else:
             ratios = get_importance_ratios(
@@ -2101,6 +2263,17 @@ def create_iqlearn(
                 _tb(behaviour_probs),
                 mask_flat,
             ).reshape(Tp, B)
+
+        if params.retrace:
+            # Retrace(λ): regress the taken action's Q onto its own target
+            # value plus the traced correction, so the reward survives ρ → 0.
+            q_target_taken = get_q(
+                q_target_state, q_graph, _tb(target_latents), _tb(actions)
+            ).reshape(Tp, B)
+            targets = retrace_targets(
+                q_target_taken, v, rewards, dones, ratios,
+                params.gamma, lam, params.c_bar,
+            )
 
         # Backward V-trace recursion — inherently sequential (recursive in
         # time) but elementwise-cheap; stays a scan.
@@ -2113,22 +2286,41 @@ def create_iqlearn(
             v_s = V_s + rho * delta_V + (1 - done) * params.gamma * c * (v_sp1 - V_sp1)
             return (v_s, V_s), v_s
 
-        _carry, targets = jax.lax.scan(
-            scan_target,
-            (jnp.zeros_like(v[0]), jnp.zeros_like(v[0])),
-            (v, dones, rewards, ratios),
-            reverse=True,
-            unroll=8,  # fuse across timesteps -> fewer tiny per-step kernels
-        )
+        if not params.retrace:
+            _carry, targets = jax.lax.scan(
+                scan_target,
+                (jnp.zeros_like(v[0]), jnp.zeros_like(v[0])),
+                (v, dones, rewards, ratios),
+                reverse=True,
+                unroll=8,  # fuse across timesteps -> fewer tiny per-step kernels
+            )
 
-        loss = optax.losses.huber_loss(
-            q[: -params.lambda_truncation],
-            jax.lax.stop_gradient(targets)[: -params.lambda_truncation],
-        ).mean()
+        # Regress BOTH twin branches against the shared target, exactly as
+        # loss_critic does for the SAC critic.  Fitting get_q = min(q1, q2)
+        # instead gives gradient only to whichever branch is currently lower,
+        # so the pair drifts apart (measured: gap 0.285 -> 2.432 over 150
+        # updates) and every bootstrap through V̄ = Σ_a π(a)·min(q1,q2) then
+        # inherits a pessimism bias that compounds over the effective horizon.
+        # min() belongs in the target, not in what is being trained.
+        _q1, _q2 = jax.tree.map(
+            lambda a: a.reshape(Tp, B),
+            get_q_both(q_state, q_graph, _tb(latents), _tb(actions)),
+        )
+        _tgt = jax.lax.stop_gradient(targets)[: -params.lambda_truncation]
+        _w = 1.0 if weights is None else weights[: -params.lambda_truncation]
+        loss = 0.5 * (
+            (_w * optax.losses.huber_loss(
+                _q1[: -params.lambda_truncation], _tgt)).mean()
+            + (_w * optax.losses.huber_loss(
+                _q2[: -params.lambda_truncation], _tgt)).mean()
+        )
         metrics = {
             "loss": loss,
             f"lambda{lam}_critic:": q[: -params.lambda_truncation].mean(),
             f"lambda{lam}_target:": targets[: -params.lambda_truncation].mean(),
+            # Spread between the twin branches.  Both are fit to the same
+            # target, so a growing gap means only one of them is being trained.
+            f"lambda{lam}_twin_gap:": jnp.abs(_q1 - _q2).mean(),
         }
 
         return loss, metrics
@@ -2359,7 +2551,16 @@ def create_iqlearn(
         key_sample, key_actor, key_critic, key_lambda_critic1, key_lambda_critic2 = (
             jax.random.split(key, 5)
         )
-        sample, indices = online_buffer_lambda_sample(buffer, key_sample)
+        sample, indices, draw_probs = online_buffer_lambda_sample(buffer, key_sample)
+        # Importance-sampling weights correcting the prioritised draw, in the
+        # usual PER form w_i = (N·P_i)^-beta normalised by the batch max — the
+        # normalisation makes N drop out.  With per_alpha = 0 every P_i is
+        # equal, so every weight is exactly 1 and nothing changes.
+        if params.per_alpha > 0 and params.per_beta > 0:
+            _raw = jnp.power(draw_probs, -params.per_beta)
+            is_weights = _raw / jnp.maximum(_raw.max(), 1e-12)
+        else:
+            is_weights = jnp.ones_like(draw_probs)
         if burn_in_from_stored_carry:
             # R2D2 "stored state": start the burn-in from the carry the
             # online policy actually consumed at the window's first step.
@@ -2422,6 +2623,28 @@ def create_iqlearn(
         # This removes the actor's E_π[Q]-maximising pressure on the shared
         # recurrent memory (a suspected driver of value-magnitude inflation)
         # while preserving GVD's influence on the representation.
+        # Ratios are λ-independent, so compute them once here: both λ-critics
+        # take them as an input, and the window priority is derived from them.
+        shared_ratios = None
+        if approximate_lambda:
+            _mask_flat = (
+                _flat(masks_tm) if masks_tm is not None else None
+            )
+            if params.fake_onpolicy_loss:
+                shared_ratios = jnp.ones_like(behaviour_tm)
+            else:
+                shared_ratios = get_importance_ratios(
+                    actor_target_state,
+                    _flat(target_latent),
+                    _flat(actions_tm),
+                    behaviour_tm.reshape(-1),
+                    _mask_flat,
+                ).reshape(behaviour_tm.shape)
+
+        # Per-sequence IS weight broadcast over the window's time axis, so the
+        # same weight scales every transition drawn in that sequence.
+        w_tb = jnp.broadcast_to(is_weights[None, :], behaviour_tm.shape)
+
         actor_latent = (jax.lax.stop_gradient(latent)
                         if params.stop_actor_fe else latent)
         l_actor, metrics = loss_actor(
@@ -2433,13 +2656,22 @@ def create_iqlearn(
             mask=_flat(masks_tm) if masks_tm is not None else None,
         )
 
+        # --stop-critic-fe: detach the online FE latents feeding the SAC twin-Q
+        # critic (mirror of stop_actor_fe / gvd_stop_fe).  The critic still
+        # learns; its Bellman regression no longer backprops into the shared FE.
+        # The λ-critics and loss_ld below keep `latent` untouched, so the
+        # λ-discrepancy goes on shaping the memory.  target_latent is the target
+        # FE and is unaffected either way.
+        sac_critic_latent = (jax.lax.stop_gradient(latent)
+                             if params.stop_critic_fe else latent)
+
         # Critic: pair (latent[t], target_latent[t+1]) so V(s') is computed at
         # the next state. Action / reward / terminated at index t.
         l_critic, metrics_critic = loss_critic(
             actor_target_state,
             critic_state,
             critic_target_state,
-            _flat(latent[:-1]),
+            _flat(sac_critic_latent[:-1]),
             _flat(target_latent[1:]),
             _flat(actions_tm[:-1]),
             rewards_tm[:-1].reshape(-1),
@@ -2447,6 +2679,7 @@ def create_iqlearn(
             alpha,
             key_critic,
             next_mask=_flat(masks_tm[1:]) if masks_tm is not None else None,
+            weights=_flat(w_tb[:-1]),
         )
         metrics.update(metrics_critic)
 
@@ -2466,6 +2699,8 @@ def create_iqlearn(
                 target_latent,
                 key_lambda_critic1,
                 masks=masks_tm,
+                ratios_in=shared_ratios,
+                weights=w_tb,
             )
             metrics.update(metrics_lambda1_critic)
             l_lambda2, metrics_lambda2_critic = loss_vtrace_lambda_sequence(
@@ -2482,6 +2717,8 @@ def create_iqlearn(
                 target_latent,
                 key_lambda_critic2,
                 masks=masks_tm,
+                ratios_in=shared_ratios,
+                weights=w_tb,
             )
             metrics.update(metrics_lambda2_critic)
 
@@ -2567,7 +2804,28 @@ def create_iqlearn(
             metrics.update(m_gvd)
             loss += l_sf1 + l_sf2 + params.gvd_coef * l_gvd
 
-        return loss, metrics
+        # Prioritised replay payload: the window start slots drawn this step
+        # and their new priorities (trace mass of the first lambda_truncation
+        # steps — the span whose product V-trace/Retrace actually apply).
+        if params.per_alpha > 0 and shared_ratios is not None:
+            _span = params.per_window or params.lambda_truncation
+            window = shared_ratios[:_span].T   # (B, span)
+            new_priorities = trace_priority(window, floor=params.per_ratio_floor)
+            metrics.update({
+                "per_priority": new_priorities.mean(),
+                # Spread of the computed priorities: if this is ~0 the windows
+                # are indistinguishable and prioritisation cannot help,
+                # whatever alpha is set to.
+                "per_priority_std": new_priorities.std(),
+                # Effective sample size of the batch weights, as a fraction of
+                # the batch: 1.0 = uniform, →0 = the batch is one window.
+                "per_ess": (is_weights.sum() ** 2)
+                / (jnp.maximum((is_weights ** 2).sum(), 1e-12) * is_weights.size),
+            })
+            per_payload = (indices[:, 0], new_priorities)
+        else:
+            per_payload = None
+        return loss, (metrics, per_payload)
 
     def update_step(sac: SACState, key: jax.Array) -> Tuple[SACState, dict]:
         """Execute one joint gradient step against :func:`loss_combined`.
@@ -2603,7 +2861,7 @@ def create_iqlearn(
             grads_lambda2_critic,
             grads_gvd_sf1,
             grads_gvd_sf2,
-        ), metrics = jax.grad(
+        ), (metrics, per_payload) = jax.grad(
             loss_combined, argnums=[0, 1, 2, 3, 4, 5, 6], has_aux=True
         )(
             sac.feature_extractor,
@@ -2745,7 +3003,11 @@ def create_iqlearn(
                 new_alpha_opt,  # type: ignore
                 new_alpha,
                 new_log_alpha,  # type: ignore
-                sac.online_buffer,
+                (
+                    sac.online_buffer
+                    if per_payload is None
+                    else update_priorities(sac.online_buffer, *per_payload)
+                ),
                 sac.update_step + 1,
                 gvd_sf1=new_gvd_sf1 if use_gvd else sac.gvd_sf1,
                 gvd_sf2=new_gvd_sf2 if use_gvd else sac.gvd_sf2,
@@ -2880,15 +3142,23 @@ def create_iqlearn(
         )
         return sac, env_state, metrics
 
-    @partial(jax.jit, static_argnames=["env", "n_steps"])
-    def _prefill_jit(sac, env, env_params, env_state, n_steps, key):
+    @partial(jax.jit, static_argnames=["env", "n_steps", "behaviour_fn"])
+    def _prefill_jit(sac, env, env_params, env_state, n_steps, key, behaviour_fn=None):
         print("compiling prefill...")
 
         def scan_body(carry, step_idx):
             sac, env_state, key = carry
             key, key_act, key_step = jax.random.split(key, 3)
             obs = env.get_obs(env_state, env_params)
-            if is_discrete:
+            if behaviour_fn is not None:
+                # Scripted behaviour policy (discrete only): it picks the action
+                # and reports its own b(a|s), which is what the V-trace ratios
+                # divide by.
+                action_idx, prob = behaviour_fn(obs, env_state, key_act)
+                action = jnp.asarray(action_idx, dtype=jnp.float32)
+                prob = jnp.asarray(prob, dtype=jnp.float32)
+                env_action = action.astype(jnp.int32)
+            elif is_discrete:
                 if mask_fn is not None:
                     # Uniform over *legal* actions only, so the behaviour policy
                     # (and its stored probability) is consistent with the masked
@@ -2949,6 +3219,7 @@ def create_iqlearn(
         env_state,
         n_steps: int,
         key: jax.Array,
+        behaviour_fn: Callable | None = None,
     ):
         """Pre-fill the online buffer with real environment interactions.
 
@@ -2972,13 +3243,61 @@ def create_iqlearn(
             n_steps: Number of transitions to collect.
             key: JAX PRNG key; split internally for each action sample and
                 environment step.
+            behaviour_fn: Optional scripted behaviour policy replacing the
+                uniform-random default (**discrete action spaces only**).
+                Signature ``(obs, env_state, key) -> (action_index, prob)``
+                where ``prob`` is that policy's ``b(a|s)`` for the action it
+                just picked — it is stored under ``behaviour_key`` and divides
+                the V-trace importance ratios, so a deterministic policy should
+                report ``1.0`` and an eps-greedy one its mixture probability.
+                Traced inside the jitted scan and treated as static, so pass
+                the same callable object across calls to avoid recompiles.
 
         Returns:
             ``(new_sac, new_env_state)`` where ``new_sac`` has an updated
             ``online_buffer`` and ``new_env_state`` is the post-step gymnax
             state.
         """
-        return _prefill_jit(sac, env, env_params, env_state, n_steps, key)
+        if behaviour_fn is not None and not is_discrete:
+            raise ValueError(
+                "behaviour_fn is only supported for discrete action spaces"
+            )
+        return _prefill_jit(
+            sac, env, env_params, env_state, n_steps, key, behaviour_fn
+        )
+
+    @partial(jax.jit, static_argnames=["n_steps"])
+    def _update_only_jit(sac: SACState, n_steps: int, key: jax.Array):
+        print("compiling update_only...")
+
+        def scan_fun(carry, _):
+            sac, key = carry
+            key, update_key = jax.random.split(key)
+            sac, metrics = update_step(sac, update_key)
+            return (sac, key), metrics
+
+        (sac, _), metrics = jax.lax.scan(scan_fun, (sac, key), length=n_steps)
+        return sac, jax.tree.map(lambda x: x.mean(), metrics)
+
+    def update_only(sac: SACState, n_steps: int, key: jax.Array):
+        """Run ``n_steps`` gradient updates off the buffer — no environment.
+
+        The offline counterpart of :func:`train`: same :func:`update_step`,
+        same metrics, but nothing is collected and no environment is touched,
+        so the buffer must already hold the data to learn from (fill it with
+        :func:`prefill_buffer`, optionally with a scripted ``behaviour_fn``).
+
+        Args:
+            sac: Current agent state.
+            n_steps: Number of gradient updates (static — changing it
+                recompiles).
+            key: JAX PRNG key; split internally per update.
+
+        Returns:
+            ``(new_sac, metrics)`` with each metric scalar averaged over the
+            ``n_steps`` updates.
+        """
+        return _update_only_jit(sac, n_steps, key)
 
     fns = SACFunctions(
         predict,
@@ -2987,6 +3306,7 @@ def create_iqlearn(
         prefill_buffer,
         _train_unrolled,
         encode_action,
+        update_only,
     )
     if debug:
         return (
