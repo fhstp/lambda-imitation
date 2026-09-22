@@ -297,6 +297,20 @@ g.add_argument("--wandb-project", default="offline-lambda-battleship-results", m
                help="W&B project name (default: offline-lambda-battleship-probe)")
 g.add_argument("--wandb-run-name", default=None, metavar="NAME", help="W&B run name (default: auto)")
 
+# W&B's backend rejects sweep parameter names containing hyphens ("sweep
+# config: ignoring unknown parameter 'batch-size'") and silently drops them, so
+# a sweep can only name parameters with underscores -- which ${args} then emits
+# as --batch_size=... .  Accept that spelling by rewriting it to the canonical
+# hyphenated flag, so sweeps and humans can both be right.
+_known_opts = {opt for action in parser._actions for opt in action.option_strings}
+sys.argv[1:] = [
+    (lambda head, sep, tail: (head.replace("_", "-") + sep + tail
+                              if head.startswith("--")
+                              and head.replace("_", "-") in _known_opts
+                              else tok))(*tok.partition("="))
+    for tok in sys.argv[1:]
+]
+
 args, _unknown = parser.parse_known_args()
 
 # Unknown arguments are rejected rather than ignored.  parse_known_args is

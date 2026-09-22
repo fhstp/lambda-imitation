@@ -66,9 +66,30 @@ parser.add_argument("--probe-policies", default="actor,bayes",
                     help="which rollout policies to probe, comma-separated "
                          "(default 'actor,bayes' — the learned actor and the "
                          "Bayes player whose data it trained on)")
+parser.add_argument("--save-fe-every-eval", action="store_true",
+                    help="save the feature extractor (the memory) at every "
+                         "probe-eval as fe_<updates>.pkl, so the best-scoring "
+                         "memory can be transplanted into a later run via "
+                         "--init-fe")
+parser.add_argument("--init-fe", default=None, metavar="PATH",
+                    help="initialise the feature extractor (and its EMA target) "
+                         "from a saved fe_*.pkl instead of from scratch.  Pair "
+                         "with --fe-lr 0 to freeze that memory and train only "
+                         "the heads on top of it.")
 parser.add_argument("--policy-check-episodes", type=int, default=200,
                     help="episodes used for the startup sanity check of the "
                          "Bayes policy (0 disables; default 200)")
+# Same underscore tolerance as the probe module (W&B sweeps cannot name
+# parameters with hyphens), applied to this script's own flags.
+_own_opts = {opt for action in parser._actions for opt in action.option_strings}
+sys.argv[1:] = [
+    (lambda head, sep, tail: (head.replace("_", "-") + sep + tail
+                              if head.startswith("--")
+                              and head.replace("_", "-") in _own_opts
+                              else tok))(*tok.partition("="))
+    for tok in sys.argv[1:]
+]
+
 args, _ = parser.parse_known_args()
 
 # The probe module parses this same argv and rejects anything it does not know,
@@ -105,6 +126,22 @@ from tqdm import tqdm           # noqa: E402
 
 env, env_params = probe.env, probe.env_params
 fns, state = probe.fns, probe.state
+
+if args.init_fe:
+    # Transplant a previously trained memory.  Only the FE and its EMA target
+    # are replaced; the actor and critics start fresh, so what is being tested
+    # is what the memory alone supports.
+    with open(args.init_fe, "rb") as f:
+        _fe = pickle.load(f)
+    _fe_tree = jax.tree.structure(state.feature_extractor)
+    state = state._replace(
+        feature_extractor=jax.tree.unflatten(
+            _fe_tree, [jnp.asarray(x) for x in _fe["fe"]]),
+        feature_extractor_target=jax.tree.unflatten(
+            _fe_tree, [jnp.asarray(x) for x in _fe["fe_target"]]),
+    )
+    print(f"initialised FE from {args.init_fe} "
+          f"(saved at {_fe.get('updates', '?')} updates)")
 N, ROWS, COLS = probe.N, probe.args.rows, probe.args.cols
 SHIP_LENGTHS = tuple(int(x) for x in probe.args.ship_lengths.split(",") if x.strip())
 _MAX_STEPS = probe._MAX_STEPS
@@ -252,6 +289,18 @@ state, env_state = fns.prefill_buffer(
 n_sampleable = int(state.online_buffer.sampling_ok.sum())
 print(f"  {n_sampleable} sampleable transitions in the buffer.")
 
+def save_fe(agent_state, updates):
+    path = os.path.join(OUT, f"fe_{updates}.pkl")
+    with open(path, "wb") as f:
+        pickle.dump({
+            "fe": [np.asarray(x) for x in jax.tree.leaves(agent_state.feature_extractor)],
+            "fe_target": [np.asarray(x)
+                          for x in jax.tree.leaves(agent_state.feature_extractor_target)],
+            "updates": updates,
+        }, f)
+    return path
+
+
 def run_probe_eval(agent_state, rnd):
     """Lightweight probe on the current memory, along both rollout policies.
 
@@ -259,6 +308,8 @@ def run_probe_eval(agent_state, rnd):
     floor every later point is read against.
     """
     step = rnd * args.update_chunk
+    if args.save_fe_every_eval:
+        tqdm.write(f"  [fe] saved {save_fe(agent_state, step)}")
     for name, pol in (("actor", None), ("bayes", bayes_policy)):
         c, b, hm, _eb = probe._collect_and_parse(
             agent_state, 5000 + rnd, probe.args.probe_eval_collect_steps, policy_fn=pol)
