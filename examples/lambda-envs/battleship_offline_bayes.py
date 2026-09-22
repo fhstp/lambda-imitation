@@ -264,13 +264,17 @@ def run_probe_eval(agent_state, rnd):
             jax.random.key(probe.args.seed + 50_000 + rnd),
             probe.args.probe_eval_steps,
         )
-        m = probe._probe_metrics(params, tc, tb, thm)
+        m = probe._probe_metrics(params, tc, tb, thm, _teb)
         eval_history.append({"updates": step, "rollouts": name, **m})
+        # AUROC saturates long before the memory stops improving; errors/state,
+        # exact-match and the retention horizon stay discriminative up there.
         tqdm.write(f"  [probe-eval/{name} @ {step}] fired AUROC={m['fired_auroc']:.3f}  "
-                   f"unfired AUROC={m['unfired_auroc']:.3f}  "
                    f"fired bal={m['fired_balanced']:.1%}  "
-                   f"unfired bal={m['unfired_balanced']:.1%}  "
-                   f"overall={m['overall_acc']:.1%}")
+                   f"errors/state={m['errors_per_state']:.3f}  "
+                   f"exact={m['exact_match']:.1%}  "
+                   f"bits={m['bits_per_cell']:.4f}  "
+                   f"horizon={m.get('horizon_steps', float('nan')):.0f}  "
+                   f"unfired bal={m['unfired_balanced']:.1%}")
         if probe._wandb is not None:
             probe._wandb.log({"offline_updates": step,
                               **{f"probe_eval_{name}/{k}": v for k, v in m.items()}})
@@ -381,7 +385,7 @@ for name in wanted:
     with open(os.path.join(vdir, "probe.pkl"), "wb") as f:
         pickle.dump(jax.tree.map(np.asarray, params), f)
 
-    m = probe._probe_metrics(params, tc, tb, thm)
+    m = probe._probe_metrics(params, tc, tb, thm, teb)
     results[name] = m
     vtag = f"{tag} [{name} rollouts]"
     n_vis = min(probe.args.vis_episodes, len(teb) - 1)
@@ -401,12 +405,13 @@ for name in wanted:
 
 print(f"\n{tag}: {rounds * args.update_chunk} offline updates on {FILL} "
       f"Bayes transitions, 0 env steps during training.")
-print(f"{'rollouts':<10}{'fired AUROC':>13}{'unfired AUROC':>15}"
-      f"{'fired bal':>11}{'unfired bal':>13}{'overall':>9}")
+print(f"{'rollouts':<10}{'fired AUROC':>13}{'fired bal':>11}{'errors/state':>14}"
+      f"{'exact':>9}{'bits/cell':>11}{'horizon':>9}{'unfired bal':>13}")
 for name, m in results.items():
-    print(f"{name:<10}{m['fired_auroc']:>13.3f}{m['unfired_auroc']:>15.3f}"
-          f"{m['fired_balanced']:>11.1%}{m['unfired_balanced']:>13.1%}"
-          f"{m['overall_acc']:>9.1%}")
+    print(f"{name:<10}{m['fired_auroc']:>13.3f}{m['fired_balanced']:>11.1%}"
+          f"{m['errors_per_state']:>14.3f}{m['exact_match']:>9.1%}"
+          f"{m['bits_per_cell']:>11.4f}{m.get('horizon_steps', float('nan')):>9.0f}"
+          f"{m['unfired_balanced']:>13.1%}")
 print("(AUROC 0.5 = nothing decodable; 'fired' = retention of what was "
       "observed, 'unfired' = inference of the hidden board.)")
 print(f"Artefacts → {OUT}/<rollout-policy>/")

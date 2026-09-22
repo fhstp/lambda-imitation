@@ -1475,7 +1475,31 @@ if not args.vis_only:
             _step(remainder)
         return params
 
-    def _probe_metrics_from_probs(probs_all, t_boards, t_hm):
+    _AGE_BUCKETS = [(0, 2), (3, 5), (6, 10), (11, 20), (21, 35), (36, 10 ** 6)]
+
+    def _cell_ages(hm, ep_bounds):
+        """Steps since each fired cell was fired (-1 for unfired cells).
+
+        A cell's outcome enters the memory once, when it is fired; how long ago
+        that was is what separates retained memory from a short echo.  An
+        untrained GRU decodes age 0-2 cells near-perfectly and collapses to
+        chance by age ~10, so an aggregate over all fired cells is dominated by
+        recency rather than by memory.
+        """
+        hm = np.asarray(hm)
+        ages = -np.ones_like(hm, dtype=np.float32)
+        for s0, s1 in zip(ep_bounds[:-1], ep_bounds[1:]):
+            seg = hm[s0:s1] != 0                      # (T, N) fired-so-far mask
+            if len(seg) == 0:
+                continue
+            first = np.argmax(seg, axis=0)            # first step each cell is fired
+            ever = seg.any(axis=0)
+            t = np.arange(len(seg))[:, None]
+            a = t - first[None, :]
+            ages[s0:s1] = np.where(seg & ever[None, :], a, -1)
+        return ages
+
+    def _probe_metrics_from_probs(probs_all, t_boards, t_hm, t_eb=None):
         """Headline decodability metrics from precomputed host probabilities.
 
         Split out from :func:`_probe_metrics` so the multi-seed path can score
@@ -1503,7 +1527,37 @@ if not args.vis_only:
             return 0.5 * (s + w)
 
         fired_pred = (fired_probs > 0.5).astype(np.float32)
+
+        # AUROC saturates well before the memory stops improving (0.96 -> 0.9998
+        # spans the entire interesting range), so report quantities that stay
+        # discriminative up there and separate recency from retention.
+        n_wrong = ((1.0 - correct) * fired).sum(axis=-1)
+        _eps = 1e-7
+        p_truth = np.where(targets == 1, probs, 1.0 - probs)
+        bits = -np.log2(np.clip(p_truth[fired], _eps, 1.0))
+        prior = targets[fired].mean() if fired.any() else 0.5
+        prior_bits = -(prior * np.log2(max(prior, _eps))
+                       + (1 - prior) * np.log2(max(1 - prior, _eps)))
+        extra = {
+            "errors_per_state": float(n_wrong.mean()),
+            "exact_match": float((n_wrong == 0).mean()),
+            "bits_per_cell": float(bits.mean()) if fired.any() else float("nan"),
+            "info_gain_bits": float(prior_bits - bits.mean()) if fired.any() else float("nan"),
+        }
+        if t_eb is not None:
+            ages = _cell_ages(t_hm, np.asarray(t_eb))
+            horizon = 0.0
+            for lo, hi in _AGE_BUCKETS:
+                m = fired & (ages >= lo) & (ages <= hi)
+                b = _balanced(m) if m.sum() else float("nan")
+                extra[f"bal_age{lo}_{hi if hi < 10 ** 6 else 'plus'}"] = b
+                if m.sum() and b >= 0.9:
+                    horizon = min(hi, 50)
+            # oldest age bucket still decoded at >=90% balanced recall
+            extra["horizon_steps"] = horizon
+
         return {
+            **extra,
             "overall_acc": float(correct.mean()),
             "fired_auroc": _auroc(probs[fired], targets[fired]),
             "fired_balanced": _balanced(fired),
@@ -1516,10 +1570,10 @@ if not args.vis_only:
             "fired_pred_acc": float((fired_pred == fired_targets).mean()),
         }
 
-    def _probe_metrics(probe_params, t_carries, t_boards, t_hm):
+    def _probe_metrics(probe_params, t_carries, t_boards, t_hm, t_eb=None):
         """Headline decodability metrics on a held-out test set (no plots)."""
         probs_all = np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(t_carries))))
-        return _probe_metrics_from_probs(probs_all, t_boards, t_hm)
+        return _probe_metrics_from_probs(probs_all, t_boards, t_hm, t_eb)
 
     def _run_probe_eval(agent_state, rnd):
         """Collect → train a lightweight probe → score it; log under probe_eval/.
@@ -1537,10 +1591,13 @@ if not args.vis_only:
             jax.random.key(args.seed + 50000 + rnd),
             args.probe_eval_steps,
         )
-        m = _probe_metrics(params, tc, tb, thm)
+        m = _probe_metrics(params, tc, tb, thm, _teb)
         step = rnd * args.train_steps
         print(f"  [probe-eval] fired AUROC={m['fired_auroc']:.3f}  "
-              f"unfired AUROC={m['unfired_auroc']:.3f}  overall={m['overall_acc']:.1%}")
+              f"unfired AUROC={m['unfired_auroc']:.3f}  overall={m['overall_acc']:.1%}  "
+              f"errors/state={m['errors_per_state']:.3f}  "
+              f"exact={m['exact_match']:.1%}  bits={m['bits_per_cell']:.4f}  "
+              f"horizon={m.get('horizon_steps', float('nan')):.0f}")
         if _wandb is not None:
             _wandb.log({"env_interactions": step,
                         **{f"probe_eval/{k}": v for k, v in m.items()}})
@@ -1734,7 +1791,8 @@ if not args.vis_only:
             te_c = np.array(te_c); te_b = np.array(te["board_masks"])
             te_hm = np.array(te["hits_misses"]); te_d = np.array(te["dones"])
             per_seed = [
-                _probe_metrics_from_probs(preds[j], te_b[j], te_hm[j])
+                _probe_metrics_from_probs(preds[j], te_b[j], te_hm[j],
+                                      _ep_bounds(te_d[j], len(te_c[j])))
                 for j in range(len(gidxs))
             ]
             return {"gidxs": list(gidxs), "rnd": rnd, "preds": preds, "te_c": te_c,
@@ -2423,6 +2481,19 @@ if _wandb is not None:
         "eval/fired_pred_recall": fp_recall,
         "eval/fired_pred_specificity": fp_specificity,
     }
+    # The saturation-resistant metrics (errors/state, exact match, bits, and the
+    # age-bucketed retention horizon) come from the shared helper so the final
+    # eval reports exactly what the periodic probe-evals do.  Unavailable in
+    # --vis-only mode, where the helper is never defined.
+    if "_probe_metrics_from_probs" in dir():
+        _extra = _probe_metrics_from_probs(
+            test_probs_all, test_board_masks, test_hits_misses, test_ep_bounds)
+        _eval_metrics.update({f"eval/{k}": v for k, v in _extra.items()
+                              if f"eval/{k}" not in _eval_metrics})
+        print(f"Errors/state={_extra['errors_per_state']:.3f}  "
+              f"exact match={_extra['exact_match']:.1%}  "
+              f"bits/cell={_extra['bits_per_cell']:.4f}  "
+              f"retention horizon={_extra.get('horizon_steps', float('nan')):.0f} steps")
     _wandb.log(_eval_metrics)
     _wandb.summary.update(_eval_metrics)
 
