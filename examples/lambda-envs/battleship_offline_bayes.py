@@ -71,6 +71,12 @@ parser.add_argument("--policy-check-episodes", type=int, default=200,
                          "Bayes policy (0 disables; default 200)")
 args, _ = parser.parse_known_args()
 
+# The probe module parses this same argv and rejects anything it does not know,
+# so tell it which flags belong to this script.
+os.environ["BATTLESHIP_PROBE_EXTRA_FLAGS"] = ",".join(sorted(
+    opt for action in parser._actions for opt in action.option_strings
+))
+
 # ── load battleship_board_probe.py for its env / agent / probe machinery ─────
 #
 # That script runs at import (argparse at module level, phases after it), so it

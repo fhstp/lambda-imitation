@@ -297,7 +297,38 @@ g.add_argument("--wandb-project", default="offline-lambda-battleship-results", m
                help="W&B project name (default: offline-lambda-battleship-probe)")
 g.add_argument("--wandb-run-name", default=None, metavar="NAME", help="W&B run name (default: auto)")
 
-args, _ = parser.parse_known_args()
+args, _unknown = parser.parse_known_args()
+
+# Unknown arguments are rejected rather than ignored.  parse_known_args is
+# required because another script may share this argv (battleship_offline_bayes
+# imports this module with its own flags present), but silently dropping a
+# misspelled flag is worse: a W&B sweep passing --probe_eval_interval=0 (the
+# parameter name, underscores) instead of --probe-eval-interval=0 would run the
+# whole sweep at the default and look perfectly healthy.  An importing script
+# declares its own flags in BATTLESHIP_PROBE_EXTRA_FLAGS.
+_allowed_extra = {
+    f for f in os.environ.get("BATTLESHIP_PROBE_EXTRA_FLAGS", "").split(",") if f
+}
+
+
+def _is_flag(tok: str) -> bool:
+    if not tok.startswith("-"):
+        return False
+    try:                      # negative numbers are values, not flags
+        float(tok)
+        return False
+    except ValueError:
+        return True
+
+
+_bad = [t for t in _unknown if _is_flag(t) and t.split("=")[0] not in _allowed_extra]
+if _bad:
+    sys.exit(
+        f"{parser.prog}: unrecognised argument(s): {' '.join(_bad)}\n"
+        "Note flags use hyphens, not underscores (e.g. --probe-eval-interval). "
+        "If another script owns these flags, list them in "
+        "BATTLESHIP_PROBE_EXTRA_FLAGS."
+    )
 
 # ── wandb sweep support ───────────────────────────────────────────────────────
 #
