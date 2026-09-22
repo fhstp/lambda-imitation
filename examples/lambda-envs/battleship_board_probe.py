@@ -80,7 +80,7 @@ g.add_argument("--concurrent-seeds", type=int, default=0,
                help="seeds trained concurrently in one vmapped+jitted kernel "
                     "(0 = all --num-seeds in a single group, the common case).  "
                     "When set, --num-seeds must be divisible by it.")
-g.add_argument("--final-return-window", type=int, default=10,
+g.add_argument("--final-return-window", type=int, default=3,
                help="number of final rounds averaged for the smoothed final "
                     "return / steps-to-clear (default 10).")
 g.add_argument("--memory-type", choices=("identity", "rnn", "gru", "lstm"), default="gru")
@@ -173,7 +173,7 @@ g.add_argument("--retrace", dest="retrace", action="store_true",
                     "transitions here) the target loses the reward entirely and "
                     "the value level drifts; Retrace keeps the 1-step term at "
                     "coefficient 1 and only cuts multi-step propagation.")
-parser.set_defaults(retrace=False)
+parser.set_defaults(retrace=True)
 g.add_argument("--critic-greedy-eval", dest="critic_greedy_eval",
                action="store_true",
                help="each round, also evaluate the CRITIC-greedy policy "
@@ -183,7 +183,7 @@ g.add_argument("--critic-greedy-eval", dest="critic_greedy_eval",
                     "(default on; read-only, no effect on training).")
 g.add_argument("--no-critic-greedy-eval", dest="critic_greedy_eval",
                action="store_false")
-parser.set_defaults(critic_greedy_eval=True)
+parser.set_defaults(critic_greedy_eval=False)
 g.add_argument("--actor-critic", choices=("sac", "lambda1", "lambda2"),
                default="sac",
                help="which critic the actor is extracted from (default sac).  "
@@ -192,6 +192,7 @@ g.add_argument("--actor-critic", choices=("sac", "lambda1", "lambda2"),
                     "(+47 against a +35.6 fixed point), while the SAC critic "
                     "overestimates past the +100 return ceiling; picking a "
                     "λ-critic also couples the policy to the λ-discrepancy.")
+=======
 g.add_argument("--lambda-coef", type=float, default=1.0,
                help="weight on the λ-discrepancy term (default 1.0, which is "
                     "what every run so far used).  Note the reference "
