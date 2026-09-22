@@ -535,6 +535,15 @@ class Hyperparameters(NamedTuple):
     # steps survive is what actually varies between windows.  4-8 is the
     # useful range.
     per_window: int = 0
+    # Which critic the actor is extracted from: "sac" (default, the twin-Q
+    # critic) or "lambda1" / "lambda2" (the V-trace/Retrace λ-critics).  On the
+    # offline Battleship data the λ-critics are the calibrated ones once the
+    # Retrace / twin / λ_coef fixes are in — settling at +47 against an analytic
+    # fixed point of +35.6 and an MC return of +55.5 — while the SAC critic
+    # reaches +106, above the +100 return ceiling, because nothing constrains it
+    # on the actions the data never took.  Extracting the policy from a λ-critic
+    # also couples it directly to the λ-discrepancy objective.
+    actor_critic: str = "sac"
 
 
 # ---------------------------------------------------------------------------
@@ -947,6 +956,17 @@ def create_iqlearn(
         online_mc_this_keys.append(carry_key)
         if use_prev_action:
             online_mc_this_keys.append(prev_action_key)
+    if params.actor_critic not in ("sac", "lambda1", "lambda2"):
+        raise ValueError(
+            f"actor_critic must be 'sac', 'lambda1' or 'lambda2', got "
+            f"{params.actor_critic!r}"
+        )
+    if params.actor_critic != "sac" and not approximate_lambda:
+        raise ValueError(
+            f"actor_critic={params.actor_critic!r} needs the λ-critics; set "
+            "approximate_lambda=True or use actor_critic='sac'"
+        )
+
     if params.per_alpha > 0 and params.fake_onpolicy_loss:
         raise ValueError(
             "per_alpha > 0 with fake_onpolicy_loss=True: the ratios are pinned "
@@ -1796,6 +1816,7 @@ def create_iqlearn(
     def loss_actor(
         actor: nnx.GraphState,
         critic: TwinCriticState,
+        graph: TwinCriticGraph,
         latents: jax.Array,
         alpha: jax.Array,
         key: jax.Array,
@@ -1825,7 +1846,7 @@ def create_iqlearn(
         v, metrics = get_v(
             actor,
             critic,
-            critic_graph,
+            graph,
             alpha,
             latents,
             key_v,
@@ -2647,9 +2668,19 @@ def create_iqlearn(
 
         actor_latent = (jax.lax.stop_gradient(latent)
                         if params.stop_actor_fe else latent)
+        # --actor-critic: extract the policy from the SAC critic (default) or
+        # from one of the λ-critics.  stop_gradient keeps the actor loss from
+        # training whichever critic head it reads, exactly as before.
+        if params.actor_critic == "lambda1":
+            _a_critic, _a_graph = lambda1_critic_state, lambda1_critic_graph
+        elif params.actor_critic == "lambda2":
+            _a_critic, _a_graph = lambda2_critic_state, lambda2_critic_graph
+        else:
+            _a_critic, _a_graph = critic_state, critic_graph
         l_actor, metrics = loss_actor(
             actor_state,
-            jax.lax.stop_gradient(critic_state),
+            jax.lax.stop_gradient(_a_critic),
+            _a_graph,
             _flat(actor_latent),
             alpha,
             key_actor,
