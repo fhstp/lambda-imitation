@@ -174,6 +174,24 @@ g.add_argument("--retrace", dest="retrace", action="store_true",
                     "the value level drifts; Retrace keeps the 1-step term at "
                     "coefficient 1 and only cuts multi-step propagation.")
 parser.set_defaults(retrace=False)
+g.add_argument("--critic-greedy-eval", dest="critic_greedy_eval",
+               action="store_true",
+               help="each round, also evaluate the CRITIC-greedy policy "
+                    "(argmax_a Q over legal cells) and log its return, "
+                    "steps-to-clear, and the per-action spread qstd / qrange.  "
+                    "Splits a memory failure from an extraction failure "
+                    "(default on; read-only, no effect on training).")
+g.add_argument("--no-critic-greedy-eval", dest="critic_greedy_eval",
+               action="store_false")
+parser.set_defaults(critic_greedy_eval=True)
+g.add_argument("--actor-critic", choices=("sac", "lambda1", "lambda2"),
+               default="sac",
+               help="which critic the actor is extracted from (default sac).  "
+                    "The λ-critics are the calibrated ones on this data once "
+                    "Retrace + the twin fix + a small --lambda-coef are in "
+                    "(+47 against a +35.6 fixed point), while the SAC critic "
+                    "overestimates past the +100 return ceiling; picking a "
+                    "λ-critic also couples the policy to the λ-discrepancy.")
 g.add_argument("--lambda-coef", type=float, default=1.0,
                help="weight on the λ-discrepancy term (default 1.0, which is "
                     "what every run so far used).  Note the reference "
@@ -397,6 +415,7 @@ if args.wandb and not args.vis_only:
             "ld_center": args.ld_center,
             "retrace": args.retrace,
             "lambda_coef": args.lambda_coef,
+            "actor_critic": args.actor_critic,
             "per_alpha": args.per_alpha,
             "per_beta": args.per_beta,
             "num_seeds": args.num_seeds,
@@ -1069,6 +1088,7 @@ if not args.vis_only:
         sequence_length=args.sequence_length,
         burn_in_length=args.burn_in_length,
         lambda_coef=args.lambda_coef, fake_onpolicy_loss=False,
+        actor_critic=args.actor_critic,
         gvd_coef=args.gvd_coef,
         gvd_lambda1=args.gvd_lambda1,
         gvd_lambda2=args.gvd_lambda2,
@@ -1253,9 +1273,19 @@ if not args.vis_only:
     state, fns, debug_fns = _build_agent(args.seed)
     evaluate = _make_evaluate(fns)
     # Critic-greedy eval is discrete-only (needs the all-actions critic).
-    evaluate_critic = None if True else (
+    # Critic-greedy eval: play argmax_a Q(s,a) over legal cells and log the
+    # per-action spread (qstd) and range (qrange).  This is the diagnostic that
+    # separates "the memory never formed" from "the memory formed but the
+    # policy cannot read it": if critic-greedy plays well while actor-greedy
+    # does not, the gap is in extraction; if both are poor and qstd is tiny,
+    # the critic's per-action ranking never formed.  Measured on a trained
+    # agent here: Q spanned 98.9-111.1 across 100 legal actions on values of
+    # ~105, i.e. the action signal is ~10% of the value scale.
+    evaluate_critic = (
         _make_evaluate_critic(debug_fns)
-        if getattr(debug_fns, "predict_qpi", None) is not None else None
+        if (args.critic_greedy_eval
+            and getattr(debug_fns, "predict_qpi", None) is not None)
+        else None
     )
 
     # ── shared probe helpers (used by Phase 2/3 and periodic probe-eval) ───────

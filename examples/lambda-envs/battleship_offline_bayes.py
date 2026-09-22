@@ -287,11 +287,24 @@ for rnd in tqdm(range(1, rounds + 1), desc="Offline updates"):
     key, update_key, eval_key = jax.random.split(key, 3)
     state, metrics = fns.update_only(state, args.update_chunk, update_key)
     mean_ret, steps_to_clear, cleared = probe.evaluate(state, eval_key, n_episodes=10)
+    # Critic-greedy eval (argmax_a Q over legal cells): separates a memory
+    # failure from an extraction failure.  qstd / qrange are the per-action
+    # spread of Q at each state — if they are ~0 the critic has no action
+    # ranking for the policy to read, however good the probe looks.
+    cg = {}
+    if probe.evaluate_critic is not None:
+        key, cg_key = jax.random.split(key)
+        _cr, _cs, _cc, _qstd, _qrng = probe.evaluate_critic(
+            state, cg_key, n_episodes=10)
+        cg = {"cg_return": float(_cr), "cg_steps": float(_cs),
+              "cg_cleared": float(_cc), "qstd": float(_qstd),
+              "qrange": float(_qrng)}
     row = {
         "updates": rnd * args.update_chunk,
         "return": float(mean_ret),
         "steps_to_clear": float(steps_to_clear),
         "cleared": float(cleared),
+        **cg,
         **{k: float(v) for k, v in metrics.items()},
     }
     history.append(row)
@@ -308,6 +321,9 @@ for rnd in tqdm(range(1, rounds + 1), desc="Offline updates"):
         # prioritised replay: mean window trace mass, and the effective sample
         # size of the batch (1.0 = uniform, →0 = the batch collapsed onto a few
         # windows).
+        + (f"  cg(ret={row['cg_return']:.1f} steps={row['cg_steps']:.1f} "
+           f"qstd={row['qstd']:.3f} qrange={row['qrange']:.2f})"
+           if "qstd" in row else "")
         + (f"  per(pri={row['per_priority']:.3g}±{row['per_priority_std']:.3g} "
            f"ess={row['per_ess']:.2f})" if "per_ess" in row else "")
     )
