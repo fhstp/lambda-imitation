@@ -192,7 +192,6 @@ g.add_argument("--actor-critic", choices=("sac", "lambda1", "lambda2"),
                     "(+47 against a +35.6 fixed point), while the SAC critic "
                     "overestimates past the +100 return ceiling; picking a "
                     "λ-critic also couples the policy to the λ-discrepancy.")
-=======
 g.add_argument("--lambda-coef", type=float, default=1.0,
                help="weight on the λ-discrepancy term (default 1.0, which is "
                     "what every run so far used).  Note the reference "
