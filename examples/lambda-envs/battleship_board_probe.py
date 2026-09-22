@@ -174,6 +174,14 @@ g.add_argument("--retrace", dest="retrace", action="store_true",
                     "the value level drifts; Retrace keeps the 1-step term at "
                     "coefficient 1 and only cuts multi-step propagation.")
 parser.set_defaults(retrace=False)
+g.add_argument("--lambda-coef", type=float, default=1.0,
+               help="weight on the λ-discrepancy term (default 1.0, which is "
+                    "what every run so far used).  Note the reference "
+                    "implementation uses a convex combination instead — "
+                    "ld_weight·LD + (1-ld_weight)·value_loss with ld_weight in "
+                    "{0.125, 0.25, 0.5} and 0.5 selected for Battleship-10 — so "
+                    "an additive 1.0 on top of the value losses is a different "
+                    "and much heavier weighting, especially once ld inflates.")
 g.add_argument("--per-alpha", type=float, default=0.0,
                help="prioritised sequence replay: draw windows with "
                     "probability ∝ priority^alpha, where priority is the "
@@ -388,6 +396,7 @@ if args.wandb and not args.vis_only:
             "stop_critic_fe": args.stop_critic_fe,
             "ld_center": args.ld_center,
             "retrace": args.retrace,
+            "lambda_coef": args.lambda_coef,
             "per_alpha": args.per_alpha,
             "per_beta": args.per_beta,
             "num_seeds": args.num_seeds,
@@ -1059,7 +1068,7 @@ if not args.vis_only:
         c_bar=1.00, rho_bar=1.00, lambda_truncation=50,
         sequence_length=args.sequence_length,
         burn_in_length=args.burn_in_length,
-        lambda_coef=1.0, fake_onpolicy_loss=False,
+        lambda_coef=args.lambda_coef, fake_onpolicy_loss=False,
         gvd_coef=args.gvd_coef,
         gvd_lambda1=args.gvd_lambda1,
         gvd_lambda2=args.gvd_lambda2,
