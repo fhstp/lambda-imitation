@@ -174,6 +174,15 @@ g.add_argument("--retrace", dest="retrace", action="store_true",
                     "the value level drifts; Retrace keeps the 1-step term at "
                     "coefficient 1 and only cuts multi-step propagation.")
 parser.set_defaults(retrace=True)
+g.add_argument("--expert-prefill-steps", type=int, default=0,
+               help="fill the replay buffer with this many transitions from "
+                    "the scripted Bayes-density player before online training "
+                    "starts, instead of the uniform-random prefill (0 = random, "
+                    "the default).  Tests whether an expert warm start gets the "
+                    "agent past the chicken-and-egg where memory only pays off "
+                    "once the policy hunts.")
+g.add_argument("--expert-prefill-epsilon", type=float, default=0.1,
+               help="epsilon-greedy rate of that expert prefill (default 0.1)")
 g.add_argument("--critic-greedy-eval", dest="critic_greedy_eval",
                action="store_true",
                help="each round, also evaluate the CRITIC-greedy policy "
@@ -1223,6 +1232,67 @@ if not args.vis_only:
             use_sac=args.use_sac
         )
 
+    def make_bayes_policy(rows, cols, ship_lengths, hit_weight=12.0, epsilon=0.1):
+        """Posterior-density greedy Battleship player, jittable.
+
+        Returns ``policy(obs, env_state, key) -> (action_index, b(a|s))``, the
+        contract taken by ``fns.prefill_buffer(behaviour_fn=…)`` and by the probe
+        script's ``collect_rollout(policy_fn=…)``.
+
+        The density counts, for every ship length, all placements that do not touch
+        an observed miss, weighting each by ``hit_weight ** (#observed hits it
+        covers)`` — the standard stand-in for the joint posterior when the env
+        gives no sink feedback — and scatters that weight onto its cells.  The
+        player then fires at the highest-density unfired cell, or with probability
+        ``epsilon`` at a uniformly random legal one.
+
+        It reads ``env_state.hits_misses``, which is the player's *own* shot record
+        (0 unfired / 1 miss / 2 hit) — the same information the observation stream
+        carries — never ``env_state.board``.
+        """
+        n = rows * cols
+        grid = np.arange(n).reshape(rows, cols)
+        placements = []
+        for length in sorted(set(ship_lengths)):
+            horiz = [grid[r, c:c + length]
+                     for r in range(rows) for c in range(cols - length + 1)]
+            vert = [grid[r:r + length, c]
+                    for c in range(cols) for r in range(rows - length + 1)]
+            placements.append(jnp.asarray(np.stack(horiz + vert)))   # (n_place, L)
+
+        def policy(obs, env_state, key):
+            hm = env_state.hits_misses.reshape(-1)          # 0 unfired, 1 miss, 2 hit
+            density = jnp.zeros(n, dtype=jnp.float32)
+            for place in placements:                        # static: one per length
+                cells = hm[place]                           # (n_place, L)
+                alive = ~jnp.any(cells == 1, axis=-1)       # no miss under the ship
+                weight = hit_weight ** jnp.sum(cells == 2, axis=-1) * alive
+                density = density.at[place.reshape(-1)].add(
+                    jnp.repeat(weight, place.shape[1]))
+
+            legal = hm == 0
+            greedy = jnp.argmax(jnp.where(legal, density, -1.0))
+            pick_key, coin_key = jax.random.split(key)
+            random_legal = jax.random.categorical(
+                pick_key, jnp.where(legal, 0.0, -1e9))
+            explore = jax.random.uniform(coin_key) < epsilon
+            action = jnp.where(explore, random_legal, greedy)
+
+            n_legal = jnp.maximum(jnp.sum(legal), 1).astype(jnp.float32)
+            prob = jnp.where(action == greedy,
+                             (1.0 - epsilon) + epsilon / n_legal,
+                             epsilon / n_legal)
+            return action.astype(jnp.int32), prob.astype(jnp.float32)
+
+        return policy
+
+
+    expert_policy = (
+        make_bayes_policy(args.rows, args.cols, ship_lengths,
+                          epsilon=args.expert_prefill_epsilon)
+        if args.expert_prefill_steps > 0 else None
+    )
+
     # ── evaluation helper ────────────────────────────────────────────────────
 
     def _make_evaluate(fns):
@@ -1742,10 +1812,14 @@ if not args.vis_only:
             hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
         )
         _reset_v = jax.jit(jax.vmap(lambda k: env.reset(k, env_params)))
+        # --expert-prefill-steps: seed the buffer with the scripted Bayes
+        # player instead of the uniform-random policy.
+        _PREFILL_N = max(PREFILL_STEPS, args.expert_prefill_steps)
         _prefill_v = jax.jit(
             jax.vmap(
                 lambda s, es, k: fns.prefill_buffer(
-                    s, env, env_params, es, PREFILL_STEPS, k),
+                    s, env, env_params, es, _PREFILL_N, k,
+                    behaviour_fn=expert_policy),
                 in_axes=(0, 0, 0),
             ),
             donate_argnums=(0, 1),
@@ -1929,7 +2003,8 @@ if not args.vis_only:
             keys, reset_keys = _split_each(keys)
             _obs, env_state = _reset_v(reset_keys)
             keys, prefill_keys = _split_each(keys)
-            print(f"  prefilling {PREFILL_STEPS} steps/seed…")
+            print(f"  prefilling {_PREFILL_N} steps/seed"
+                  f"{' from the Bayes expert' if expert_policy else ' (random)'}…")
             batched, env_state = _prefill_v(batched, env_state, prefill_keys)
             # Fresh zero env_carry each round (matches fns.train's per-call reset);
             # reused across rounds, so NOT donated.
@@ -2211,6 +2286,19 @@ if not args.vis_only:
             key, reset_key = jax.random.split(key)
             _, env_state = env.reset(reset_key, env_params)
             _start_round = 0
+        if expert_policy is not None:
+            # fns.train auto-prefills with the random policy only when the
+            # buffer is cold, so filling it here pre-empts that.
+            _n = max(args.expert_prefill_steps,
+                     hp.online_batch_size * (hp.lambda_truncation
+                                             + hp.sequence_length
+                                             + hp.burn_in_length))
+            print(f"Prefilling {_n} steps from the Bayes expert…")
+            key, _pk = jax.random.split(key)
+            state, env_state = fns.prefill_buffer(
+                state, env, env_params, env_state, _n, _pk,
+                behaviour_fn=expert_policy)
+
         total = args.rounds * args.train_steps
         print(f"Training for {args.rounds} × {args.train_steps} = {total} steps…")
 

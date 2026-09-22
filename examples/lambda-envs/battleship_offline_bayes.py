@@ -153,61 +153,12 @@ os.makedirs(OUT, exist_ok=True)
 
 
 # ── the Bayes-density player ─────────────────────────────────────────────────
+#
+# Defined in battleship_board_probe.py so the probe script's --expert-prefill
+# path and this runner share exactly one implementation.
+make_bayes_policy = probe.make_bayes_policy
 
 
-def make_bayes_policy(rows, cols, ship_lengths, hit_weight=12.0, epsilon=0.1):
-    """Posterior-density greedy Battleship player, jittable.
-
-    Returns ``policy(obs, env_state, key) -> (action_index, b(a|s))``, the
-    contract taken by ``fns.prefill_buffer(behaviour_fn=…)`` and by the probe
-    script's ``collect_rollout(policy_fn=…)``.
-
-    The density counts, for every ship length, all placements that do not touch
-    an observed miss, weighting each by ``hit_weight ** (#observed hits it
-    covers)`` — the standard stand-in for the joint posterior when the env
-    gives no sink feedback — and scatters that weight onto its cells.  The
-    player then fires at the highest-density unfired cell, or with probability
-    ``epsilon`` at a uniformly random legal one.
-
-    It reads ``env_state.hits_misses``, which is the player's *own* shot record
-    (0 unfired / 1 miss / 2 hit) — the same information the observation stream
-    carries — never ``env_state.board``.
-    """
-    n = rows * cols
-    grid = np.arange(n).reshape(rows, cols)
-    placements = []
-    for length in sorted(set(ship_lengths)):
-        horiz = [grid[r, c:c + length]
-                 for r in range(rows) for c in range(cols - length + 1)]
-        vert = [grid[r:r + length, c]
-                for c in range(cols) for r in range(rows - length + 1)]
-        placements.append(jnp.asarray(np.stack(horiz + vert)))   # (n_place, L)
-
-    def policy(obs, env_state, key):
-        hm = env_state.hits_misses.reshape(-1)          # 0 unfired, 1 miss, 2 hit
-        density = jnp.zeros(n, dtype=jnp.float32)
-        for place in placements:                        # static: one per length
-            cells = hm[place]                           # (n_place, L)
-            alive = ~jnp.any(cells == 1, axis=-1)       # no miss under the ship
-            weight = hit_weight ** jnp.sum(cells == 2, axis=-1) * alive
-            density = density.at[place.reshape(-1)].add(
-                jnp.repeat(weight, place.shape[1]))
-
-        legal = hm == 0
-        greedy = jnp.argmax(jnp.where(legal, density, -1.0))
-        pick_key, coin_key = jax.random.split(key)
-        random_legal = jax.random.categorical(
-            pick_key, jnp.where(legal, 0.0, -1e9))
-        explore = jax.random.uniform(coin_key) < epsilon
-        action = jnp.where(explore, random_legal, greedy)
-
-        n_legal = jnp.maximum(jnp.sum(legal), 1).astype(jnp.float32)
-        prob = jnp.where(action == greedy,
-                         (1.0 - epsilon) + epsilon / n_legal,
-                         epsilon / n_legal)
-        return action.astype(jnp.int32), prob.astype(jnp.float32)
-
-    return policy
 
 
 def evaluate_policy(policy, key, n_episodes):

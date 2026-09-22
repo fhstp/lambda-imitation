@@ -2,6 +2,10 @@
 
 Branch: `fix/retrace-lambda-critics`. Everything below is on it.
 
+**Read "Session 2 (22 Sep)" first** — it supersedes the 5×5 claims in the
+original TL;DR (the 5×5 AUROC headline was measured without an anchor, and the
+untrained anchor there is 0.993).
+
 ## What this was
 
 The online Battleship runs never form board memory (`ship@fired` AUROC ≈ 0.54 =
@@ -17,9 +21,11 @@ retention on 10×10.
 
 ## TL;DR
 
-1. **Offline expert data solves the memory problem on 5×5**: retention 0.54
-   (online, chance) → **0.99**. The blocker was the data distribution, not the
-   objective.
+1. **A 20k Bayes-expert prefill makes the full method reach Bayes-level play on
+   5×5 in ~70k env steps** (return 13.1 ± 0.3 over 3 seeds), against ~1M for the
+   reference PPO+LD — see Session 2, which supersedes several claims below.
+   Note also that plain PPO, once tuned for 5×5, solves it too (12.17): LD is not
+   what makes 5×5 solvable.
 2. **On 10×10 retention is stuck in a 0.68–0.81 band** across 15 runs, against an
    untrained-FE anchor of 0.72 (bayes rollouts). Every estimator fix, LR setting
    and gradient-routing knob lands in that band.
@@ -33,6 +39,90 @@ retention on 10×10.
 5. **Prioritised replay at a sharp setting gave the best 10×10 retention**
    (0.810 / 0.807), though with the worst value behaviour of any run — see the
    caveat in the results table.
+
+## Session 2 (22 Sep) — 5x5, reference baselines, and the headline result
+
+**Everything below is 5x5 with ships (3,2)**, where `return = 26 - shots`;
+Bayes-density plays 13.22 shots (return 12.78), uniform random 21.54 (4.46).
+
+### The headline: expert prefill makes the full method sample-efficient
+
+Online training (`battleship_board_probe.py`), full method, with the buffer's
+initial fill taken from the Bayes player instead of the uniform-random policy
+(`--expert-prefill-steps 20000`), 3 seeds:
+
+| env steps | return | shots |
+|---|---|---|
+| 10k | 8.6 ± 1.0 | 17.4 |
+| 30k | 12.0 ± 0.5 | 14.0 |
+| **70k** | **13.1 ± 0.3** | **12.9** |
+
+It reaches Bayes-level play in ~70k env steps, against PPO+LD's ~1M — roughly
+14x the sample efficiency, with a tight across-seed spread.  Run killed after
+the round-10 probe-eval; the pace was ~22 min/round (10k env steps + 10k
+updates, vmapped over 3 seeds), so 100 rounds was never worth the electricity.
+
+### Reference implementation on 5x5 (1M env steps, 3 seeds)
+
+Run from a clean clone of `lambda_discrepancy` in the `lambdaref` conda env;
+their working copy has uncommitted import-sorter edits that drop
+`from definitions import ROOT_DIR` and break every env.
+
+| algo | return | shots | errors/state @1M | exact match | horizon |
+|---|---|---|---|---|---|
+| PPO+LD (their tuned 10x10 cfg) | 12.93 | 13.1 | 0.061 | 94.6 % | 33 |
+| **PPO tuned for 5x5** (lr 5e-4, lambda0 0.7, ent 0.01) | **12.17** | 13.8 | **0.042** | **96.3 %** | 40 |
+| PPO with their 10x10 cfg (lr 2.5e-5) | 5.55 | 20.4 | 1.324 | 40.4 % | 2 |
+| untrained anchor | — | — | 0.700 | 60.3 % | 5 |
+
+**Do not repeat the claim that LD is what makes 5x5 solvable.**  With their
+10x10-tuned config plain PPO is flat at 5.55, but that is a learning-rate
+artefact: tuned at 5x5 it reaches 12.17 and builds *better* memory than PPO+LD
+(0.042 vs 0.061 errors/state).  A 400k tuning grid ranks it at only 6.63, so
+the separation appears late — tune and compare at 1M, not at 100k or 400k.
+
+Plain PPO with the bad config is the one case where memory actively *degrades*:
+errors/state 0.700 -> 1.324, exact match 60 % -> 40 %, horizon 5 -> 1, i.e.
+well below the untrained anchor.
+
+### Offline phases A-C (50k updates each, seed 5341252, single seed)
+
+| phase | setup | best return | final | memory (errors/state) |
+|---|---|---|---|---|
+| A | full method, cold start | **11.20** @40k | 6.20 | 0.112 |
+| B | memory frozen, lambda dropped, fresh heads | 8.60 | 7.50 | (frozen) |
+| B' | same + `--use-sac` | 9.60 | 5.60 | (frozen) |
+| C | warm start from A's memory, everything trainable | 8.10 | 5.70 | **0.074** |
+
+Warm-starting produced a better memory (0.112 -> 0.074 errors/state, 95 % of
+states reconstructed exactly) but not a better policy, and none of the variants
+held their peak.  Single seed each, and the within-run swings (A: 11.2 -> 6.2 in
+10k updates) exceed the between-variant differences.
+
+### The 5x5 anchor caveat — read this before quoting any 5x5 AUROC
+
+An **untrained** GRU probes at **0.993 AUROC / 94.9 % balanced** on 5x5 with our
+probe budget.  The earlier "5x5 retention 0.54 -> 0.99" headline in this document
+was measured without an anchor and is therefore close to meaningless: a random
+reservoir already decodes a fired cell's outcome, because the label *is* the hit
+bit the network was handed one step after the action.  Use errors/state, exact
+match and the retention horizon instead; on the same runs those move 0.231 ->
+0.074 and 86.5 % -> 95.1 %, which AUROC compresses into 0.993 -> 0.999.
+
+### Tooling added this session
+
+- `--expert-prefill-steps` / `--expert-prefill-epsilon` on the probe script;
+  `make_bayes_policy` now lives there and the offline runner imports it.
+- `--lambda-coef`, `--actor-critic {sac,lambda1,lambda2}`, `--critic-greedy-eval`
+  (on by default: logs critic-greedy return/steps and `qstd`/`qrange`).
+- Saturation-resistant probe metrics everywhere: `errors_per_state`,
+  `exact_match`, `bits_per_cell`, `info_gain_bits`, `bal_age*`, `horizon_steps`.
+- `--save-fe-every-eval` / `--init-fe` for transplanting a trained memory.
+- Unknown CLI flags are now fatal, and `--foo_bar` is accepted as `--foo-bar`
+  because W&B's backend silently drops sweep parameters containing hyphens.
+- Reference-side (in `~/tmp/lambda_ref`, **not yet version-controlled**):
+  a mid-run checkpointing patch for `batch_run_ppo.py` and `probe_reference.py`,
+  which probes their `ScannedRNN` with the same metrics.
 
 ## How to read the metrics
 
