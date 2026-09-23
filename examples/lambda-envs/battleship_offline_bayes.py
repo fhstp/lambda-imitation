@@ -1,5 +1,16 @@
 """Offline experiment: train the Battleship agent on a Bayes player's data only.
 
+SUPERSEDED — battleship_board_probe.py now does this natively and with
+multi-seed support::
+
+    python battleship_board_probe.py --offline --expert-prefill-steps 100000 \
+        --num-seeds 3 --rounds 50 --train-steps 1000 --probe-rollout-policy bayes
+
+That path gives vmapped seeds, W&B aggregation with error bands, checkpoint /
+resume and the figure pipeline, none of which this single-seed script has.  It
+is kept because it still runs and several results in HANDOFF.md came from it.
+
+
 The online runs face a chicken-and-egg problem — the memory only pays off once
 the policy hunts, and the policy only hunts once the memory works — so the
 board never gets encoded (see ``ablations.md``).  This script removes the

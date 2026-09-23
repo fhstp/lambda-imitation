@@ -174,6 +174,26 @@ g.add_argument("--retrace", dest="retrace", action="store_true",
                     "the value level drifts; Retrace keeps the 1-step term at "
                     "coefficient 1 and only cuts multi-step propagation.")
 parser.set_defaults(retrace=True)
+g.add_argument("--offline", action="store_true",
+               help="train fully offline: fill the buffer once (see "
+                    "--expert-prefill-steps) and then run gradient updates with "
+                    "NO environment interaction.  --rounds x --train-steps then "
+                    "counts updates rather than env steps.  Everything else — "
+                    "multi-seed vmapping, probe-evals, W&B aggregation, "
+                    "checkpointing — is unchanged.")
+g.add_argument("--probe-rollout-policy", choices=("actor", "bayes"),
+               default="actor",
+               help="which policy generates the probe's rollouts (default "
+                    "actor).  'bayes' probes along the scripted player's "
+                    "trajectories, i.e. the distribution an offline agent was "
+                    "trained on, which the actor's own rollouts do not match.")
+g.add_argument("--save-fe-every-eval", action="store_true",
+               help="save each seed's feature extractor at every probe-eval as "
+                    "fe_seed<i>_<step>.pkl, for transplanting with --init-fe")
+g.add_argument("--init-fe", default=None, metavar="PATH",
+               help="initialise the feature extractor (and its EMA target) from "
+                    "a saved fe_*.pkl.  Pair with --fe-lr 0 to freeze that "
+                    "memory and train only the heads on top of it.")
 g.add_argument("--expert-prefill-steps", type=int, default=0,
                help="fill the replay buffer with this many transitions from "
                     "the scripted Bayes-density player before online training "
@@ -1005,6 +1025,14 @@ if not args.vis_only:
                  f"{args.rows}x{args.cols} board; pass shorter --ship-lengths.")
     N = args.rows * args.cols  # number of actions / board cells
 
+    if args.offline and args.expert_prefill_steps <= 0:
+        sys.exit("--offline needs --expert-prefill-steps > 0: with no expert "
+                 "data the buffer would hold uniform-random transitions and "
+                 "there would be nothing to learn from.")
+    if args.probe_rollout_policy == "bayes" and args.expert_prefill_steps <= 0:
+        sys.exit("--probe-rollout-policy bayes needs --expert-prefill-steps > 0 "
+                 "(the scripted player is only built when it is used).")
+
     # terminal_bonus is only in newer lambda-envs; omit it when unset so the
     # script still runs against an older install (the default None means "env
     # default rows*cols" anyway).
@@ -1209,6 +1237,40 @@ if not args.vis_only:
             f"{prefix}/lo_se": mean - sterr,
             f"{prefix}/hi_se": mean + sterr,
         }
+
+    _init_fe_payload = None
+    if args.init_fe:
+        with open(args.init_fe, "rb") as _f:
+            _init_fe_payload = pickle.load(_f)
+        print(f"initialising every seed's FE from {args.init_fe} "
+              f"(saved at {_init_fe_payload.get('updates', '?')} updates)")
+
+    def _transplant_fe(state):
+        """Replace the FE and its EMA target with a saved memory.
+
+        Only the feature extractor moves: the actor and critics start fresh, so
+        what is tested is what the memory alone supports.
+        """
+        if _init_fe_payload is None:
+            return state
+        tree = jax.tree.structure(state.feature_extractor)
+        return state._replace(
+            feature_extractor=jax.tree.unflatten(
+                tree, [jnp.asarray(x) for x in _init_fe_payload["fe"]]),
+            feature_extractor_target=jax.tree.unflatten(
+                tree, [jnp.asarray(x) for x in _init_fe_payload["fe_target"]]),
+        )
+
+    def _save_fe(state, seed_idx, step):
+        path = os.path.join(args.output_dir, f"fe_seed{seed_idx}_{step}.pkl")
+        with open(path, "wb") as f:
+            pickle.dump({
+                "fe": [np.asarray(x) for x in jax.tree.leaves(state.feature_extractor)],
+                "fe_target": [np.asarray(x)
+                              for x in jax.tree.leaves(state.feature_extractor_target)],
+                "updates": step, "seed": seed_idx,
+            }, f)
+        return path
 
     def _build_agent(seed_val):
         return create_iqlearn_from_env(
@@ -1824,13 +1886,28 @@ if not args.vis_only:
             ),
             donate_argnums=(0, 1),
         )
-        _train_v = jax.jit(
-            jax.vmap(
-                lambda s, es, ec, k: fns.train_unrolled(s, env, env_params, es, ec, k),
-                in_axes=(0, 0, 0, 0),
-            ),
-            donate_argnums=(0, 1),
-        )
+        if args.offline:
+            # Offline: the same round loop, but each round runs train_steps
+            # gradient updates on the pre-filled buffer and never touches the
+            # environment.  Signature matches train_unrolled so the loop, the
+            # async dispatch and the donation pattern are untouched; env_state
+            # and the carry are passed through unchanged.
+            def _offline_round(s, es, ec, k):
+                s, m = fns.update_only(s, args.train_steps, k)
+                return s, es, ec, m
+
+            _train_v = jax.jit(
+                jax.vmap(_offline_round, in_axes=(0, 0, 0, 0)),
+                donate_argnums=(0,),
+            )
+        else:
+            _train_v = jax.jit(
+                jax.vmap(
+                    lambda s, es, ec, k: fns.train_unrolled(s, env, env_params, es, ec, k),
+                    in_axes=(0, 0, 0, 0),
+                ),
+                donate_argnums=(0, 1),
+            )
 
         def _evaluate_v(states_b, keys, n):
             return jax.vmap(lambda s, k: evaluate(s, k, n_episodes=n))(states_b, keys)
@@ -1840,8 +1917,12 @@ if not args.vis_only:
                 lambda s, k: evaluate_critic(s, k, n_episodes=n))(states_b, keys)
 
         # ── vmapped collect + probe-train (used by periodic eval and Phase 2/3)
+        _probe_policy = expert_policy if args.probe_rollout_policy == "bayes" else None
+
         def _collect_v(states_b, keys, n_steps):
-            return jax.vmap(lambda s, k: collect_rollout(s, k, n_steps))(states_b, keys)
+            return jax.vmap(
+                lambda s, k: collect_rollout(s, k, n_steps, policy_fn=_probe_policy)
+            )(states_b, keys)
 
         def _ep_bounds(dones, length):
             di = np.where(np.asarray(dones) > 0.5)[0]
@@ -1893,6 +1974,9 @@ if not args.vis_only:
         _probe_forward_v = jax.vmap(probe_forward)
 
         def _probe_eval_compute(states_b, gidxs, rnd):
+            if args.save_fe_every_eval:
+                for j, gi in enumerate(gidxs):
+                    _save_fe(_unstack_state(states_b, j), gi, rnd * args.train_steps)
             ne = args.probe_eval_collect_steps
             ck_tr = jnp.stack([jax.random.key(args.seed + 500000 + rnd + gi) for gi in gidxs])
             ck_te = jnp.stack([jax.random.key(args.seed + 600000 + rnd + gi) for gi in gidxs])
@@ -2006,7 +2090,8 @@ if not args.vis_only:
             print(f"\n{'=' * 60}\nGroup {group_idx + 1}/{n_groups}  "
                   f"seeds={svals} (idx {gidxs[0]}–{gidxs[-1]})\n{'=' * 60}")
             states = [
-                state if gi == 0 else _build_agent(seeds[gi])[0] for gi in gidxs
+                _transplant_fe(state if gi == 0 else _build_agent(seeds[gi])[0])
+                for gi in gidxs
             ]
             batched = _stack_states(states)
             keys = jnp.stack([jax.random.key(sv) for sv in svals])
@@ -2057,7 +2142,7 @@ if not args.vis_only:
                     return_hist[gi].append(float(returns[j]))
                     steps_hist[gi].append(float(steps[j]))
 
-                step = rnd * args.train_steps
+                step = rnd * args.train_steps   # updates when --offline, else env steps
                 print(f"Round {rnd:4d}/{args.rounds}  "
                       f"return={float(returns.mean()):7.1f}±{float(returns.std()):.1f}  "
                       f"steps_to_clear={float(steps.mean()):5.1f}  "
@@ -2296,6 +2381,7 @@ if not args.vis_only:
             key, reset_key = jax.random.split(key)
             _, env_state = env.reset(reset_key, env_params)
             _start_round = 0
+        state = _transplant_fe(state)
         if expert_policy is not None:
             # fns.train auto-prefills with the random policy only when the
             # buffer is cold, so filling it here pre-empts that.
