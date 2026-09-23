@@ -1927,9 +1927,19 @@ if not args.vis_only:
                 payload.update(_agg([m[k] for m in per_seed], f"probe_eval/agg/{k}"))
                 for j, gi in enumerate(gidxs):
                     payload[f"seed_{gi}/probe_eval/{k}"] = per_seed[j][k]
-            print(f"  [probe-eval] agg fired AUROC={payload['probe_eval/agg/fired_auroc/mean']:.3f}"
+            # Print the saturation-resistant metrics too: AUROC alone cannot
+            # rank checkpoints once it passes ~0.99, and without --wandb these
+            # numbers would otherwise be computed and discarded.
+            def _p(k, fmt=".3f"):
+                return f"{payload[f'probe_eval/agg/{k}/mean']:{fmt}}"
+
+            print(f"  [probe-eval] agg fired AUROC={_p('fired_auroc')}"
                   f"±{payload['probe_eval/agg/fired_auroc/sterr']:.3f}  "
-                  f"unfired AUROC={payload['probe_eval/agg/unfired_auroc/mean']:.3f}")
+                  f"errors/state={_p('errors_per_state')}  "
+                  f"exact={_p('exact_match', '.1%')}  "
+                  f"bits={_p('bits_per_cell', '.4f')}  "
+                  f"horizon={_p('horizon_steps', '.0f')}  "
+                  f"unfired AUROC={_p('unfired_auroc')}")
             if _wandb is not None:
                 _wandb.log(payload)
             if not args.probe_eval_vis:

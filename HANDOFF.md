@@ -55,12 +55,23 @@ initial fill taken from the Bayes player instead of the uniform-random policy
 |---|---|---|
 | 10k | 8.6 ± 1.0 | 17.4 |
 | 30k | 12.0 ± 0.5 | 14.0 |
-| **70k** | **13.1 ± 0.3** | **12.9** |
+| 70k | **13.1 ± 0.3** | 12.9 |
+| 90k | 12.9 ± 0.2 | 13.1 |
+| 110k | 12.8 ± 0.2 | 13.2 |
+| **120k** | **12.8 ± 0.2** | **13.2** |
 
 It reaches Bayes-level play in ~70k env steps, against PPO+LD's ~1M — roughly
-14x the sample efficiency, with a tight across-seed spread.  Run killed after
-the round-10 probe-eval; the pace was ~22 min/round (10k env steps + 10k
-updates, vmapped over 3 seeds), so 100 rounds was never worth the electricity.
+14x the sample efficiency — and then **holds** it: the last four rounds average
+12.75 against the Bayes player's 12.78, with the across-seed spread down to
+±0.1-0.2.  That stability is the part no other run in this project achieved;
+every offline variant peaked and collapsed within 10k updates.  Probe at round
+10: fired AUROC 0.990 ± 0.001, unfired 0.675.
+
+Stopped at round 12 of 100 (the pace was ~20 min/round for 10k env steps + 10k
+updates vmapped over 3 seeds, so the full 100 would have taken ~36 h).  Nothing
+was saved from it beyond the log — the run was killed before its Phase 2/3 save,
+so there is no agent checkpoint for this configuration.  Worth rerunning with
+`--rounds 15` if the trained agent itself is wanted.
 
 ### Reference implementation on 5x5 (1M env steps, 3 seeds)
 
