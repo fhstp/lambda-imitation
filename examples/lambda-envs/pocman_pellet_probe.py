@@ -50,6 +50,26 @@ g.add_argument("--eval-max-steps", type=int, default=1000,
                     "1000 = the env's own time limit).  Lower it to trade eval "
                     "fidelity for speed; the scripted expert needs ~460 steps.")
 
+g = parser.add_argument_group("network architecture")
+g.add_argument("--paper-arch", dest="paper_arch", action="store_true",
+               help="use the original lambda-discrepancy PocMan network "
+                    "(DiscreteActorCriticRNN in lamb/models.py): a "
+                    "Dense(H)->ReLU embedding over [obs | prev-action], a "
+                    "GRU(H) memory, and single-hidden-layer actor/critic heads "
+                    "of width H, with no critic LayerNorm.  H is "
+                    "--memory-hidden-dim (the paper uses 512).  Overrides "
+                    "--projection-dim, the head widths and --critic-layer-norm. "
+                    "Default on; --no-paper-arch restores the previous "
+                    "(256, 256) heads with LayerNorm.")
+g.add_argument("--no-paper-arch", dest="paper_arch", action="store_false")
+parser.set_defaults(paper_arch=True)
+g.add_argument("--lambda1", type=float, default=0.5,
+               help="lambda of the first lambda-critic (default 0.5)")
+g.add_argument("--lambda2", type=float, default=0.95,
+               help="lambda of the second lambda-critic (default 0.95).  The "
+                    "pair (0.5, 0.95) is what the reference implementation "
+                    "selected for PocMan (pocman_LD_ppo_best.py).")
+
 g = parser.add_argument_group("scripted expert (pocman_expert.py)")
 g.add_argument("--expert-safety-margin", type=int, default=5,
                help="the expert never steps within this many cells of a live ghost")
@@ -68,7 +88,7 @@ common.add_common_args(
 parser.set_defaults(
     rounds=8, gamma=0.95, tau=0.006,
     fe_lr=7e-5, actor_lr=6e-5, critic_lr=2e-4,
-    memory_hidden_dim=750, batch_size=512,
+    memory_hidden_dim=512, batch_size=512,   # 512 = the paper's hidden_size
     sequence_length=20, burn_in_length=32, online_buffer_size=200_000,
 )
 
@@ -90,6 +110,9 @@ _wandb = common.init_wandb(args, {
     "eval_max_steps": args.eval_max_steps,
     "expert_safety_margin": args.expert_safety_margin,
     "expert_rollout_depth": args.expert_rollout_depth,
+    "paper_arch": args.paper_arch,
+    "lambda1": args.lambda1,
+    "lambda2": args.lambda2,
     **common.common_wandb_config(args),
 }, _SWEEP_RUN)
 
@@ -287,7 +310,8 @@ if not args.vis_only:
         sys.exit("lambda-envs[pocman] required.  pip install 'lambda-envs[pocman]'")
 
     from lambda_imitation.iqlearn import Hyperparameters
-    from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
+    from lambda_imitation.utils import (create_iqlearn_from_env,
+                                        env_spec_from_gymnax, relu_projection)
     from pocman_expert import make_pocman_expert
 
     # ── env setup ────────────────────────────────────────────────────────────
@@ -357,7 +381,19 @@ if not args.vis_only:
     if CARRY_DIM == 0:
         sys.exit("Probe needs recurrent memory (--memory-type rnn/gru/lstm), not identity.")
 
-    projection_arg = args.projection_dim if args.projection_dim > 0 else None
+    # --paper-arch reproduces DiscreteActorCriticRNN: one Dense(H)->ReLU
+    # embedding, a GRU(H), single-hidden heads of width H, and no critic
+    # LayerNorm.  Otherwise the default LinearProjection (no activation) with
+    # (256, 256) heads.
+    if args.paper_arch:
+        H = args.memory_hidden_dim
+        projection_arg = relu_projection(H)
+        actor_dims = critic_dims = (H,)
+        critic_layer_norm = False
+    else:
+        projection_arg = args.projection_dim if args.projection_dim > 0 else None
+        actor_dims = critic_dims = (256, 256)
+        critic_layer_norm = args.critic_layer_norm
 
     def zero_carry():
         return jnp.zeros((CARRY_DIM,), dtype=jnp.float32)
@@ -375,7 +411,7 @@ if not args.vis_only:
         lambda_critic_lr=args.critic_lr, alpha_lr=1e-4,
         alpha=args.alpha, autotune_alpha=args.autotune_alpha,
         batch_size=args.batch_size, gamma=args.gamma, tau=args.tau,
-        lambda1=0.05, lambda2=0.8,
+        lambda1=args.lambda1, lambda2=args.lambda2,
         c_bar=1.17, rho_bar=1.15, lambda_truncation=17,
         sequence_length=args.sequence_length,
         burn_in_length=args.burn_in_length,
@@ -406,14 +442,14 @@ if not args.vis_only:
             projection=projection_arg,
             memory_type=args.memory_type,
             memory_hidden_dim=args.memory_hidden_dim,
-            actor_dims=(256, 256),
-            critic_dims=(256, 256),
-            lambda1_critic_dims=(256, 256),
-            lambda2_critic_dims=(256, 256),
+            actor_dims=actor_dims,
+            critic_dims=critic_dims,
+            lambda1_critic_dims=critic_dims,
+            lambda2_critic_dims=critic_dims,
             train_steps=args.train_steps,
             approximate_lambda=args.approximate_lambda,
             use_prev_action=True,
-            critic_layer_norm=args.critic_layer_norm,
+            critic_layer_norm=critic_layer_norm,
             burn_in_from_stored_carry=args.burn_in_from_stored_carry,
             use_gvd=args.gvd, gvd_feature_fn=gvd_feature_fn,
             gvd_sf_dims=(256, 256),

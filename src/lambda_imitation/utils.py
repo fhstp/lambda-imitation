@@ -212,6 +212,53 @@ class BattleshipProjection(nnx.Module):
         return e
 
 
+class ReluProjection(nnx.Module):
+    """``Dense(hidden) -> ReLU`` over ``concat([flatten(obs), prev_action])``.
+
+    The embedding layer of the original lambda-discrepancy
+    ``DiscreteActorCriticRNN`` (``lamb/models.py``), which the PocMan agent of
+    that paper uses: a single dense layer with a ReLU before the GRU.  Our
+    default :class:`LinearProjection` is the same map *without* the activation,
+    which is the R2D2/DRQN convention -- so reproducing the paper needs this one.
+
+    Args:
+        hidden_size: Embedding width (the paper ties it to the cell width).
+        flat_in: Flattened observation width.
+        prev_action_dim: Width of the prev-action encoding (``0`` = obs only).
+        rngs: Flax NNX RNG container.
+    """
+
+    def __init__(self, hidden_size: int, flat_in: int, prev_action_dim: int, *,
+                 rngs: nnx.Rngs):
+        self.linear = nnx.Linear(flat_in + prev_action_dim, hidden_size, rngs=rngs)
+
+    def __call__(self, obs: jax.Array, prev_action: jax.Array | None) -> jax.Array:
+        x = obs.reshape(obs.shape[0], -1)
+        if prev_action is not None and prev_action.shape[-1]:
+            x = jnp.concatenate([x, prev_action], axis=-1)
+        return jax.nn.relu(self.linear(x))
+
+
+def relu_projection(hidden_size: int) -> Callable[..., nnx.Module]:
+    """Projection builder for the original ``DiscreteActorCriticRNN`` embedding.
+
+    Returns a callable with the ``(obs_shape, prev_action_dim, rngs) ->
+    nnx.Module`` signature :class:`RecurrentFeatureExtractor` expects.  Pair it
+    with ``memory_type="gru"``, ``memory_hidden_dim=hidden_size``, single-hidden
+    actor/critic heads of width ``hidden_size`` and ``critic_layer_norm=False``
+    to reproduce the paper's PocMan network.
+
+    Args:
+        hidden_size: Embedding / cell / head width ``H`` (the paper uses 512).
+    """
+
+    def build(obs_shape, prev_action_dim, rngs):
+        return ReluProjection(
+            hidden_size, math.prod(obs_shape), prev_action_dim, rngs=rngs)
+
+    return build
+
+
 def battleship_projection(
     hidden_size: int, extra_layer: bool = False
 ) -> Callable[..., nnx.Module]:
