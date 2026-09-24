@@ -30,12 +30,10 @@ from lambda_imitation.utils import (
     env_spec_from_gymnax,
 )
 
-
 OBS_DIM = 5
 ACTION_DIM = 3
 HIDDEN = 8
 MEMORY_TYPES = ("identity", "rnn", "gru", "lstm")
-
 
 def _make_fe(memory_type, prev_action_dim, projection=16, seed=0):
     return RecurrentFeatureExtractor(
@@ -47,7 +45,6 @@ def _make_fe(memory_type, prev_action_dim, projection=16, seed=0):
         rngs=nnx.Rngs(jax.random.key(seed)),
     )
 
-
 def _memory_dim(memory_type):
     if memory_type == "identity":
         return 0
@@ -55,11 +52,9 @@ def _memory_dim(memory_type):
         return 2 * HIDDEN
     return HIDDEN
 
-
 # ---------------------------------------------------------------------------
 # Carry layout / shapes
 # ---------------------------------------------------------------------------
-
 
 class TestCarryLayout:
     @pytest.mark.parametrize("memory_type", MEMORY_TYPES)
@@ -102,11 +97,9 @@ class TestCarryLayout:
         with pytest.raises(ValueError, match="prev_action_dim"):
             _make_fe("gru", -1)
 
-
 # ---------------------------------------------------------------------------
 # Projection module semantics
 # ---------------------------------------------------------------------------
-
 
 class TestProjection:
     def test_default_linear_matches_manual_concat(self):
@@ -171,11 +164,9 @@ class TestProjection:
         assert new_carry.shape == (2, fe.carry_dim)
         assert y.shape == (2, fe.output_dim)
 
-
 # ---------------------------------------------------------------------------
 # Equivalence with the original ActionConcatWrapper formulation
 # ---------------------------------------------------------------------------
-
 
 class TestWrapperEquivalence:
     """Explicit prev-action input == action one-hot concatenated to the obs.
@@ -227,23 +218,19 @@ class TestWrapperEquivalence:
             ref_carry = jnp.where(reset, 0.0, ref_carry)
             prev_enc = jnp.where(reset, 0.0, enc)
 
-
 # ---------------------------------------------------------------------------
 # Agent-level tests (discrete, CartPole)
 # ---------------------------------------------------------------------------
-
 
 def _tiny_hp():
     return Hyperparameters(
         target_entropy=0.2,
         batch_size=4,
-        online_batch_size=4,
         online_buffer_size=256,
         burn_in_length=2,
         sequence_length=4,
         lambda_truncation=2,
     )
-
 
 @pytest.fixture(scope="module")
 def cartpole_agent():
@@ -270,7 +257,6 @@ def cartpole_agent():
     )
     return env, env_params, spec, state, fns, debug_fns
 
-
 class TestPredict:
     def test_returns_memory_only_carry(self, cartpole_agent):
         env, env_params, spec, state, fns, _ = cartpole_agent
@@ -292,7 +278,6 @@ class TestPredict:
         _, _, spec, _, fns, _ = cartpole_agent
         enc = fns.encode_action(jnp.array([2.0]))
         assert jnp.array_equal(enc, jax.nn.one_hot(2, spec.action_dim))
-
 
 class TestCalculateLatent:
     def test_latent_matches_manual_unroll(self, cartpole_agent):
@@ -348,7 +333,6 @@ class TestCalculateLatent:
         # differently from this eager reference loop; a logic error (wrong
         # prev-action shift / reset) would diff by O(0.1+), not O(1e-4).
         assert jnp.allclose(latent, manual, atol=1e-3)
-
 
 class TestValidation:
     def test_mismatched_fe_raises(self):
@@ -414,7 +398,6 @@ class TestValidation:
                 is_discrete=True,
                 use_prev_action=False,
             )
-
 
 class TestEndToEnd:
     def test_train_round_finite_metrics(self, cartpole_agent):

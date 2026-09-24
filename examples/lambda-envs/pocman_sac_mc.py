@@ -391,7 +391,6 @@ from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 # arg.  No env behaviour changes: PocMan's get_obs never reads params, and
 # reset/step pass through unchanged via __getattr__.
 
-
 class _LambdaEnvAdapter:
     def __init__(self, wrapped):
         self._wrapped = wrapped
@@ -401,7 +400,6 @@ class _LambdaEnvAdapter:
 
     def __getattr__(self, name):
         return getattr(self._wrapped, name)
-
 
 # ── environment setup ─────────────────────────────────────────────────────────
 
@@ -451,7 +449,7 @@ if args.wandb_sweep:
     args.gvd_coef = sc.get("gvd_coef", args.gvd_coef)
 
     hp = Hyperparameters(
-        online_batch_size=128,
+        batch_size=128,
         online_buffer_size=sc.get("online_buffer_size", args.online_buffer_size),
         target_entropy=sc.get("target_entropy", args.target_entropy),
         fe_lr=sc.get("fe_lr", args.fe_lr),
@@ -482,7 +480,7 @@ if args.wandb_sweep:
     )
 else:
     hp = Hyperparameters(
-        online_batch_size=128,
+        batch_size=128,
         online_buffer_size=args.online_buffer_size,
         target_entropy=args.target_entropy,
         fe_lr=args.fe_lr,
@@ -492,7 +490,6 @@ else:
         alpha_lr=args.alpha_lr,
         alpha=args.alpha,
         autotune_alpha=args.autotune_alpha,
-        batch_size=args.batch_size,
         gamma=0.95,
         tau=args.tau,
         lambda1=0.05,
@@ -545,20 +542,15 @@ PREV_ACTION_DIM = spec.action_dim if args.use_prev_action else 0
 
 projection_dim = args.projection_dim if args.projection_dim > 0 else None
 
-
 def zero_carry() -> jax.Array:
     return jnp.zeros((CARRY_DIM,), dtype=jnp.float32)
-
 
 def zero_prev_action() -> jax.Array:
     return jnp.zeros((PREV_ACTION_DIM,), dtype=jnp.float32)
 
-
 # ── evaluation helper ─────────────────────────────────────────────────────────
 
-
 _MAX_STEPS = int(env_params.max_steps_in_episode)
-
 
 def _make_evaluate(fns):
     """Build a JIT-compiled evaluator that uses lax.scan + vmap."""
@@ -611,7 +603,6 @@ def _make_evaluate(fns):
 
     return _evaluate
 
-
 # ── agent factory (shared across seeds) ─────────────────────────────────────
 
 _AGENT_KWARGS = dict(
@@ -633,10 +624,8 @@ _AGENT_KWARGS = dict(
     debug=True,
 )
 
-
 def _build_agent(seed_val: int):
     return create_iqlearn_from_env(spec, expert_data, **_AGENT_KWARGS, seed=seed_val)
-
 
 # ── vmapped multi-seed training ───────────────────────────────────────────────
 #
@@ -649,21 +638,18 @@ def _build_agent(seed_val: int):
 # buffer is instead pre-filled explicitly per seed before the round loop.
 
 # Transitions collected before training, matching fns.train's auto-prefill size.
-PREFILL_STEPS = hp.online_batch_size * (
+PREFILL_STEPS = hp.batch_size * (
     hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
 )
-
 
 def _stack_states(states):
     """Stack a list of per-seed pytrees along a new leading axis."""
     return jax.tree.map(lambda *xs: jnp.stack(xs), *states)
 
-
 def _split_each(keys):
     """Split a batch of PRNG keys, returning two batches (carry, fresh)."""
     out = jax.vmap(lambda k: jax.random.split(k))(keys)
     return out[:, 0], out[:, 1]
-
 
 # ── wandb (non-sweep init) ───────────────────────────────────────────────────
 
@@ -750,10 +736,8 @@ _train_v = jax.jit(
     donate_argnums=(0, 1),
 )
 
-
 def _evaluate_v(states, keys, n_episodes):
     return jax.vmap(lambda s, k: evaluate(s, k, n_episodes=n_episodes))(states, keys)
-
 
 def run_group(group_idx: int, group: list) -> list:
     """Train one group of ``CONCURRENT`` seeds concurrently; return finals.
@@ -845,7 +829,6 @@ def run_group(group_idx: int, group: list) -> list:
             f"mean_return={float(final_returns_b[j]):.1f}"
         )
     return [(gi, float(final_returns_b[j])) for j, gi in enumerate(idxs)]
-
 
 indexed_seeds = list(enumerate(seeds))
 groups = [

@@ -26,15 +26,12 @@ import pytest
 from lambda_imitation.iqlearn import Hyperparameters, carry_key, prev_action_key
 from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
-
 HIDDEN = 8
-
 
 def _tiny_hp(**overrides):
     base = dict(
         target_entropy=0.2,
         batch_size=4,
-        online_batch_size=4,
         online_buffer_size=256,
         burn_in_length=2,
         sequence_length=4,
@@ -42,7 +39,6 @@ def _tiny_hp(**overrides):
     )
     base.update(overrides)
     return Hyperparameters(**base)
-
 
 def _make_agent(stored_carry, seed=0, hp=None, train_steps=4):
     env, env_params = gymnax.make("CartPole-v1")
@@ -69,12 +65,11 @@ def _make_agent(stored_carry, seed=0, hp=None, train_steps=4):
     )
     return env, env_params, spec, state, fns, debug_fns
 
-
 def _prefill(env, env_params, state, fns, key):
     key, reset_key, prefill_key = jax.random.split(key, 3)
     _, env_state = env.reset(reset_key, env_params)
     hp = _tiny_hp()
-    n = hp.online_batch_size * (
+    n = hp.batch_size * (
         hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
     )
     state, env_state = fns.prefill_buffer(
@@ -82,15 +77,12 @@ def _prefill(env, env_params, state, fns, key):
     )
     return state, env_state, key
 
-
 CARRY_DIM = HIDDEN  # GRU(8); the prev-action is threaded separately, not in carry
 ACTION_DIM = 2  # CartPole prev-action one-hot width
-
 
 # ---------------------------------------------------------------------------
 # Buffer schema
 # ---------------------------------------------------------------------------
-
 
 class TestSchema:
     def test_buffer_has_carry_key_when_enabled(self):
@@ -106,11 +98,9 @@ class TestSchema:
         assert carry_key not in state.online_buffer.info
         assert prev_action_key not in state.online_buffer.info
 
-
 # ---------------------------------------------------------------------------
 # Equivalence: stored zeros == zero init
 # ---------------------------------------------------------------------------
-
 
 class TestEquivalence:
     def test_prefill_carries_zero_and_equivalent_update(self):
@@ -142,11 +132,9 @@ class TestEquivalence:
                 f"metric {k} diverged: {m_off[k]} vs {m_on[k]}"
             )
 
-
 # ---------------------------------------------------------------------------
 # Alignment of stored carries with episode structure
 # ---------------------------------------------------------------------------
-
 
 class TestAlignment:
     @pytest.fixture(scope="class")
@@ -176,7 +164,7 @@ class TestAlignment:
         terminated = np.array(info["terminated"])
         carries = np.array(info[carry_key])
         hp = _tiny_hp()
-        prefill_n = hp.online_batch_size * (
+        prefill_n = hp.batch_size * (
             hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
         )
         checked = 0
@@ -196,18 +184,16 @@ class TestAlignment:
         pos = int(trained_buffer.pos)
         carries = np.array(info[carry_key])
         hp = _tiny_hp()
-        prefill_n = hp.online_batch_size * (
+        prefill_n = hp.batch_size * (
             hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
         )
         rollout = carries[prefill_n:pos]
         assert rollout.shape[0] > 0
         assert np.any(rollout != 0.0)
 
-
 # ---------------------------------------------------------------------------
 # End-to-end
 # ---------------------------------------------------------------------------
-
 
 class TestEndToEnd:
     def test_train_round_finite_metrics(self):

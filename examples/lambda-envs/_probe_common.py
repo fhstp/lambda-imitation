@@ -25,9 +25,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-
 # ── CLI ──────────────────────────────────────────────────────────────────────
-
 
 def add_common_args(parser, *, output_dir_default, wandb_project_default):
     """Add every flag that is not environment-specific.
@@ -274,7 +272,6 @@ def add_common_args(parser, *, output_dir_default, wandb_project_default):
     g.add_argument("--wandb-run-name", default=None)
     return parser
 
-
 def parse_args(parser, *, extra_flags_env):
     """Parse argv strictly: rewrite underscore flags, reject unknown ones.
 
@@ -323,7 +320,6 @@ def parse_args(parser, *, extra_flags_env):
         )
     return args
 
-
 def apply_sweep_config(parser, args):
     """Under ``wandb agent``, override args from the sweep config.
 
@@ -364,7 +360,6 @@ def apply_sweep_config(parser, args):
     print(f"sweep run {sweep_run.id}: output_dir → {args.output_dir}")
     return sweep_run
 
-
 def common_wandb_config(args):
     """The env-independent half of the W&B config; the caller adds its own."""
     return {
@@ -391,7 +386,6 @@ def common_wandb_config(args):
         "gvd_stop_fe": args.gvd_stop_fe,
         "stop_actor_fe": args.stop_actor_fe,
         "batch_size": args.batch_size,
-        "online_batch_size": args.batch_size,
         "sequence_length": args.sequence_length,
         "burn_in_length": args.burn_in_length,
         "burn_in_from_stored_carry": args.burn_in_from_stored_carry,
@@ -419,7 +413,6 @@ def common_wandb_config(args):
         "concurrent_seeds": args.concurrent_seeds,
         "final_return_window": args.final_return_window,
     }
-
 
 def init_wandb(args, config, sweep_run):
     """Start (or attach to) the W&B run and declare the metric axes.
@@ -456,9 +449,7 @@ def init_wandb(args, config, sweep_run):
             _wandb.define_metric(f"seed_{_i}/*", step_metric="env_interactions")
     return _wandb
 
-
 # ── probe MLP (pure JAX — no external deps) ──────────────────────────────────
-
 
 def init_probe_params(key, carry_dim, n_out, hidden=1024):
     k1, k2, k3 = jax.random.split(key, 3)
@@ -475,12 +466,10 @@ def init_probe_params(key, carry_dim, n_out, hidden=1024):
         "l3": layer(k3, hidden, n_out),
     }
 
-
 def probe_forward(params, x):
     x = jax.nn.relu(x @ params["l1"]["w"] + params["l1"]["b"])
     x = jax.nn.relu(x @ params["l2"]["w"] + params["l2"]["b"])
     return x @ params["l3"]["w"] + params["l3"]["b"]
-
 
 def auroc(scores, labels):
     """Threshold-free separability: P(score[positive] > score[negative]).
@@ -499,7 +488,6 @@ def auroc(scores, labels):
     ranks = np.empty(scores.size, dtype=np.float64)
     ranks[order] = np.arange(1, scores.size + 1)
     return float((ranks[labels].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
-
 
 def make_probe_trainer(optimiser, *, carry_dim, n_out, hidden, batch_size,
                        tqdm=None, wandb=None):
@@ -582,7 +570,6 @@ def make_probe_trainer(optimiser, *, carry_dim, n_out, hidden, batch_size,
 
     return train, train_v, train_chunk
 
-
 # ── probe metrics ────────────────────────────────────────────────────────────
 #
 # An OBSERVED cell was directly seen by the memory (the agent acted on it and
@@ -592,7 +579,6 @@ def make_probe_trainer(optimiser, *, carry_dim, n_out, hidden, batch_size,
 # of how long ago they were observed (the retention horizon).
 
 AGE_BUCKETS = [(0, 2), (3, 5), (6, 10), (11, 20), (21, 35), (36, 10 ** 6)]
-
 
 def cell_ages(observed, ep_bounds):
     """Steps since each observed cell was first observed (-1 if never).
@@ -615,7 +601,6 @@ def cell_ages(observed, ep_bounds):
         a = t - first[None, :]
         ages[s0:s1] = np.where(seg & ever[None, :], a, -1)
     return ages
-
 
 def probe_metrics_from_probs(probs_all, t_truth, t_observed, t_eb=None, *, n_cells):
     """Headline decodability metrics from precomputed host probabilities.
@@ -690,12 +675,10 @@ def probe_metrics_from_probs(probs_all, t_truth, t_observed, t_eb=None, *, n_cel
         "fired_pred_acc": float((fired_pred == fired_targets).mean()),
     }
 
-
 def probe_metrics(probe_params, t_carries, t_truth, t_observed, t_eb=None, *, n_cells):
     """Headline decodability metrics on a held-out test set (no plots)."""
     probs_all = np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(t_carries))))
     return probe_metrics_from_probs(probs_all, t_truth, t_observed, t_eb, n_cells=n_cells)
-
 
 def probe_metrics_visitation(probs_all, t_truth, t_eb=None):
     """Metrics for a target the agent itself consumes (PocMan pellets).
@@ -754,7 +737,6 @@ def probe_metrics_visitation(probs_all, t_truth, t_eb=None):
         out["horizon_steps"] = horizon
     return out
 
-
 def agg(values, prefix):
     """mean / std / sterr (+ band edges) of per-seed scalars (NaN-safe).
 
@@ -782,28 +764,23 @@ def agg(values, prefix):
         f"{prefix}/hi_se": mean + sterr,
     }
 
-
 # ── multi-seed plumbing ──────────────────────────────────────────────────────
 #
 # Concurrent seeds are trained in one vmapped+jitted kernel: per-seed agent
 # states are stacked along a leading axis, vmapped over, then split back out.
 
-
 def stack_states(states):
     """Stack a list of per-seed pytrees along a new leading axis."""
     return jax.tree.map(lambda *xs: jnp.stack(xs), *states)
-
 
 def unstack_state(batched, j):
     """Pull seed ``j``'s pytree out of a leading-axis-batched state."""
     return jax.tree.map(lambda x: x[j], batched)
 
-
 def split_each(keys):
     """Split a batch of PRNG keys, returning two batches (carry, fresh)."""
     out = jax.vmap(lambda k: jax.random.split(k))(keys)
     return out[:, 0], out[:, 1]
-
 
 def episode_bounds(dones, length):
     """Indices delimiting complete episodes in a flat rollout."""
@@ -812,9 +789,7 @@ def episode_bounds(dones, length):
     es = es[es < length]
     return np.concatenate([es, [length]])
 
-
 # ── feature-extractor checkpointing ──────────────────────────────────────────
-
 
 def make_fe_checkpointer(init_fe_path, output_dir):
     """Build (transplant_fe, save_fe) for --init-fe / --save-fe-every-eval."""
@@ -854,9 +829,7 @@ def make_fe_checkpointer(init_fe_path, output_dir):
 
     return transplant_fe, save_fe
 
-
 # ── evaluators ───────────────────────────────────────────────────────────────
-
 
 def make_evaluate(fns, env, env_params, *, zero_carry, zero_prev_action, max_steps):
     """Actor-greedy evaluation: mean return, mean steps-to-done, done fraction."""
@@ -896,7 +869,6 @@ def make_evaluate(fns, env, env_params, *, zero_carry, zero_prev_action, max_ste
         return jnp.mean(rets), jnp.mean(steps), jnp.mean(dones)
 
     return _evaluate
-
 
 def make_evaluate_critic(debug_fns, env, env_params, *, zero_carry, zero_prev_action,
                          max_steps, num_actions, mask_fn=None):
@@ -954,9 +926,7 @@ def make_evaluate_critic(debug_fns, env, env_params, *, zero_carry, zero_prev_ac
 
     return _evaluate
 
-
 # ── multi-seed training loop ─────────────────────────────────────────────────
-
 
 def run_seed_group(*, rounds, train_steps, keys, batched, env_state, zero_carry_b,
                    train_v, round_eval, on_round, probe=None, probe_interval=0,
@@ -1008,7 +978,6 @@ def run_seed_group(*, rounds, train_steps, keys, batched, env_state, zero_carry_
         if qpi_host is not None:
             qpi.render(qpi_host)
     return batched, keys
-
 
 class Hooks:
     """A (compute → host, render) pair for the periodic probe / heatmap visuals."""

@@ -140,13 +140,11 @@ PLAYER_COLOR = "#4cc9f0"
 CMAP_PELLET = LinearSegmentedColormap.from_list("pellet", [FLOOR_COLOR, PELLET_COLOR])
 CMAP_ACC = LinearSegmentedColormap.from_list("acc", ["#c1121f", "#f6e05e", "#2d936c"])
 
-
 def to_grid(values, cells, wall_grid, fill=np.nan):
     """Scatter per-pellet values onto the maze grid (walls stay ``fill``)."""
     grid = np.full(wall_grid.shape, fill, dtype=np.float32)
     grid[cells[:, 0], cells[:, 1]] = values
     return grid
-
 
 def render(ax, grid, wall_grid, title="", player=None, cmap=CMAP_PELLET,
            vmin=0.0, vmax=1.0):
@@ -163,13 +161,11 @@ def render(ax, grid, wall_grid, title="", player=None, cmap=CMAP_PELLET,
     for s in ax.spines.values():
         s.set_visible(False)
 
-
 def _figure(nrows, ncols, size=1.6):
     fig, axes = plt.subplots(nrows, ncols,
                              figsize=(size * ncols, size * 1.15 * nrows))
     fig.patch.set_facecolor("#05070a")
     return fig, np.atleast_2d(axes)
-
 
 def _save(fig, out_path, tag_str):
     fig.suptitle(tag_str, fontsize=9, color="white")
@@ -179,13 +175,11 @@ def _save(fig, out_path, tag_str):
     print(f"  → {out_path}")
     return out_path
 
-
 def _probs_for(probe_params, carries, probs_all=None):
     """P(pellet) per step, either precomputed on host or run from params."""
     if probs_all is not None:
         return np.asarray(probs_all)
     return np.array(jax.nn.sigmoid(probe_forward(probe_params, jnp.array(carries))))
-
 
 def _fig_episode(probe_params, carries, truth, players, ep_bounds, ve_idx, out_path,
                  tag_str, n_frames, cells, wall_grid, probs_all=None):
@@ -206,7 +200,6 @@ def _fig_episode(probe_params, carries, truth, players, ep_bounds, ve_idx, out_p
                "P(pellet)", player=(players[s0 + t, 0], players[s0 + t, 1]))
     return _save(fig, out_path, f"{tag_str} — pellet memory")
 
-
 def _fig_accuracy(probe_params, carries, truth, out_path, tag_str, cells, wall_grid,
                   probs_all=None):
     """Per-cell decode accuracy over the whole test set."""
@@ -219,7 +212,6 @@ def _fig_accuracy(probe_params, carries, truth, out_path, tag_str, cells, wall_g
     render(axes[0, 1], to_grid(eaten_rate, cells, wall_grid), wall_grid,
            "fraction of steps this cell was already eaten")
     return _save(fig, out_path, f"{tag_str} — decode accuracy")
-
 
 def _fig_retention(probe_params, carries, truth, ep_bounds, out_path, tag_str,
                    probs_all=None):
@@ -254,7 +246,6 @@ def _fig_retention(probe_params, carries, truth, ep_bounds, out_path, tag_str,
     return _save(fig, out_path, f"{tag_str} — retention horizon "
                                 f"({m['horizon_steps']:.0f} steps)")
 
-
 def _fig_movie(probe_params, carries, truth, players, out_path_base, tag_str,
                cells, wall_grid, fps=10, probs_all=None):
     """Animate one episode: truth | decoded, side by side."""
@@ -286,15 +277,12 @@ def _fig_movie(probe_params, carries, truth, players, out_path_base, tag_str,
     print("  (no mp4/gif writer available)")
     return None
 
-
 # ── output paths ─────────────────────────────────────────────────────────────
 
 os.makedirs(args.output_dir, exist_ok=True)
 
-
 def _seed_path(kind, gi):
     return os.path.join(args.output_dir, f"{kind}_seed{gi}.pkl")
-
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Full pipeline (phases 1-3) — skipped entirely in --vis-only
@@ -404,13 +392,13 @@ if not args.vis_only:
     # ── hyperparameters ──────────────────────────────────────────────────────
 
     hp = Hyperparameters(
-        online_batch_size=args.batch_size,
+        batch_size=args.batch_size,
         online_buffer_size=args.online_buffer_size,
         target_entropy=args.target_entropy,
         fe_lr=args.fe_lr, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
         lambda_critic_lr=args.critic_lr, alpha_lr=1e-4,
         alpha=args.alpha, autotune_alpha=args.autotune_alpha,
-        batch_size=args.batch_size, gamma=args.gamma, tau=args.tau,
+        gamma=args.gamma, tau=args.tau,
         lambda1=args.lambda1, lambda2=args.lambda2,
         c_bar=1.17, rho_bar=1.15, lambda_truncation=17,
         sequence_length=args.sequence_length,
@@ -568,7 +556,7 @@ if not args.vis_only:
     # fns.train has host-side control flow (auto-prefill) and is NOT vmappable;
     # use the vmap-safe split — prefill the buffer once, then run the jittable
     # fns.train_unrolled each round with a per-round zero env_carry.
-    PREFILL_STEPS = hp.online_batch_size * (
+    PREFILL_STEPS = hp.batch_size * (
         hp.lambda_truncation + hp.sequence_length + hp.burn_in_length)
     _PREFILL_N = max(PREFILL_STEPS, args.expert_prefill_steps)
     _reset_v = jax.jit(jax.vmap(lambda k: env.reset(k, env_params)))
@@ -902,7 +890,6 @@ if not args.vis_only:
         _wandb.finish()
     print("Done.")
     sys.exit(0)
-
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Vis-only: render from saved artefacts (needs only jax + matplotlib)

@@ -316,7 +316,7 @@ class SACFunctions(NamedTuple):
             change-of-variables as :attr:`get_importance_ratios`.  The last
             step is force-terminated so that all ``n_steps`` slots are
             immediately sampleable.  Called automatically by :attr:`train`
-            when the online buffer has fewer than ``params.online_batch_size``
+            when the online buffer has fewer than ``params.batch_size``
             sampleable transitions.
         train_unrolled: ``(state, env, env_params, env_state, env_carry, key)
             -> (state, env_state, env_carry, metrics)`` -- the un-jitted body
@@ -408,17 +408,17 @@ class Hyperparameters(NamedTuple):
             this is only the starting value.
         autotune_alpha: If True, alpha is continuously adjusted to match
             ``target_entropy``.  If False, alpha is held fixed.
-        batch_size: Number of expert transitions sampled per gradient step
-            (reserved for the IQ-Learn objective; currently unused by the
-            SAC-only loss).
         gamma: Discount factor for future rewards.
         target_entropy: Desired policy entropy used by the alpha loss.  For
             continuous spaces a common heuristic is ``-action_dim``; for
             discrete spaces ``0.98 * log(num_actions)`` (Christodoulou 2019).
         online_buffer_size: Capacity of the circular online replay buffer.
-        online_batch_size: Number of sequences sampled per gradient step.
-            :func:`train` automatically pre-fills the buffer with at least
-            this many random transitions on the first call.
+        batch_size: Number of sequences sampled from the online buffer per
+            gradient step.  :func:`train` automatically pre-fills the buffer
+            with at least this many random transitions on the first call.
+            (Until 2026-09 this was ``online_batch_size``, alongside a dead
+            ``batch_size`` left over from the IQ-Learn expert objective; the
+            dead one is gone and this one took its name.)
         tau: Soft update coefficient for EMA target networks.
         lambda1: First V-trace λ value (typically near 0 — short horizon).
         lambda2: Second V-trace λ value (typically near 1 — long horizon).
@@ -455,11 +455,10 @@ class Hyperparameters(NamedTuple):
     alpha_lr: float = 1e-4
     alpha: float = 0.2
     autotune_alpha: bool = False
-    batch_size: int = 256
     gamma: float = 0.99
     target_entropy: float = -1
     online_buffer_size: int = 10_000
-    online_batch_size: int = 256
+    batch_size: int = 256
     tau: float = 0.005
     periodic_update: int = 1
     lambda1: float = 0.1
@@ -941,7 +940,7 @@ def create_iqlearn(
     online_buffer, online_buffer_functions = create_buffer(
         online_shapes,
         params.online_buffer_size,
-        params.online_batch_size,
+        params.batch_size,
         online_this_keys,
         online_next_keys,
     )
@@ -977,7 +976,7 @@ def create_iqlearn(
 
     online_buffer_lambda_sample = create_prioritised_sequence_sample(
         online_buffer.size,
-        params.online_batch_size,
+        params.batch_size,
         params.burn_in_length + params.sequence_length + params.lambda_truncation,
         online_mc_this_keys,
         alpha=params.per_alpha,
@@ -2597,7 +2596,7 @@ def create_iqlearn(
             )
         else:
             init_carries = feature_extractor.initialize_carry(
-                params.online_batch_size
+                params.batch_size
             )
             init_prev_actions = None
 
@@ -2866,7 +2865,7 @@ def create_iqlearn(
         λ1-critic / λ2-critic optimizers.  Also runs the optional alpha
         update (when ``params.autotune_alpha``) and the EMA target updates
         for all networks.  The online buffer must already hold at least
-        ``params.online_batch_size`` sampleable transitions (guaranteed by
+        ``params.batch_size`` sampleable transitions (guaranteed by
         :func:`prefill_buffer`, which :func:`train` calls automatically when
         the buffer is cold).
 
@@ -3138,7 +3137,7 @@ def create_iqlearn(
         invocation (via the ``_train_jit`` inner function).
 
         A Python-level check is performed on every call to ensure the online
-        buffer is warm (at least ``params.online_batch_size`` sampleable
+        buffer is warm (at least ``params.batch_size`` sampleable
         transitions).  If the buffer is cold, :func:`prefill_buffer` is called
         automatically with the provided environment before the JIT-compiled
         training loop runs.  This happens transparently on the first call when
@@ -3159,10 +3158,10 @@ def create_iqlearn(
             the mean over all ``train_steps`` steps.
         """
         n_ok = int(sac.online_buffer.sampling_ok.sum())
-        if n_ok < params.online_batch_size:
+        if n_ok < params.batch_size:
             key, prefill_key = jax.random.split(key)
             sac, env_state = prefill_buffer(
-                sac, env, env_params, env_state, params.online_batch_size*(params.lambda_truncation+params.sequence_length+params.burn_in_length), prefill_key
+                sac, env, env_params, env_state, params.batch_size*(params.lambda_truncation+params.sequence_length+params.burn_in_length), prefill_key
             )
         # Start each train() call from a fresh zero carry.  Inside the scan the
         # carry is reset again on every episode boundary, so the only state lost

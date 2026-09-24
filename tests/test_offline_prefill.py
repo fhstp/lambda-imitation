@@ -22,14 +22,12 @@ from lambda_imitation.iqlearn import Hyperparameters, behaviour_key
 action_key = "actions"   # create_iqlearn default
 from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
-
 def _tiny_agent(seed=0):
     env, env_params = gymnax.make("CartPole-v1")
     spec = env_spec_from_gymnax(env, env_params)
     hp = Hyperparameters(
         target_entropy=0.2,
         batch_size=4,
-        online_batch_size=4,
         online_buffer_size=256,
         burn_in_length=2,
         sequence_length=4,
@@ -47,11 +45,9 @@ def _tiny_agent(seed=0):
     )
     return env, env_params, hp, state, fns
 
-
 @pytest.fixture(scope="module")
 def agent():
     return _tiny_agent()
-
 
 def test_prefill_behaviour_fn_stores_its_actions_and_probabilities(agent):
     env, env_params, hp, state, fns = agent
@@ -75,7 +71,6 @@ def test_prefill_behaviour_fn_stores_its_actions_and_probabilities(agent):
     assert jnp.all(actions == 1.0), actions
     assert jnp.allclose(probs, 0.7), probs
 
-
 def test_prefill_without_behaviour_fn_is_still_uniform_random(agent):
     """The default path must be untouched: uniform over 2 CartPole actions."""
     env, env_params, hp, state, fns = agent
@@ -92,14 +87,13 @@ def test_prefill_without_behaviour_fn_is_still_uniform_random(agent):
     assert jnp.allclose(probs, 0.5), probs
     assert set(jnp.unique(actions).tolist()) <= {0.0, 1.0}
 
-
 def test_update_only_trains_from_the_buffer_with_no_environment(agent):
     env, env_params, hp, state, fns = agent
     key = jax.random.key(2)
     key, reset_key, prefill_key, update_key = jax.random.split(key, 4)
     _obs, env_state = env.reset(reset_key, env_params)
 
-    prefill = hp.online_batch_size * (
+    prefill = hp.batch_size * (
         hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
     )
     state, _env_state = fns.prefill_buffer(

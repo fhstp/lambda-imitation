@@ -66,7 +66,7 @@ from lambda_imitation.iqlearn import Hyperparameters
 
 hp = Hyperparameters(
     batch_size=1,            # expert batch; never used
-    online_batch_size=<B>,   # e.g. 64 or 256
+    batch_size=<B>,          # sequences per gradient step, e.g. 64 or 256
     online_buffer_size=10_000,
     target_entropy=<H>,      # see guidance below
 )

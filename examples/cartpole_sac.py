@@ -112,8 +112,8 @@ expert_data = {
 # ── build agent ───────────────────────────────────────────────────────────────
 
 hp = Hyperparameters(
-    batch_size=1,  # expert buffer sampling size; never used
-    online_batch_size=256,
+    # expert buffer sampling size; never used
+    batch_size=256,
     online_buffer_size=10_000,
     # Christodoulou 2019 discrete target entropy: 0.98 * log(num_actions)
     target_entropy=float(0.98 * math.log(spec.action_dim)),
@@ -139,7 +139,6 @@ obs, env_state = env.reset(reset_key, env_params)
 
 # ── evaluation helper ─────────────────────────────────────────────────────────
 
-
 def evaluate(agent_state, rng_key, n_episodes: int = 10) -> float:
     """Run ``n_episodes`` deterministic episodes; return mean episode return."""
     total = 0.0
@@ -161,7 +160,6 @@ def evaluate(agent_state, rng_key, n_episodes: int = 10) -> float:
             done = bool(done)
         total += ep_return
     return total / n_episodes
-
 
 # ── wandb (optional) ─────────────────────────────────────────────────────────
 

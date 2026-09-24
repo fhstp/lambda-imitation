@@ -25,12 +25,10 @@ from lambda_imitation.utils import (create_iqlearn_from_env, EnvSpec,
 H = 512
 OBS_DIM, NUM_ACTIONS = 11, 4          # PocMan's observation and action space
 
-
 def _kernels(tree):
     return {"".join(str(k) for k in path): tuple(leaf.shape)
             for path, leaf in jax.tree_util.tree_flatten_with_path(tree)[0]
             if getattr(leaf, "ndim", 0) == 2}
-
 
 @pytest.fixture(scope="module")
 def paper_state():
@@ -48,19 +46,16 @@ def paper_state():
         use_sac=False)
     return state
 
-
 def test_embedding_takes_obs_and_prev_action(paper_state):
     """Dense(H) over [obs | prev-action one-hot] — the paper's action_concat."""
     fe = _kernels(paper_state.feature_extractor)
     projection = [v for k, v in fe.items() if "projection" in k]
     assert projection == [(OBS_DIM + NUM_ACTIONS, H)]
 
-
 def test_memory_is_a_gru_of_width_h(paper_state):
     fe = _kernels(paper_state.feature_extractor)
     cell = sorted(v for k, v in fe.items() if "cell" in k)
     assert cell == [(H, 3 * H), (H, 3 * H)]      # input and hidden, 3 gates
-
 
 def test_heads_have_one_hidden_layer_of_width_h(paper_state):
     assert list(_kernels(paper_state.actor).values()) == [(H, H), (H, NUM_ACTIONS)]
@@ -68,12 +63,10 @@ def test_heads_have_one_hidden_layer_of_width_h(paper_state):
     # twin critic: both branches are H -> H -> per-action values
     assert sorted(critic.values()) == [(H, NUM_ACTIONS), (H, NUM_ACTIONS), (H, H), (H, H)]
 
-
 def test_no_layer_norm_anywhere(paper_state):
     names = ["".join(str(k) for k in p) for p, _ in
              jax.tree_util.tree_flatten_with_path(paper_state.critic)[0]]
     assert not [n for n in names if "norm" in n.lower()]
-
 
 def test_relu_projection_actually_applies_the_relu():
     """Our default LinearProjection has no activation; the paper's does."""

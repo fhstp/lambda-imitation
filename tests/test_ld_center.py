@@ -20,12 +20,11 @@ import jax.numpy as jnp
 from lambda_imitation.iqlearn import Hyperparameters
 from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
-
 def _metrics_of_one_update(**hp_overrides):
     env, env_params = gymnax.make("CartPole-v1")
     spec = env_spec_from_gymnax(env, env_params)
     hp = Hyperparameters(
-        target_entropy=0.2, batch_size=4, online_batch_size=4,
+        target_entropy=0.2, batch_size=4,
         online_buffer_size=256, burn_in_length=2, sequence_length=4,
         lambda_truncation=2, **hp_overrides,
     )
@@ -41,7 +40,7 @@ def _metrics_of_one_update(**hp_overrides):
     key = jax.random.key(0)
     key, reset_key, prefill_key, update_key = jax.random.split(key, 4)
     _obs, env_state = env.reset(reset_key, env_params)
-    prefill = hp.online_batch_size * (
+    prefill = hp.batch_size * (
         hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
     )
     state, _ = fns.prefill_buffer(
@@ -50,17 +49,14 @@ def _metrics_of_one_update(**hp_overrides):
     _state, metrics = fns.update_only(state, 1, update_key)
     return {k: float(v) for k, v in metrics.items()}
 
-
 def test_discrepancy_components_are_logged():
     m = _metrics_of_one_update()
     assert "ld_mean" in m and "ld_std" in m, sorted(m)
-
 
 def test_uncentred_loss_is_mean_squared_plus_variance():
     m = _metrics_of_one_update(ld_center=False)
     assert jnp.allclose(m["ld_loss"], m["ld_mean"] ** 2 + m["ld_std"] ** 2,
                         rtol=1e-4, atol=1e-7), m
-
 
 def test_centred_loss_drops_the_bias_and_keeps_the_variance():
     m = _metrics_of_one_update(ld_center=True)

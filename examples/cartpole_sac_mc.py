@@ -150,7 +150,6 @@ from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
 # ── partial observability wrapper ─────────────────────────────────────────────
 
-
 class _PartialObsEnv:
     """Wraps a gymnax CartPole-v1 env to expose only cart position and pole angle.
 
@@ -182,7 +181,6 @@ class _PartialObsEnv:
     def __getattr__(self, name):
         return getattr(self._wrapped, name)
 
-
 # ── environment setup ─────────────────────────────────────────────────────────
 
 env, env_params = gymnax.make("CartPole-v1")
@@ -210,9 +208,9 @@ expert_data = {
 # ── build agent ───────────────────────────────────────────────────────────────
 
 hp = Hyperparameters(
-    batch_size=1,  # expert buffer sampling size; never used
+    # expert buffer sampling size; never used
     alpha=0.05,
-    online_batch_size=32,
+    batch_size=32,
     online_buffer_size=10_000,
     sequence_length=20,
     lambda1=0.05,
@@ -259,11 +257,9 @@ elif args.memory_type == "lstm":
 else:
     CARRY_DIM = args.memory_hidden_dim
 
-
 def zero_carry() -> jax.Array:
     """Zero carry shaped ``(carry_dim,)`` for a single-observation predict()."""
     return jnp.zeros((CARRY_DIM,), dtype=jnp.float32)
-
 
 # ── initial environment reset ─────────────────────────────────────────────────
 
@@ -272,7 +268,6 @@ key, reset_key = jax.random.split(key)
 obs, env_state = env.reset(reset_key, env_params)
 
 # ── evaluation helper ─────────────────────────────────────────────────────────
-
 
 def evaluate(agent_state, rng_key, n_episodes: int = 10) -> float:
     """Run ``n_episodes`` deterministic episodes; return mean episode return."""
@@ -298,7 +293,6 @@ def evaluate(agent_state, rng_key, n_episodes: int = 10) -> float:
             done = bool(done)
         total += ep_return
     return total / n_episodes
-
 
 # ── wandb (optional) ─────────────────────────────────────────────────────────
 

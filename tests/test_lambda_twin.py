@@ -21,12 +21,11 @@ import pytest
 from lambda_imitation.iqlearn import Hyperparameters
 from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
-
 def _agent(seed=0):
     env, env_params = gymnax.make("CartPole-v1")
     spec = env_spec_from_gymnax(env, env_params)
     hp = Hyperparameters(
-        target_entropy=0.2, batch_size=8, online_batch_size=8,
+        target_entropy=0.2, batch_size=8,
         online_buffer_size=512, burn_in_length=2, sequence_length=4,
         lambda_truncation=2, critic_lr=3e-3, lambda_critic_lr=3e-3,
         lambda1=0.05, lambda2=0.85,
@@ -43,20 +42,18 @@ def _agent(seed=0):
     key = jax.random.key(seed)
     key, reset_key, prefill_key = jax.random.split(key, 3)
     _obs, env_state = env.reset(reset_key, env_params)
-    prefill = hp.online_batch_size * (
+    prefill = hp.batch_size * (
         hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
     )
     state, _ = fns.prefill_buffer(
         state, env, env_params, env_state, prefill, prefill_key)
     return state, fns, key
 
-
 def test_twin_gap_is_reported_for_each_lambda_critic():
     state, fns, key = _agent()
     _state, metrics = fns.update_only(state, 1, key)
     assert "lambda0.05_twin_gap:" in metrics, sorted(metrics)
     assert "lambda0.85_twin_gap:" in metrics, sorted(metrics)
-
 
 def test_lambda_branches_do_not_drift_apart_while_training():
     """Both branches are fit to the same target, so the pair must not spread —

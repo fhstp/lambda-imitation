@@ -143,7 +143,6 @@ PRED_MISS_COLOR = np.array([0.35, 0.65, 0.95])  # light blue: predicted fired + 
 SHIP_CMAP = LinearSegmentedColormap.from_list("ship", [WATER_COLOR, SHIP_COLOR])
 ACC_CMAP = LinearSegmentedColormap.from_list("acc", [(1.0, 0.0, 0.15), (0.0, 1.0, 0.15)])
 
-
 def _board_legend(fig):
     """Shared legend: cell fill = ship belief, outline = the agent's shots.
 
@@ -164,11 +163,9 @@ def _board_legend(fig):
     fig.legend(handles=handles, loc="lower center", ncol=3, fontsize=8,
                frameon=False, bbox_to_anchor=(0.5, -0.01))
 
-
 def to_grid(values):
     """Reshape a length-(ROWS*COLS) vector to the board grid (row-major)."""
     return np.asarray(values).reshape(ROWS, COLS)
-
 
 def render(ax, ship_grid, fired_grid, title="", pred_fired=False):
     """Fill = ship belief (water→green); fired cells drawn as outlines on top.
@@ -217,7 +214,6 @@ def render(ax, ship_grid, fired_grid, title="", pred_fired=False):
     ax.set_xticks([])
     ax.set_yticks([])
 
-
 def _draw_acc(ax, grid, title):
     img = np.empty((ROWS, COLS, 3))
     for r in range(ROWS):
@@ -228,7 +224,6 @@ def _draw_acc(ax, grid, title):
     ax.set_title(title, fontsize=9)
     ax.set_xticks([])
     ax.set_yticks([])
-
 
 def _fig_episode(probe_params, ds_c, ds_b, ds_hm, ds_eb, ve_idx, out_path, tag_str,
                  vis_frames, probs_all=None):
@@ -268,7 +263,6 @@ def _fig_episode(probe_params, ds_c, ds_b, ds_hm, ds_eb, ve_idx, out_path, tag_s
     plt.close(fig)
     return out_path
 
-
 def _fig_accuracy(probe_params, t_carries, t_boards, t_hm, out_path, tag_str, probs_all=None):
     """Per-cell accuracy (unfired=inference, fired=retention) → out_path."""
     if probs_all is not None:
@@ -303,7 +297,6 @@ def _fig_accuracy(probe_params, t_carries, t_boards, t_hm, out_path, tag_str, pr
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out_path
-
 
 def _fig_retention(probe_params, t_carries, t_boards, t_hm, t_eb, out_path, tag_str, probs_all=None):
     """Fired-cell mean P(ship) vs steps-since-fired → out_path (None if no data)."""
@@ -375,7 +368,6 @@ def _fig_retention(probe_params, t_carries, t_boards, t_hm, t_eb, out_path, tag_
     plt.close(fig)
     return out_path
 
-
 def _fig_movie(probe_params, ep_c, ep_b, ep_hm, out_path_base, tag_str, movie_tag, fps=10,
                probs_all=None):
     """Animate one episode (truth vs probe) → mp4 (or gif fallback); returns path.
@@ -418,7 +410,6 @@ def _fig_movie(probe_params, ep_c, ep_b, ep_hm, out_path_base, tag_str, movie_ta
     plt.close(fig)
     return out
 
-
 # ── critic-Q / actor-π heatmaps (agent introspection, not the probe) ──────────
 #
 # These visualise the *agent's own* value & policy over the board, read straight
@@ -430,9 +421,7 @@ def _fig_movie(probe_params, ep_c, ep_b, ep_hm, out_path_base, tag_str, movie_ta
 CRITIC_CMAP = "viridis"   # Q-values (arbitrary scale → per-episode normalised)
 ACTOR_CMAP = "magma"      # π(a) ∈ [0, 1]
 
-
 FIRED_GREY = np.array([0.30, 0.30, 0.34])   # greyed-out fill for already-fired cells
-
 
 def _heatmap(ax, grid, title, cmap, vmin, vmax, fired_grid=None):
     """imshow a board-shaped value grid.
@@ -460,7 +449,6 @@ def _heatmap(ax, grid, title, cmap, vmin, vmax, fired_grid=None):
     ax.set_yticks([])
     return im
 
-
 def _qpi_norm(ep_q, ep_probs, ep_hm=None):
     """Per-episode colour ranges for the Q and π heatmaps, computed over the
     LEGAL (unfired) cells only — fired cells are greyed out and their
@@ -477,7 +465,6 @@ def _qpi_norm(ep_q, ep_probs, ep_hm=None):
     pmax = float(np.nanmax(p)) if np.isfinite(np.nanmax(p)) else 1e-6
     pmax = max(pmax, 1e-6)
     return qmin, qmax, pmax
-
 
 def _fig_qpi_episode(ep_b, ep_hm, ep_q, ep_probs, out_path, tag_str, vis_frames):
     """Multi-frame PNG: rows = [GT, Critic Q, Actor π], cols = sampled frames."""
@@ -503,7 +490,6 @@ def _fig_qpi_episode(ep_b, ep_hm, ep_q, ep_probs, out_path, tag_str, vis_frames)
     fig.savefig(out_path, dpi=110, bbox_inches="tight")
     plt.close(fig)
     return out_path
-
 
 def _fig_qpi_movie(ep_b, ep_hm, ep_q, ep_probs, out_path_base, tag_str, fps=10):
     """Animate GT | Critic Q | Actor π (left→right) over one episode → mp4/gif."""
@@ -538,7 +524,6 @@ def _fig_qpi_movie(ep_b, ep_hm, ep_q, ep_probs, out_path_base, tag_str, fps=10):
     plt.close(fig)
     return out
 
-
 # ── output paths ─────────────────────────────────────────────────────────────
 
 os.makedirs(args.output_dir, exist_ok=True)
@@ -546,7 +531,6 @@ agent_path = os.path.join(args.output_dir, "agent.pkl")
 dataset_path = os.path.join(args.output_dir, "dataset.pkl")
 test_dataset_path = os.path.join(args.output_dir, "test_dataset.pkl")
 probe_path = os.path.join(args.output_dir, "probe.pkl")
-
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Full pipeline (phases 1-3) — skipped entirely in --vis-only
@@ -714,13 +698,13 @@ if not args.vis_only:
     # ── hyperparameters ──────────────────────────────────────────────────────
 
     hp = Hyperparameters(
-        online_batch_size=args.batch_size,
+        batch_size=args.batch_size,
         online_buffer_size=args.online_buffer_size,
         target_entropy=args.target_entropy,
         fe_lr=args.fe_lr, actor_lr=args.actor_lr, critic_lr=args.critic_lr,
         lambda_critic_lr=args.critic_lr, alpha_lr=1e-4,
         alpha=args.alpha, autotune_alpha=args.autotune_alpha,
-        batch_size=args.batch_size, gamma=args.gamma, tau=args.tau,
+        gamma=args.gamma, tau=args.tau,
         lambda1=0.05, lambda2=0.85,
         c_bar=1.00, rho_bar=1.00, lambda_truncation=50,
         sequence_length=args.sequence_length,
@@ -838,7 +822,6 @@ if not args.vis_only:
             return action.astype(jnp.int32), prob.astype(jnp.float32)
 
         return policy
-
 
     expert_policy = (
         make_bayes_policy(args.rows, args.cols, ship_lengths,
@@ -1146,7 +1129,7 @@ if not args.vis_only:
         # vmappable; use the documented vmap-safe split instead — prefill the
         # buffer once, then run the jittable fns.train_unrolled each round,
         # threading a per-round zero env_carry (cf. battleship_sac_mc.py:881-895).
-        PREFILL_STEPS = hp.online_batch_size * (
+        PREFILL_STEPS = hp.batch_size * (
             hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
         )
         _reset_v = jax.jit(jax.vmap(lambda k: env.reset(k, env_params)))
@@ -1618,7 +1601,7 @@ if not args.vis_only:
             # fns.train auto-prefills with the random policy only when the
             # buffer is cold, so filling it here pre-empts that.
             _n = max(args.expert_prefill_steps,
-                     hp.online_batch_size * (hp.lambda_truncation
+                     hp.batch_size * (hp.lambda_truncation
                                              + hp.sequence_length
                                              + hp.burn_in_length))
             print(f"Prefilling {_n} steps from the Bayes expert…")
@@ -1782,7 +1765,6 @@ if not args.vis_only:
         _, td = jax.tree.flatten(ref)
         probe_params = td.unflatten([jnp.array(l) for l in saved["leaves"]])
 
-
 # ════════════════════════════════════════════════════════════════════════════
 #  Vis-only: load dataset + probe (no lambda-imitation needed)
 # ════════════════════════════════════════════════════════════════════════════
@@ -1815,7 +1797,6 @@ if args.vis_only:
         [jnp.array(l) for l in saved["leaves"]]
     )
     print("  probe loaded")
-
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Phase 4 — Visualise (shared rendering code)
@@ -1861,19 +1842,15 @@ correct = (test_preds == test_targets).astype(np.float32)   # (n, N)
 fired = test_hm != 0                                        # observed cells
 unfired = ~fired                                            # hidden cells
 
-
 # (``_auroc`` is defined at module level, near ``probe_forward``.)
-
 
 def _acc(mask):
     m = mask.astype(np.float32)
     return float((correct * m).sum() / max(m.sum(), 1.0))
 
-
 acc = float(correct.mean())
 ship_frac = float((test_targets == 1).mean())
 majority_baseline = 1.0 - ship_frac  # accuracy of "predict water everywhere"
-
 
 def _balanced(mask):
     """Balanced accuracy = mean(ship-recall, water-recall) within `mask`.
@@ -1885,7 +1862,6 @@ def _balanced(mask):
     s = _acc(mask & (test_targets == 1))
     w = _acc(mask & (test_targets == 0))
     return 0.5 * (s + w), s, w
-
 
 fired_acc = _acc(fired)
 unfired_acc = _acc(unfired)
@@ -1957,7 +1933,6 @@ if _wandb is not None:
               f"retention horizon={_extra.get('horizon_steps', float('nan')):.0f} steps")
     _wandb.log(_eval_metrics)
     _wandb.summary.update(_eval_metrics)
-
 
 p = _fig_accuracy(probe_params, test_carries, test_board_masks, test_hits_misses,
                   os.path.join(args.output_dir, "board_probe_accuracy.png"), tag)

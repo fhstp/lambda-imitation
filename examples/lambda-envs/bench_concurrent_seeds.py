@@ -60,7 +60,7 @@ parser.add_argument(
     help="timed rounds to average over, after one warmup/compile (default: 3)",
 )
 # ── hyperparameters mirrored from pocman_sac_mc.py (override to match a sweep) ──
-parser.add_argument("--online-batch-size", type=int, default=128)
+parser.add_argument("--batch-size", type=int, default=128)
 parser.add_argument("--online-buffer-size", type=int, default=200_000)
 parser.add_argument("--memory-hidden-dim", type=int, default=750)
 parser.add_argument("--projection-dim", type=int, default=128)
@@ -95,7 +95,6 @@ from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
 print(f"device={jax.devices()[0]}  approx_lambda={args.approximate_lambda}")
 
-
 # ── env adapter (PocMan.get_obs takes no params; see pocman_sac_mc.py) ─────────
 class _LambdaEnvAdapter:
     def __init__(self, wrapped):
@@ -106,7 +105,6 @@ class _LambdaEnvAdapter:
 
     def __getattr__(self, name):
         return getattr(self._wrapped, name)
-
 
 env = _LambdaEnvAdapter(PocMan())
 env_params = env.default_params
@@ -119,7 +117,7 @@ expert_data = {
 }
 
 hp = Hyperparameters(
-    online_batch_size=args.online_batch_size,
+    batch_size=args.batch_size,
     online_buffer_size=args.online_buffer_size,
     gamma=0.95,
     lambda1=0.05,
@@ -153,10 +151,9 @@ else:
     CARRY_DIM = args.memory_hidden_dim
 
 # transitions collected before training, matching pocman_sac_mc.py / fns.train
-PREFILL_STEPS = hp.online_batch_size * (
+PREFILL_STEPS = hp.batch_size * (
     hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
 )
-
 
 def _build(seed):
     state, fns, _ = create_iqlearn_from_env(
@@ -164,10 +161,8 @@ def _build(seed):
     )
     return state, fns
 
-
 def _stack(states):
     return jax.tree.map(lambda *xs: jnp.stack(xs), *states)
-
 
 def bench(n):
     """Compile + time ``args.rounds`` vmapped train rounds for n concurrent seeds.
@@ -218,7 +213,6 @@ def bench(n):
     jax.block_until_ready(out)
     round_s = (time.perf_counter() - t0) / args.rounds
     return compile_s, round_s
-
 
 concurrent = [int(x) for x in args.concurrent_list.split(",")]
 

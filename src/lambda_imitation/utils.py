@@ -57,7 +57,6 @@ from .iqlearn import (
 # Common spec container
 # ---------------------------------------------------------------------------
 
-
 class EnvSpec(NamedTuple):
     """Environment dimensions extracted from any supported interface.
 
@@ -81,14 +80,11 @@ class EnvSpec(NamedTuple):
     action_low: jax.Array | None = None
     action_high: jax.Array | None = None
 
-
 # ---------------------------------------------------------------------------
 # Recurrent feature extractor
 # ---------------------------------------------------------------------------
 
-
 MemoryType = Literal["identity", "rnn", "gru", "lstm"]
-
 
 class LinearProjection(nnx.Module):
     """Default projection: flatten obs, concat the prev-action, single Linear.
@@ -118,7 +114,6 @@ class LinearProjection(nnx.Module):
             x = jnp.concatenate([x, prev_action], axis=-1)
         return self.linear(x)
 
-
 class _ConcatProjection(nnx.Module):
     """Identity projection (``projection=None``): flatten + concat, no params.
 
@@ -131,7 +126,6 @@ class _ConcatProjection(nnx.Module):
         if prev_action is not None and prev_action.shape[-1]:
             x = jnp.concatenate([x, prev_action], axis=-1)
         return x
-
 
 class BattleshipProjection(nnx.Module):
     """Pre-RNN embedding from the original lambda-discrepancy Battleship net.
@@ -211,7 +205,6 @@ class BattleshipProjection(nnx.Module):
             e = nnx.relu(self.dense3(e))
         return e
 
-
 class ReluProjection(nnx.Module):
     """``Dense(hidden) -> ReLU`` over ``concat([flatten(obs), prev_action])``.
 
@@ -238,7 +231,6 @@ class ReluProjection(nnx.Module):
             x = jnp.concatenate([x, prev_action], axis=-1)
         return jax.nn.relu(self.linear(x))
 
-
 def relu_projection(hidden_size: int) -> Callable[..., nnx.Module]:
     """Projection builder for the original ``DiscreteActorCriticRNN`` embedding.
 
@@ -257,7 +249,6 @@ def relu_projection(hidden_size: int) -> Callable[..., nnx.Module]:
             hidden_size, math.prod(obs_shape), prev_action_dim, rngs=rngs)
 
     return build
-
 
 def battleship_projection(
     hidden_size: int, extra_layer: bool = False
@@ -288,7 +279,6 @@ def battleship_projection(
         )
 
     return build
-
 
 class RecurrentFeatureExtractor(nnx.Module):
     """Projection module followed by an optional recurrent memory cell.
@@ -513,11 +503,9 @@ class RecurrentFeatureExtractor(nnx.Module):
         """
         return jnp.zeros((batch_size, self.prev_action_dim), dtype=jnp.float32)
 
-
 # ---------------------------------------------------------------------------
 # Low-level extractors
 # ---------------------------------------------------------------------------
-
 
 def env_spec_from_gymnasium(env) -> EnvSpec:
     """Extract an :class:`EnvSpec` from a ``gymnasium.Env``.
@@ -582,7 +570,6 @@ def env_spec_from_gymnasium(env) -> EnvSpec:
         f"env_spec_from_gymnasium requires a Box or Discrete action space, "
         f"got {type(act_space).__name__}."
     )
-
 
 def env_spec_from_gymnax(env, params) -> EnvSpec:
     """Extract an :class:`EnvSpec` from a ``gymnax`` environment.
@@ -649,7 +636,6 @@ def env_spec_from_gymnax(env, params) -> EnvSpec:
         f"env_spec_from_gymnax requires a Box or Discrete action space, "
         f"got {type(act_space).__name__}."
     )
-
 
 def env_spec_from_jumanji(env) -> EnvSpec:
     """Extract an :class:`EnvSpec` from a ``jumanji`` environment.
@@ -725,11 +711,9 @@ def env_spec_from_jumanji(env) -> EnvSpec:
         f"spec, got {type(act_spec).__name__}."
     )
 
-
 # ---------------------------------------------------------------------------
 # High-level convenience factory
 # ---------------------------------------------------------------------------
-
 
 def create_iqlearn_from_env(
     env_spec: EnvSpec,

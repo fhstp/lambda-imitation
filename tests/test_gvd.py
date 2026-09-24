@@ -28,25 +28,21 @@ import pytest
 from lambda_imitation.iqlearn import Hyperparameters, sf_vtrace_targets
 from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
-
 HIDDEN = 8
 N_FEATURES = 3
 
 # Fixed projection for the CartPole feature map (obs_dim=4 -> N_FEATURES).
 _P = jax.random.normal(jax.random.key(7), (4, N_FEATURES)) / 2.0
 
-
 def _feature_fn(obs, prev_action):
     # prev_action accepted for the (obs, a_{t-1}) cumulant API; this test's
     # feature map is a plain obs projection and ignores it.
     return obs @ _P
 
-
 def _tiny_hp(**overrides):
     base = dict(
         target_entropy=0.2,
         batch_size=4,
-        online_batch_size=4,
         online_buffer_size=256,
         burn_in_length=2,
         sequence_length=4,
@@ -54,7 +50,6 @@ def _tiny_hp(**overrides):
     )
     base.update(overrides)
     return Hyperparameters(**base)
-
 
 def _make_agent(use_gvd, approximate_lambda=True, seed=0, hp=None):
     env, env_params = gymnax.make("CartPole-v1")
@@ -83,16 +78,13 @@ def _make_agent(use_gvd, approximate_lambda=True, seed=0, hp=None):
     )
     return env, env_params, spec, state, fns, debug_fns
 
-
 @pytest.fixture(scope="module")
 def gvd_agent():
     return _make_agent(use_gvd=True, approximate_lambda=False)
 
-
 # ---------------------------------------------------------------------------
 # sf_vtrace_targets: hand-rolled reference recursion
 # ---------------------------------------------------------------------------
-
 
 def _reference_targets(V, f, dones, ratios, gamma, lam, rho_bar, c_bar):
     """Numpy reference of the vector V-trace backward recursion."""
@@ -109,7 +101,6 @@ def _reference_targets(V, f, dones, ratios, gamma, lam, rho_bar, c_bar):
         targets[t] = v_t
         v_next, V_next = v_t, V[t]
     return targets
-
 
 class TestSfVtraceTargets:
     @pytest.mark.parametrize("lam", [0.0, 0.5, 1.0])
@@ -189,11 +180,9 @@ class TestSfVtraceTargets:
         want_0 = V[0] + 0.7 * (f[0] - V[0])
         assert jnp.allclose(got[0], want_0, atol=1e-6)
 
-
 # ---------------------------------------------------------------------------
 # use_gvd=False path: disabled fields, no metric keys, RNG isolation
 # ---------------------------------------------------------------------------
-
 
 class TestDisabledPath:
     def test_state_fields_none_when_disabled(self):
@@ -232,11 +221,9 @@ class TestDisabledPath:
             )
         )
 
-
 # ---------------------------------------------------------------------------
 # Construction-time validation
 # ---------------------------------------------------------------------------
-
 
 class TestValidation:
     def test_missing_feature_fn_raises(self):
@@ -257,11 +244,9 @@ class TestValidation:
         with pytest.raises(ValueError, match="lambda_truncation"):
             _make_agent(use_gvd=True, hp=_tiny_hp(lambda_truncation=0))
 
-
 # ---------------------------------------------------------------------------
 # End-to-end train rounds
 # ---------------------------------------------------------------------------
-
 
 class TestEndToEnd:
     GVD_METRIC_KEYS = (
@@ -318,7 +303,7 @@ class TestEndToEnd:
         key, reset_key, prefill_key = jax.random.split(key, 3)
         _, env_state = env.reset(reset_key, env_params)
         hp = _tiny_hp()
-        prefill = hp.online_batch_size * (
+        prefill = hp.batch_size * (
             hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
         )
         state_eq, env_state = fns.prefill_buffer(
@@ -347,7 +332,7 @@ class TestEndToEnd:
             k, reset_key, prefill_key = jax.random.split(k, 3)
             _, env_state = env.reset(reset_key, env_params)
             hp = _tiny_hp()
-            prefill = hp.online_batch_size * (
+            prefill = hp.batch_size * (
                 hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
             )
             state, env_state = fns.prefill_buffer(

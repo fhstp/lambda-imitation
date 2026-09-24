@@ -332,12 +332,6 @@ parser.add_argument(
     help="training batch size (default: 512)",
 )
 parser.add_argument(
-    "--online-batch-size",
-    type=int,
-    default=128,
-    help="online batch size (default: 128)",
-)
-parser.add_argument(
     "--online-buffer-size",
     type=int,
     default=200_000,
@@ -551,7 +545,7 @@ if args.wandb:
         sys.exit("wandb not installed.  Install with:  pip install wandb")
 
 hp = Hyperparameters(
-    online_batch_size=args.online_batch_size,
+    batch_size=args.batch_size,
     online_buffer_size=args.online_buffer_size,
     target_entropy=args.target_entropy,
     fe_lr=args.fe_lr,
@@ -561,7 +555,6 @@ hp = Hyperparameters(
     alpha_lr=args.alpha_lr,
     alpha=args.alpha,
     autotune_alpha=args.autotune_alpha,
-    batch_size=args.batch_size,
     gamma=0.99,
     tau=args.tau,
     lambda1=args.lambda1,
@@ -592,7 +585,6 @@ else:
 PREV_ACTION_DIM = spec.action_dim if args.use_prev_action else 0
 
 projection_dim = args.projection_dim if args.projection_dim > 0 else None
-
 
 class BattleshipProjection(nnx.Module):
     """Spatial, skip-connection projection for battleship (full-module demo).
@@ -632,7 +624,6 @@ class BattleshipProjection(nnx.Module):
         skip = self.skip(jnp.concatenate([x, prev_action], axis=-1))
         return jax.nn.relu(board_feat) + skip
 
-
 if args.skip_projection:
     projection = lambda obs_shape, pa_dim, rngs: BattleshipProjection(
         obs_shape, pa_dim, rngs
@@ -640,24 +631,19 @@ if args.skip_projection:
 else:
     projection = projection_dim
 
-
 def zero_carry() -> jax.Array:
     return jnp.zeros((CARRY_DIM,), dtype=jnp.float32)
-
 
 def zero_prev_action() -> jax.Array:
     return jnp.zeros((PREV_ACTION_DIM,), dtype=jnp.float32)
 
-
 # ── evaluation helper ─────────────────────────────────────────────────────────
-
 
 # Battleship episodes end after at most rows*cols shots — the legal-action
 # mask exhausts the board and the last ship cell must be hit by then — far
 # below max_steps_in_episode (1000).  Scanning further wastes ~10x eval time
 # on done-frozen steps.
 _MAX_STEPS = min(int(env_params.max_steps_in_episode), args.rows * args.cols + 1)
-
 
 def _make_evaluate(fns):
     """Build a JIT-compiled evaluator that uses lax.scan + vmap."""
@@ -713,7 +699,6 @@ def _make_evaluate(fns):
 
     return _evaluate
 
-
 # ── agent factory (shared across seeds) ─────────────────────────────────────
 
 _AGENT_KWARGS = dict(
@@ -738,29 +723,24 @@ _AGENT_KWARGS = dict(
     debug=True,
 )
 
-
 def _build_agent(seed_val: int):
     return create_iqlearn_from_env(spec, expert_data, **_AGENT_KWARGS, seed=seed_val)
-
 
 # ── vmapped multi-seed training ───────────────────────────────────────────────
 
 # Transitions collected before training, matching fns.train's auto-prefill size.
-PREFILL_STEPS = hp.online_batch_size * (
+PREFILL_STEPS = hp.batch_size * (
     hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
 )
-
 
 def _stack_states(states):
     """Stack a list of per-seed pytrees along a new leading axis."""
     return jax.tree.map(lambda *xs: jnp.stack(xs), *states)
 
-
 def _split_each(keys):
     """Split a batch of PRNG keys, returning two batches (carry, fresh)."""
     out = jax.vmap(lambda k: jax.random.split(k))(keys)
     return out[:, 0], out[:, 1]
-
 
 # ── wandb init ───────────────────────────────────────────────────────────────
 #
@@ -820,7 +800,6 @@ if _wandb is not None and not args.wandb_per_seed:
         for i in range(args.num_seeds):
             _wandb.define_metric(f"seed_{i}/*", step_metric="env_interactions")
 
-
 def _make_wandb_runs(seeds):
     """--wandb-per-seed: one W&B run handle per seed (index gi -> run).
 
@@ -841,7 +820,6 @@ def _make_wandb_runs(seeds):
         r.define_metric("env_interactions")
         r.define_metric("*", step_metric="env_interactions")
         WANDB_RUNS[gi] = r
-
 
 # ── main: run seeds (grouped, vmapped) and aggregate ──────────────────────────
 
@@ -894,10 +872,8 @@ _train_v = jax.jit(
     donate_argnums=(0, 1),
 )
 
-
 def _evaluate_v(states, keys, n_episodes):
     return jax.vmap(lambda s, k: evaluate(s, k, n_episodes=n_episodes))(states, keys)
-
 
 def run_group(group_idx: int, group: list) -> list:
     """Train one group of ``CONCURRENT`` seeds concurrently; return finals."""
@@ -999,7 +975,6 @@ def run_group(group_idx: int, group: list) -> list:
         )
     jax.profiler.stop_trace()
     return [(gi, float(final_returns_b[j])) for j, gi in enumerate(idxs)]
-
 
 indexed_seeds = list(enumerate(seeds))
 groups = [indexed_seeds[g * CONCURRENT : (g + 1) * CONCURRENT] for g in range(n_groups)]

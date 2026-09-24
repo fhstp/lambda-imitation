@@ -25,7 +25,6 @@ import pytest
 
 from lambda_imitation.iqlearn import retrace_targets
 
-
 def _reference(q_taken, v, rewards, dones, ratios, gamma, lam, c_bar):
     """Hand-rolled numpy Retrace recursion (the spec, written independently)."""
     T, B = q_taken.shape
@@ -45,7 +44,6 @@ def _reference(q_taken, v, rewards, dones, ratios, gamma, lam, c_bar):
             targets[t, b] = q_taken[t, b] + acc
     return targets
 
-
 @pytest.fixture
 def batch():
     key = jax.random.key(0)
@@ -59,14 +57,12 @@ def batch():
         ratios=jnp.abs(jax.random.normal(k1, (T, B))),
     )
 
-
 @pytest.mark.parametrize("lam", [0.0, 0.5, 1.0])
 def test_matches_hand_rolled_recursion(batch, lam):
     got = retrace_targets(gamma=0.99, lam=lam, c_bar=1.0, **batch)
     want = _reference(**{k: np.asarray(v) for k, v in batch.items()},
                       gamma=0.99, lam=lam, c_bar=1.0)
     assert np.allclose(np.asarray(got), want, atol=1e-5), (got, want)
-
 
 def test_cut_traces_reduce_to_one_step_td(batch):
     """ratio = 0 everywhere: the tail vanishes but the 1-step term survives."""
@@ -75,7 +71,6 @@ def test_cut_traces_reduce_to_one_step_td(batch):
     v_next = jnp.concatenate([batch["v"][1:], jnp.zeros_like(batch["v"][:1])])
     one_step = batch["rewards"] + (1 - batch["dones"]) * 0.99 * v_next
     assert np.allclose(np.asarray(got), np.asarray(one_step), atol=1e-5)
-
 
 def test_reward_still_reaches_the_target_when_vtrace_would_erase_it(batch):
     """The regression this exists to prevent: with ρ = 0, V-trace gives
@@ -87,7 +82,6 @@ def test_reward_still_reaches_the_target_when_vtrace_would_erase_it(batch):
                              gamma=0.99, lam=1.0, c_bar=1.0)
     assert np.allclose(np.asarray(bumped - base), 10.0, atol=1e-5)
 
-
 def test_done_cuts_the_trace(batch):
     """A terminal step must not bootstrap, and must not propagate credit back."""
     dones = jnp.zeros_like(batch["dones"]).at[2].set(1.0)
@@ -97,7 +91,6 @@ def test_done_cuts_the_trace(batch):
     assert np.allclose(np.asarray(got), want, atol=1e-5)
     # the terminal step's own target is exactly its reward
     assert np.allclose(np.asarray(got[2]), np.asarray(batch["rewards"][2]), atol=1e-5)
-
 
 def test_agent_trains_on_retrace_targets_with_finite_metrics():
     """End-to-end: retrace=True runs through update_only and keeps the λ-critic
@@ -109,7 +102,7 @@ def test_agent_trains_on_retrace_targets_with_finite_metrics():
     env, env_params = gymnax.make("CartPole-v1")
     spec = env_spec_from_gymnax(env, env_params)
     hp = Hyperparameters(
-        target_entropy=0.2, batch_size=4, online_batch_size=4,
+        target_entropy=0.2, batch_size=4,
         online_buffer_size=256, burn_in_length=2, sequence_length=4,
         lambda_truncation=2, retrace=True,
     )
@@ -125,7 +118,7 @@ def test_agent_trains_on_retrace_targets_with_finite_metrics():
     key = jax.random.key(0)
     key, reset_key, prefill_key, update_key = jax.random.split(key, 4)
     _obs, env_state = env.reset(reset_key, env_params)
-    prefill = hp.online_batch_size * (
+    prefill = hp.batch_size * (
         hp.lambda_truncation + hp.sequence_length + hp.burn_in_length
     )
     state, _ = fns.prefill_buffer(
