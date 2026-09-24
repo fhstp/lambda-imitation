@@ -100,6 +100,7 @@ Requires Python 3.10+ (uses `X | Y` union type syntax).
 - Concentration / Minesweeper replay pilots: `python examples/lambda-envs/memory_games_sac.py --env concentration --method ld` (or `--env minesweeper`; methods `sac`, `critics`, `ld`)
 - Parallel cluster memory-game pilots (8 GPUs): `sbatch examples/lambda-envs/memory_games_pilot.slrm`
 - Memory-game stability/entropy/history follow-ups (three 4-GPU waves): `sbatch examples/lambda-envs/memory_games_followup.slrm`
+- Minesweeper five-seed, 200k-step sweeps: `examples/lambda-envs/sweeps/minesweeper_{baseline,ld}.yaml`; run one `memory_games_sweep_agent.sh <entity/project/sweep-id>` per GPU with `MEMORY_GAMES_OUTPUT_DIR` set to scratch storage. Project `offline-lambda-minesweeper-sweeps`, IDs `clilku6c` (SAC) and `07kd6rfn` (LD). Both maximize `final/return_smoothed/mean` over the final five evaluations (180k–200k), with equal shared search spaces and 40-trial caps. See `examples/lambda-envs/memory_games.md`.
 - Board probe + visualisation (Battleship): `python examples/lambda-envs/battleship_board_probe.py`
 - Offline Bayes-data training + probe (Battleship): `python examples/lambda-envs/battleship_board_probe.py --offline --expert-prefill-steps 100000 --num-seeds 3`
 - Online with an expert warm start: `python examples/lambda-envs/battleship_board_probe.py --expert-prefill-steps 20000 --num-seeds 3`

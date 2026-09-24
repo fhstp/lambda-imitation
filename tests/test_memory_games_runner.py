@@ -81,6 +81,105 @@ def test_tracking_resume_keeps_run_and_updates_budget(runner, monkeypatch):
     assert (("eval/*",), {"step_metric": "env_interactions"}) in metrics
 
 
+def test_sweep_cli_accepts_underscores_but_rejects_unknown_flags(runner):
+    parser = runner.build_parser()
+    args = runner.parse_args(parser, ["--env=minesweeper", "--fe_lr=0.00002",
+                                     "--num_seeds=5", "--final_return_window=3"])
+    assert args.fe_lr == 2e-5 and args.num_seeds == 5
+    assert args.final_return_window == 3
+    with pytest.raises(SystemExit):
+        runner.parse_args(parser, ["--env=minesweeper", "--misspelled_lr=0.01"])
+
+
+def test_sweep_overrides_are_applied_and_outputs_are_isolated(runner, monkeypatch, tmp_path):
+    import sys
+
+    class Config(dict):
+        def update(self, values, *, allow_val_change=False):
+            assert allow_val_change
+            super().update(values)
+
+    wb = ModuleType("wandb")
+    runs = []
+
+    def initialize(**kwargs):
+        run = SimpleNamespace(id=f"trial{len(runs)}", config=Config(
+            env="minesweeper", method="ld", fe_lr=2e-5, num_seeds=5,
+            remember=False, lambda_coef=0.04))
+        runs.append(run)
+        return run
+
+    wb.init = initialize
+    wb.define_metric = lambda *a, **kw: None
+    monkeypatch.setitem(sys.modules, "wandb", wb)
+    monkeypatch.setenv("WANDB_SWEEP_ID", "sweep")
+    monkeypatch.setenv("WANDB_RUN_ID", "controller-assigned")
+    monkeypatch.setenv("WANDB_RESUME", "allow")
+    monkeypatch.setenv("MEMORY_GAMES_OUTPUT_DIR", str(tmp_path))
+    parser = runner.build_parser()
+    outputs = []
+    for i in range(2):
+        args = runner.parse_args(parser, ["--env=minesweeper", "--fe-lr=0.0001"])
+        attached = runner.prepare_sweep(parser, args)
+        runner.resolve_args(parser, args)
+        assert args.fe_lr == 2e-5 and args.num_seeds == 5
+        assert args.method == "ld" and args.lambda_coef == 0.04 and args.wandb
+        assert args.output_dir == tmp_path / "sweeps" / f"run_trial{i}"
+        assert runner.init_tracking(args, runner.config_dict(args), attached) is wb
+        assert len(runs) == i + 1  # tracking attaches to the controller's run
+        outputs.append(args.output_dir)
+    assert outputs[0] != outputs[1]
+
+
+def test_sweep_rejects_resumed_trials_and_unknown_configuration(runner, monkeypatch, tmp_path):
+    monkeypatch.setenv("WANDB_SWEEP_ID", "sweep")
+    monkeypatch.setenv("MEMORY_GAMES_OUTPUT_DIR", str(tmp_path))
+    parser = runner.build_parser()
+    args = runner.parse_args(parser, ["--env=minesweeper", "--resume-from=checkpoint.pkl"])
+    with pytest.raises(SystemExit):
+        runner.prepare_sweep(parser, args)
+    args = runner.parse_args(parser, ["--env=minesweeper"])
+    monkeypatch.setattr(runner.common, "apply_sweep_config", lambda p, a:
+                        SimpleNamespace(config={"misspelled_lr": 0.01}))
+    with pytest.raises(SystemExit):
+        runner.prepare_sweep(parser, args)
+
+
+def test_sweep_files_match_budgets_and_shared_search_space(runner):
+    yaml = pytest.importorskip("yaml")
+    folder = Path(__file__).resolve().parents[1] / "examples/lambda-envs/sweeps"
+    configs = [yaml.safe_load((folder / f"minesweeper_{method}.yaml").read_text())
+               for method in ("baseline", "ld")]
+    baseline, ld = [config["parameters"] for config in configs]
+    shared = set(baseline) - {"method", "lambda_coef"}
+    assert set(baseline) == set(ld)
+    assert {k: baseline[k] for k in shared} == {k: ld[k] for k in shared}
+    assert baseline["method"] == {"value": "sac"}
+    assert ld["method"] == {"value": "ld"}
+    assert baseline["lambda_coef"] == {"value": 0.0}
+    assert ld["lambda_coef"]["min"] > 0
+    for config in configs:
+        assert config["metric"] == {"name": "final/return_smoothed/mean", "goal": "maximize"}
+        assert "early_terminate" not in config
+        argv = ["--wandb"]
+        for name, setting in config["parameters"].items():
+            value = setting.get("value", setting.get("min"))
+            if isinstance(value, bool):
+                if value:
+                    argv.append(f"--{name}")
+            else:
+                argv.append(f"--{name}={value}")
+        parser = runner.build_parser()
+        args = runner.parse_args(parser, argv)
+        runner.resolve_args(parser, args)
+        assert args.rounds * args.train_steps == 200000
+        assert args.num_seeds == 5 and args.prefill_steps == 3008
+        assert args.final_return_window == 5 and args.eval_every == 1
+        assert args.eval_episodes == 128
+        assert args.burn_in_length == 30 and not args.remember
+        assert args.checkpoint_every == args.rounds
+
+
 def fixed_env(runner, game, remember=False):
     """Real game rules and gymnax auto-reset, with tiny reproducible boards."""
     if game == "concentration":
@@ -494,7 +593,7 @@ def test_main_threads_history_through_rounds_and_resume(runner, monkeypatch, tmp
               "--head-dim", "3", "--batch-size", "1", "--sequence-length", "1",
               "--burn-in-length", "1", "--lambda-truncation", "1",
               "--online-buffer-size", "16", "--prefill-steps", "4",
-              "--eval-episodes", "2", "--checkpoint-every", "1"]
+              "--eval-episodes", "2", "--checkpoint-every", "1", "--final-return-window", "2"]
     resumed_dir, uninterrupted_dir = tmp_path / "resumed", tmp_path / "uninterrupted"
     runner.main(common + ["--rounds", "2", "--output-dir", str(resumed_dir)])
     resume_argv = common + ["--rounds", "3", "--output-dir", str(resumed_dir),
@@ -534,3 +633,8 @@ def test_main_threads_history_through_rounds_and_resume(runner, monkeypatch, tmp
     summary = json.loads((resumed_dir / "summary.json").read_text())
     assert summary["round"] == summary["train_env_steps"] == 3
     assert summary["env_interactions"] == 7
+    assert summary["final/evaluations_averaged"] == 2
+    expected = np.asarray([row["returns"] for row in history[-2:]]).mean(axis=0).mean()
+    assert summary["final/return_smoothed/mean"] == pytest.approx(expected)
+    assert summary["final/window_start_train_env_steps"] == 2
+    assert summary["final/window_end_train_env_steps"] == 3

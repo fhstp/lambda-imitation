@@ -169,6 +169,91 @@ to the existing run IDs. The runner updates the larger budget in W&B's config
 without resetting its history. New local artifacts go to the new job's project
 directory; source checkpoints and summaries remain available.
 
+## Five-seed, 200k-step W&B sweeps
+
+Registered in project **`offline-lambda-minesweeper-sweeps`**:
+
+- [Baseline / plain recurrent SAC — `clilku6c`](https://wandb.ai/fhstp-data-intelligence-research-group/offline-lambda-minesweeper-sweeps/sweeps/clilku6c)
+- [SAC + Retrace discrepancy — `07kd6rfn`](https://wandb.ai/fhstp-data-intelligence-research-group/offline-lambda-minesweeper-sweeps/sweeps/07kd6rfn)
+
+The source configurations are `sweeps/minesweeper_baseline.yaml` and
+`sweeps/minesweeper_ld.yaml`. Both use Bayesian search, capped at **40 trials per
+sweep**, with **five seeds per trial** (1000100–1000104, shared across methods and
+configurations). Each trial starts fresh and takes 40 rounds x 5000 training
+steps, plus the same 3008 random-prefill interactions. Each evaluation uses 128
+episodes per seed. No early stopping is configured.
+
+The maximized objective, **`final/return_smoothed/mean`**, averages greedy return
+at training steps **180k, 185k, 190k, 195k and 200k** within each seed, then averages
+the five seeds equally. It is emitted only at the end of the trial. Sampled-policy
+returns, seed variability, critic diagnostics and history-use metrics are still
+logged. The final checkpoint is saved for every trial (about 117 MB with five
+seeds); subsequent extensions should use separate confirmation runs because a
+sweep's selection objective is specifically the 200k endpoint.
+
+| Tuned parameter | Both sweeps (log-uniform) |
+|---|---|
+| Feature-extractor learning rate | 3e-6 to 3e-5 |
+| Actor learning rate | 3e-5 to 3e-4 |
+| Critic learning rate | 3e-5 to 3e-4 |
+| Entropy temperature | 0.003 to 0.1 |
+| Discrepancy weight, LD only | 0.003 to 0.3 |
+
+Architecture/replay/horizons stay fixed: H128 GRU, batch32, sequence32, full-episode
+burn-in30, tail32, lambda=(0,0.95), gamma0.99, hard main-critic backup and actor
+gradients stopped at the feature extractor. The baseline has no lambda branches;
+keep the critics-only ablation for the final selected configurations.
+
+### Launch on an internal server
+
+Pull the latest `fix/retrace-lambda-critics`, activate the existing JAX/gymnax/W&B
+environment, and run from the repository root. In a persistent tmux session:
+
+```bash
+export MEMORY_GAMES_OUTPUT_DIR=/your/scratch/minesweeper-sweeps
+mkdir -p "$MEMORY_GAMES_OUTPUT_DIR"
+
+CUDA_VISIBLE_DEVICES=0 bash examples/lambda-envs/memory_games_sweep_agent.sh \
+  fhstp-data-intelligence-research-group/offline-lambda-minesweeper-sweeps/07kd6rfn \
+  --count 20 > "$MEMORY_GAMES_OUTPUT_DIR/ld-gpu0.log" 2>&1 &
+
+CUDA_VISIBLE_DEVICES=1 bash examples/lambda-envs/memory_games_sweep_agent.sh \
+  fhstp-data-intelligence-research-group/offline-lambda-minesweeper-sweeps/clilku6c \
+  --count 20 > "$MEMORY_GAMES_OUTPUT_DIR/baseline-gpu1.log" 2>&1 &
+
+wait
+```
+
+Replace the scratch path. One agent occupies one GPU and trains all five seeds
+concurrently. For more GPUs, repeat the appropriate command with a different
+GPU and log filename, allocating roughly half to each sweep. `--count` is the
+maximum trials handled by that individual agent; the sweep-wide cap remains 40.
+
+Every trial writes to `MEMORY_GAMES_OUTPUT_DIR/sweeps/run_<wandb-id>/`.
+The launcher redirects temporary files and library/W&B caches to the same scratch
+root, disables bytecode writes, and clears stale run IDs/resume variables before
+the sweep controller assigns a fresh trial. Unknown parameters and resumed
+training trials are rejected. Use `env_interactions` / `train_env_steps` for
+learning-curve axes, not W&B's logging index.
+
+A five-seed LD smoke benchmark measured about **124 updates/s/seed** on the RTX
+3090, projecting **27 minutes per full 200k trial for the entire five-seed group**,
+before evaluation/checkpoint overhead. This is a throughput projection, not a
+completed sweep trial. The existing three-/ten-seed timings below give further
+context. Select candidates using these sweeps, then confirm at a longer horizon
+with fresh seeds; 200k can still favour faster starters over eventual performance.
+
+To register new copies instead of using the IDs above:
+
+```bash
+wandb sweep --entity fhstp-data-intelligence-research-group \
+  --project offline-lambda-minesweeper-sweeps \
+  examples/lambda-envs/sweeps/minesweeper_baseline.yaml
+wandb sweep --entity fhstp-data-intelligence-research-group \
+  --project offline-lambda-minesweeper-sweeps \
+  examples/lambda-envs/sweeps/minesweeper_ld.yaml
+```
+
 ## Runtime measurement
 
 Measured on an RTX 3090, JAX 0.7.1 / Flax 0.11.1, with the actual default model:

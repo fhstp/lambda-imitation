@@ -31,6 +31,7 @@ import json
 import os
 from pathlib import Path
 import pickle
+import sys
 import time
 from typing import NamedTuple
 
@@ -213,6 +214,8 @@ def build_parser():
     p.add_argument("--no-critic-layer-norm", dest="critic_layer_norm", action="store_false")
     p.add_argument("--eval-every", type=int, default=1)
     p.add_argument("--eval-episodes", type=int, default=128)
+    p.add_argument("--final-return-window", type=int, default=5,
+                   help="final evaluation points averaged per seed before averaging seeds")
     p.add_argument("--checkpoint-every", type=int, default=10, help="rounds; 0 disables all checkpoints")
     p.add_argument("--resume-from", type=Path)
     p.add_argument("--output-dir", type=Path, default=None)
@@ -222,10 +225,41 @@ def build_parser():
     return p
 
 
+def parse_args(parser, argv=None):
+    """Accept W&B's underscore parameter spelling while rejecting unknown flags."""
+    known = {option for action in parser._actions for option in action.option_strings}
+    normalized = []
+    for token in sys.argv[1:] if argv is None else argv:
+        flag, sep, value = token.partition("=")
+        canonical = flag.replace("_", "-")
+        normalized.append(canonical + sep + value
+                          if flag.startswith("--") and canonical in known else token)
+    return parser.parse_args(normalized)
+
+
+def prepare_sweep(parser, args):
+    """One fresh five-seed trial per W&B run, with an isolated output directory."""
+    if not os.environ.get("WANDB_SWEEP_ID"):
+        return None
+    if args.resume_from is not None:
+        parser.error("sweep trials must start fresh; --resume-from is not supported")
+    if args.output_dir is None:
+        args.output_dir = Path(os.environ.get("MEMORY_GAMES_OUTPUT_DIR", "memory_games_output")) / "sweeps"
+    sweep_run = common.apply_sweep_config(parser, args)
+    known = {action.dest for action in parser._actions}
+    unknown = set(sweep_run.config) - known
+    if unknown:
+        parser.error(f"unrecognized sweep parameters: {sorted(unknown)}")
+    if args.resume_from is not None:
+        parser.error("sweep trials must start fresh; resume_from is not supported")
+    args.output_dir = Path(args.output_dir)
+    return sweep_run
+
+
 def resolve_args(p, args):
     for field in ("train_steps", "num_seeds", "memory_hidden_dim", "projection_dim",
                   "head_dim", "batch_size", "sequence_length", "lambda_truncation",
-                  "online_buffer_size", "eval_every", "eval_episodes"):
+                  "online_buffer_size", "eval_every", "eval_episodes", "final_return_window"):
         if getattr(args, field) <= 0:
             p.error(f"--{field.replace('_', '-')} must be positive")
     if args.rounds < 0 or args.checkpoint_every < 0 or args.prefill_steps < 0:
@@ -252,13 +286,14 @@ def resolve_args(p, args):
         p.error("prefill-steps must be between batch-size and online-buffer-size")
     if args.output_dir is None:
         suffix = f"ld{args.lambda_coef:g}" if args.method == "ld" else args.method
-        args.output_dir = Path("memory_games_output") / args.env / suffix
+        args.output_dir = Path(os.environ.get("MEMORY_GAMES_OUTPUT_DIR", "memory_games_output")) / args.env / suffix
     return ActionHistoryEnv(base)
 
 
 # Only these settings may change when continuing a saved training run.
 RESUME_MUTABLE = {"rounds", "eval_every", "eval_episodes", "checkpoint_every",
-                  "resume_from", "output_dir", "wandb", "wandb_project", "wandb_run_name"}
+                  "resume_from", "output_dir", "wandb", "wandb_project", "wandb_run_name",
+                  "final_return_window"}
 
 
 def config_dict(args):
@@ -291,7 +326,7 @@ def load_checkpoint(path, args):
     return (*restored, saved["round"], saved["history"])
 
 
-def init_tracking(args, config):
+def init_tracking(args, config, attached_run=None):
     """Attach to an existing W&B ID without resetting its configuration/history.
 
     WANDB_RUN_ID + WANDB_RESUME=must are set per process by the resume launcher.
@@ -299,8 +334,8 @@ def init_tracking(args, config):
     through the shared helper's allow_val_change path. The checkpoint, not W&B,
     restores the actual training state.
     """
-    attached_run = None
-    if args.wandb and os.environ.get("WANDB_RUN_ID") and os.environ.get("WANDB_RESUME"):
+    if (attached_run is None and args.wandb
+            and os.environ.get("WANDB_RUN_ID") and os.environ.get("WANDB_RESUME")):
         import wandb
         attached_run = wandb.init(project=args.wandb_project)
     tracking = common.init_wandb(args, config, attached_run)
@@ -312,7 +347,8 @@ def init_tracking(args, config):
 
 def main(argv=None):
     p = build_parser()
-    args = p.parse_args(argv)
+    args = parse_args(p, argv)
+    sweep_run = prepare_sweep(p, args)
     env = resolve_args(p, args)
     config = config_dict(args)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -375,7 +411,8 @@ def main(argv=None):
 
     with (args.output_dir / "config.json").open("w") as f:
         json.dump(config, f, indent=2)
-    wandb = init_tracking(args, config)
+    wandb = (init_tracking(args, config, sweep_run) if sweep_run is not None
+             else init_tracking(args, config))
 
     def emit(payload):
         # None makes undefined opportunity rates valid JSON rather than NaN.
@@ -463,12 +500,17 @@ def main(argv=None):
     summary = {"round": args.rounds, "train_env_steps": args.rounds * args.train_steps,
                "env_interactions": args.prefill_steps + args.rounds * args.train_steps}
     if history:
-        last = np.asarray([row["returns"] for row in history[-5:]])
+        final_history = history[-args.final_return_window:]
+        last = np.asarray([row["returns"] for row in final_history])
         summary.update(common.agg(last.mean(axis=0), "final/return_smoothed"))
         summary["final/evaluations_averaged"] = len(last)
+        summary["final/window_start_train_env_steps"] = final_history[0]["round"] * args.train_steps
+        summary["final/window_end_train_env_steps"] = final_history[-1]["round"] * args.train_steps
     with (args.output_dir / "summary.json").open("w") as f:
         json.dump(summary, f, indent=2)
     if wandb is not None:
+        # Emit the selection metric exactly once, only after the full budget.
+        wandb.log(summary)
         wandb.summary.update(summary)
         wandb.finish()
     print(f"Done: {args.output_dir}", flush=True)

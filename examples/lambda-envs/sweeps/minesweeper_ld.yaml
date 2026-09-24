@@ -1,0 +1,69 @@
+# Five seeds per trial; 200k online training steps per seed, plus 3008 prefill.
+# Matches minesweeper_baseline.yaml; additionally tune discrepancy strength.
+name: minesweeper-ld-5seed-200k
+description: Recurrent SAC plus Retrace discrepancy, final-five-evaluation mean across five fixed tuning seeds.
+program: examples/lambda-envs/memory_games_sac.py
+method: bayes
+run_cap: 40
+metric:
+  name: final/return_smoothed/mean
+  goal: maximize
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --wandb
+  - --wandb-project=offline-lambda-minesweeper-sweeps
+  - ${args_no_boolean_flags}
+parameters:
+  env: {value: minesweeper}
+  method: {value: ld}
+  rows: {value: 6}
+  cols: {value: 6}
+  mines: {value: 6}
+  num_seeds: {value: 5}
+  seed: {value: 1000100}
+  rounds: {value: 40}
+  train_steps: {value: 5000}
+  final_return_window: {value: 5}
+  eval_every: {value: 1}
+  eval_episodes: {value: 128}
+  checkpoint_every: {value: 40}
+  memory_type: {value: gru}
+  memory_hidden_dim: {value: 128}
+  projection_dim: {value: 128}
+  head_dim: {value: 128}
+  batch_size: {value: 32}
+  sequence_length: {value: 32}
+  burn_in_length: {value: 30}
+  lambda_truncation: {value: 32}
+  online_buffer_size: {value: 100000}
+  prefill_steps: {value: 3008}
+  gamma: {value: 0.99}
+  tau: {value: 0.005}
+  lambda1: {value: 0.0}
+  lambda2: {value: 0.95}
+  lambda_coef:
+    distribution: log_uniform_values
+    min: 0.003
+    max: 0.3
+  use_sac: {value: false}
+  actor_fe_grad: {value: false}
+  remember: {value: false}
+  uncorrected: {value: false}
+  fe_lr:
+    distribution: log_uniform_values
+    min: 0.000003
+    max: 0.00003
+  actor_lr:
+    distribution: log_uniform_values
+    min: 0.00003
+    max: 0.0003
+  critic_lr:
+    distribution: log_uniform_values
+    min: 0.00003
+    max: 0.0003
+  alpha:
+    distribution: log_uniform_values
+    min: 0.003
+    max: 0.1
