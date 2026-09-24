@@ -1,0 +1,154 @@
+# Deadline-friendly memory-game experiments
+
+`memory_games_sac.py` uses the existing gymnax/JAX learner for two independent
+implementations of POPGym games. No additional environment package is needed.
+
+## Parallel cluster pilot
+
+From the repository root on the cluster (with these new files present):
+
+```bash
+mkdir -p /project/home/p201442/u104493/slurm-logs
+sbatch examples/lambda-envs/memory_games_pilot.slrm
+```
+
+This submits **two array tasks, four GPUs each**: Concentration (52 cards, 13
+ranks) and Minesweeper (6x6, six mines). Each GPU trains three seeds together for
+100k steps. The four conditions have matched seeds and hyperparameters:
+
+1. `sac`: no lambda branches.
+2. `critics`: both lambda value-regression losses, discrepancy coefficient zero.
+3. `ld0.01`: same critics plus discrepancy coefficient 0.01.
+4. `ld0.1`: same critics plus discrepancy coefficient 0.1.
+
+For four available GPUs, use `sbatch --array=0-1%1 ...` to run the games in two
+waves. `--array=0` selects Concentration alone; `--array=1` selects Minesweeper.
+
+Outputs: `/project/home/p201442/$USER/runs/memory-games-<job-id>/<env>/<condition>/`.
+W&B project: `offline-lambda-memory-games-results`. Every round logs locally too.
+The Slurm working directory is project storage. W&B files, temporary files,
+CUDA/JAX/Matplotlib caches and W&B settings are explicitly redirected beneath
+the run directory; Python bytecode writes are disabled to avoid creating cache
+files in the home checkout or its environment.
+`ALPHA=0.003` or `ALPHA=0.03` can test exploration sensitivity with the same
+four conditions. The default is 0.01; the games have normalized reward scales.
+
+## Longer run and resume
+
+Run ten seeds per condition for 1M steps, using a fresh matched seed set:
+
+```bash
+sbatch --time=12:00:00 \
+  --export=ALL,ROUNDS=200,NUM_SEEDS=10,BASE_SEED=100,EVAL_EPISODES=128,CHECKPOINT_EVERY=10 \
+  examples/lambda-envs/memory_games_pilot.slrm
+```
+
+The script defaults to a six-hour allocation for the pilot; increase it explicitly
+for longer runs. `ROUNDS=400` sets 2M steps. A longer configured budget is not an
+assertion of convergence: inspect the late learning curves and per-seed outcomes.
+
+Continue the **same** pilot seeds to 1M, retaining replay and optimizer state:
+
+```bash
+sbatch --time=12:00:00 \
+  --export=ALL,ROUNDS=200,RESUME_ROOT=/project/home/p201442/$USER/runs/memory-games-123456 \
+  examples/lambda-envs/memory_games_pilot.slrm
+```
+
+Replace `123456` with the pilot array job ID. Keep its original seed count,
+base seed, alpha and training configuration. `--rounds` is the total target,
+not an additional number. The runner checks configuration compatibility.
+Resume writes to the new job directory, so the source checkpoint is preserved.
+
+Checkpoints include agent/target parameters, optimizer states, replay, RNG,
+environment state and recurrent carry. Atomic replacement retains only the latest
+checkpoint. With 10 seeds, Concentration checkpoints are several GB: the default
+pilot saves every 25k steps; the long-run command above saves every 50k.
+
+## Runtime measurement
+
+Measured on an RTX 3090, JAX 0.7.1 / Flax 0.11.1, with the actual default model:
+128-unit GRU, 128-wide projection and heads, batch 32, sequence 32, trailing
+look-ahead 32, full-episode burn-in (104 / 30). Measurements use `method=ld`,
+500-update rounds, three rounds, and synchronize the GPU before timing.
+
+| Game | Concurrent seeds | Updates/s **per seed** | 100k steps | 1M steps |
+|---|---:|---:|---:|---:|
+| Concentration | 3 | 127 | 13 min | 2.2 h |
+| Minesweeper | 3 | 169 | 10 min | 1.6 h |
+| Concentration | 10 | 55 | 30 min | 5.1 h |
+| Minesweeper | 10 | 76 | 22 min | 3.7 h |
+
+These are **training-only projections for an entire seed group on one GPU**, not
+times to multiply by the seed count. Compilation was about 18 seconds per
+configuration. Evaluation, checkpoints, cluster performance and queueing add
+overhead. The runner prints and logs updated projections on the actual device.
+Eight GPUs run all eight configurations concurrently; four GPUs require waves.
+
+Reproduce a short benchmark:
+
+```bash
+python examples/lambda-envs/memory_games_sac.py \
+  --env concentration --method ld --rounds 3 --train-steps 500 \
+  --num-seeds 3 --eval-episodes 32 --checkpoint-every 0 \
+  --output-dir /tmp/concentration-timing
+```
+
+Switch `--env minesweeper` for the other game. Use a new output directory for
+each fresh run. Short benchmark runs establish throughput and finite updates,
+**not** learning success or a discrepancy advantage.
+
+## What to inspect
+
+- `agg/return/mean`: greedy evaluation return. `eval/sampled/return/mean` logs
+  the stochastic policy as well; early greedy policies can repeatedly select
+  one cell/card, so inspect both.
+- `agg/progress/mean`: fraction of card pairs matched / safe cells revealed.
+- `agg/known_choice_rate/mean`: matches selected when a matching location was
+  already seen; or unviewed safe neighbors chosen when a zero clue guarantees
+  one exists. This is undefined when there were no opportunities, not zero.
+- `agg/opportunities/mean` and `agg/invalid_fraction/mean` distinguish missing
+  opportunities, forgetting, and repeated invalid actions.
+- Random and history-only scripted reference policies are evaluated at startup.
+  They read no unobserved labels/mines and are reference policies, not optimal
+  upper bounds.
+- `env_interactions` **includes random prefill**; `train_env_steps` counts
+  subsequent one-update-per-interaction learning. The same prefill budget and
+  sequence windows are used across all four ablations.
+
+For a history-exposed control, add `--remember --memory-type identity` to a
+standalone `--method sac` run. It exposes only previously observed information,
+not the private deck/mine board. A failure even with this control suggests
+action-value/inference/exploration difficulties rather than only memory learning.
+
+## Environment and replay details
+
+- Concentration matches the original rank-matching rules: 52 positions with
+  four cards per rank, a 104-action cap, +1/26 for a pair, -1/104 per failed
+  attempted flip. Successful pairs stay face up. Failed pairs remain visible
+  until the next action; the transient observation is cached in the state.
+- Minesweeper has one clue per action, no flood fill and no first-click
+  protection. It rewards new safe cells, penalizes repeats, and terminates on
+  a mine, completion or the 30-action limit. Its clue one-hot has all possible
+  counts plus a distinct reset marker. This reset marker is an explicit minor
+  observation difference from original POPGym's ambiguous reset zero.
+- Neither game masks actions: invalid choices receive the reference penalties.
+- Previous executed action is part of the stored observation; its adapter and
+  the carried recurrent state preserve history across training rounds. Reset
+  occurs at actual episode boundaries. It enters the projection, not the memory
+  carry, with no duplicated previous-action input.
+- Full-episode burn-in is the default. Shortening it can remove clues from a
+  replay window and change what the memory-learning objective can train.
+
+Sources:
+[Concentration](https://github.com/proroklab/popgym/blob/master/popgym/envs/concentration.py),
+[Minesweeper](https://github.com/proroklab/popgym/blob/master/popgym/envs/minesweeper.py).
+
+Checks:
+
+```bash
+JAX_PLATFORMS=cpu mamba run -n lambda pytest \
+  tests/test_concentration_env.py tests/test_minesweeper_env.py \
+  tests/test_memory_games_runner.py -q
+bash -n examples/lambda-envs/memory_games_pilot.slrm
+```
