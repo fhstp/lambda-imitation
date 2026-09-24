@@ -99,6 +99,7 @@ Requires Python 3.10+ (uses `X | Y` union type syntax).
 - Local on-policy λ-discrepancy turnaround sweep: `python examples/lambda-envs/tmaze_lambda_turnaround.py`
 - Concentration / Minesweeper replay pilots: `python examples/lambda-envs/memory_games_sac.py --env concentration --method ld` (or `--env minesweeper`; methods `sac`, `critics`, `ld`)
 - Parallel cluster memory-game pilots (8 GPUs): `sbatch examples/lambda-envs/memory_games_pilot.slrm`
+- Memory-game stability/entropy/history follow-ups (three 4-GPU waves): `sbatch examples/lambda-envs/memory_games_followup.slrm`
 - Board probe + visualisation (Battleship): `python examples/lambda-envs/battleship_board_probe.py`
 - Offline Bayes-data training + probe (Battleship): `python examples/lambda-envs/battleship_board_probe.py --offline --expert-prefill-steps 100000 --num-seeds 3`
 - Online with an expert warm start: `python examples/lambda-envs/battleship_board_probe.py --expert-prefill-steps 20000 --num-seeds 3`

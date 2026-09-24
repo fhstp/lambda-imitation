@@ -1,0 +1,197 @@
+#!/bin/bash -l
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=128
+#SBATCH --gpus-per-node=4
+#SBATCH --array=0-2%1
+#SBATCH --time=02:00:00
+#SBATCH --account=p201442
+#SBATCH --partition=gpu
+#SBATCH --qos=short
+#SBATCH --job-name=memory-games-followup
+#SBATCH --chdir=/project/home/p201442/u104493
+#SBATCH --output=/project/home/p201442/u104493/slurm-logs/%x-%A_%a.out
+#SBATCH --error=/project/home/p201442/u104493/slurm-logs/%x-%A_%a.err
+
+# Short diagnostic follow-ups to pilot 5251683, all from fresh initialization.
+# Three four-GPU waves keep this job at four GPUs while the Minesweeper 1M
+# continuation uses another four. Each condition runs three seeds for 100k steps.
+#
+# Task 0, Minesweeper: SAC / critics-only at alpha 0.03 and 0.1, FE lr 1e-4.
+# Task 1, Minesweeper: SAC / critics-only at alpha 0.01 and 0.03, FE lr 1e-5.
+# Task 2, Concentration: SAC partial GRU / remembered-history identity controls
+#                       at alpha 0.01 and 0.03, FE lr 1e-5 throughout.
+# The original alpha 0.01 / FE lr 1e-4 baselines already exist in the first pilot.
+# All other model, replay and optimizer settings match memory_games_pilot.slrm.
+# Seeds match that pilot: 0..2 for Concentration, 1000000..1000002 for Minesweeper.
+# These are tuning seeds, not the later independent confirmation seed set.
+#
+#   sbatch examples/lambda-envs/memory_games_followup.slrm
+#   sbatch --array=0-1%1 examples/lambda-envs/memory_games_followup.slrm  # Minesweeper only
+#   sbatch --array=2 examples/lambda-envs/memory_games_followup.slrm    # Concentration only
+# ROUNDS/TRAIN_STEPS/NUM_SEEDS/BASE_SEED/EVAL_EVERY/EVAL_EPISODES/CHECKPOINT_EVERY
+# can be overridden with sbatch --export=ALL,... . ROUNDS=20 is 100k steps.
+# All runtime artifacts, caches and logs go to project storage; no pyc writes.
+
+set -euo pipefail
+
+case "${SLURM_ARRAY_TASK_ID:?Submit this script as a Slurm array}" in
+    0)
+        env_name=minesweeper
+        cohort=entropy
+        env_args=(--rows 6 --cols 6 --mines 6)
+        seed_offset=1000000
+        names=(sac-a0.03 critics-a0.03 sac-a0.1 critics-a0.1)
+        methods=(sac critics sac critics)
+        alphas=(0.03 0.03 0.1 0.1)
+        fe_lrs=(1e-4 1e-4 1e-4 1e-4)
+        memories=(gru gru gru gru)
+        remembered=(0 0 0 0)
+        ;;
+    1)
+        env_name=minesweeper
+        cohort=low-fe-lr
+        env_args=(--rows 6 --cols 6 --mines 6)
+        seed_offset=1000000
+        names=(sac-a0.01 critics-a0.01 sac-a0.03 critics-a0.03)
+        methods=(sac critics sac critics)
+        alphas=(0.01 0.01 0.03 0.03)
+        fe_lrs=(1e-5 1e-5 1e-5 1e-5)
+        memories=(gru gru gru gru)
+        remembered=(0 0 0 0)
+        ;;
+    2)
+        env_name=concentration
+        cohort=stability-history
+        env_args=(--cards 52 --types 13)
+        seed_offset=0
+        names=(partial-a0.01 history-a0.01 partial-a0.03 history-a0.03)
+        methods=(sac sac sac sac)
+        alphas=(0.01 0.01 0.03 0.03)
+        fe_lrs=(1e-5 1e-5 1e-5 1e-5)
+        memories=(gru identity gru identity)
+        remembered=(0 1 0 1)
+        ;;
+    *)
+        printf 'Unsupported array task: %s (expected 0, 1 or 2)\n' "$SLURM_ARRAY_TASK_ID" >&2
+        exit 2
+        ;;
+esac
+
+ROUNDS="${ROUNDS:-20}"
+TRAIN_STEPS="${TRAIN_STEPS:-5000}"
+NUM_SEEDS="${NUM_SEEDS:-3}"
+BASE_SEED="${BASE_SEED:-0}"
+EVAL_EVERY="${EVAL_EVERY:-1}"
+EVAL_EPISODES="${EVAL_EPISODES:-64}"
+CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-5}"
+WANDB_PROJECT="${WANDB_PROJECT:-offline-lambda-memory-games-results}"
+
+PROJ="/project/home/p201442/$USER"
+job_id="${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:?Submit this script with sbatch}}"
+RUN_ROOT="${RUN_ROOT:-$PROJ/runs/memory-games-followup-$job_id}"
+REPO_ROOT="${REPO_ROOT:-$HOME/git/lambda-imitation}"
+SCRIPT="$REPO_ROOT/examples/lambda-envs/memory_games_sac.py"
+seed=$((BASE_SEED + seed_offset))
+
+runtime="$RUN_ROOT/$env_name/$cohort/runtime"
+export PYTHONDONTWRITEBYTECODE=1
+export TMPDIR="$runtime/tmp"
+export TMP="$TMPDIR"
+export TEMP="$TMPDIR"
+export XDG_CACHE_HOME="$runtime/cache"
+export MPLCONFIGDIR="$XDG_CACHE_HOME/matplotlib"
+export CUDA_CACHE_PATH="$XDG_CACHE_HOME/cuda"
+export JAX_COMPILATION_CACHE_DIR="$XDG_CACHE_HOME/jax"
+export WANDB_DIR="$RUN_ROOT/$env_name/$cohort/wandb"
+export WANDB_CACHE_DIR="$XDG_CACHE_HOME/wandb"
+export WANDB_CONFIG_DIR="$runtime/config/wandb"
+export WANDB_DATA_DIR="$runtime/wandb-data"
+mkdir -p "$TMPDIR" "$MPLCONFIGDIR" "$CUDA_CACHE_PATH" \
+    "$JAX_COMPILATION_CACHE_DIR" "$WANDB_DIR" "$WANDB_CACHE_DIR" \
+    "$WANDB_CONFIG_DIR" "$WANDB_DATA_DIR"
+
+source "${PYTHON_ENV_SCRIPT:-$HOME/envs/py314.sh}"
+export OMP_NUM_THREADS=32
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+if [[ ! -f "$SCRIPT" ]]; then
+    printf 'Runner not found: %s\n' "$SCRIPT" >&2
+    exit 1
+fi
+
+args=(
+    --env "$env_name" --rounds "$ROUNDS" --train-steps "$TRAIN_STEPS"
+    --num-seeds "$NUM_SEEDS" --seed "$seed"
+    --memory-hidden-dim 128 --batch-size 32 --sequence-length 32
+    --lambda-truncation 32 --lambda-coef 0
+    --eval-every "$EVAL_EVERY" --eval-episodes "$EVAL_EPISODES"
+    --checkpoint-every "$CHECKPOINT_EVERY"
+    --wandb --wandb-project "$WANDB_PROJECT"
+)
+outputs=()
+for name in "${names[@]}"; do
+    outputs+=("$RUN_ROOT/$env_name/$cohort/$name")
+done
+mkdir -p "${outputs[@]}"
+
+printf 'Array job %s task %s on %s: %s / %s\n' \
+    "$job_id" "$SLURM_ARRAY_TASK_ID" "$(hostname)" "$env_name" "$cohort"
+printf '%s matched seeds per condition, base %s; %s rounds x %s steps\n' \
+    "$NUM_SEEDS" "$seed" "$ROUNDS" "$TRAIN_STEPS"
+printf 'Code commit: %s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD)"
+printf 'RUN_ROOT=%s\nWANDB_DIR=%s\n' "$RUN_ROOT" "$WANDB_DIR"
+
+pids=()
+wait_all() {
+    local i status result=0
+    for i in "${!pids[@]}"; do
+        if wait "${pids[$i]}"; then
+            status=0
+        else
+            status=$?
+            result=1
+        fi
+        printf 'GPU %s (%s) exit=%s; log: %s/run.log\n' \
+            "$i" "${names[$i]}" "$status" "${outputs[$i]}"
+    done
+    return "$result"
+}
+
+stop_all() {
+    local status="$1" pid
+    trap '' INT TERM
+    for pid in "${pids[@]}"; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    wait_all || true
+    exit "$status"
+}
+trap 'stop_all 130' INT
+trap 'stop_all 143' TERM
+
+for i in "${!names[@]}"; do
+    condition_args=(
+        --method "${methods[$i]}" --alpha "${alphas[$i]}"
+        --fe-lr "${fe_lrs[$i]}" --memory-type "${memories[$i]}"
+    )
+    if [[ "${remembered[$i]}" == 1 ]]; then
+        condition_args+=(--remember)
+    fi
+    out="${outputs[$i]}"
+    printf 'GPU %s -> %s; alpha=%s FE-lr=%s memory=%s remembered=%s; output: %s\n' \
+        "$i" "${names[$i]}" "${alphas[$i]}" "${fe_lrs[$i]}" \
+        "${memories[$i]}" "${remembered[$i]}" "$out"
+    CUDA_VISIBLE_DEVICES="$i" python -u "$SCRIPT" \
+        "${args[@]}" "${env_args[@]}" "${condition_args[@]}" \
+        --output-dir "$out" \
+        --wandb-run-name "memory-games-$env_name-$cohort-${names[$i]}-${NUM_SEEDS}seed-$job_id" \
+        >> "$out/run.log" 2>&1 &
+    pids+=("$!")
+done
+
+rc=0
+wait_all || rc=$?
+trap - INT TERM
+printf 'Done, exit=%s; artifacts: %s/%s/%s\n' "$rc" "$RUN_ROOT" "$env_name" "$cohort"
+exit "$rc"

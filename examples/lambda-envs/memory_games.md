@@ -65,6 +65,52 @@ environment state and recurrent carry. Atomic replacement retains only the lates
 checkpoint. With 10 seeds, Concentration checkpoints are several GB: the default
 pilot saves every 25k steps; the long-run command above saves every 50k.
 
+## First pilot and diagnostic follow-ups
+
+Pilot `5251683` completed on 2026-09-24, using three matched seeds and 100k
+training steps per condition. Mean greedy returns over the final five
+evaluations (80k–100k), with across-seed standard errors:
+
+| Condition | Concentration | Minesweeper |
+|---|---:|---:|
+| SAC | -0.940 ± 0.002 | -0.404 ± 0.010 |
+| Critics only | -0.957 ± 0.002 | -0.399 ± 0.003 |
+| LD 0.01 | -0.985 ± 0.003 | -0.369 ± 0.016 |
+| LD 0.1 | -0.993 ± 0.003 | -0.311 ± 0.003 |
+
+Minesweeper LD 0.1 beat both controls in all three seeds, with known-safe choice
+rate 34% vs SAC's 17%. Its sampled return also improved (-0.345 vs -0.399).
+No condition cleared a board; the history-only scripted reference scored -0.058.
+Policy entropy differed strongly (2.60 vs 0.52 nats), motivating baseline tuning
+before attributing the gap specifically to memory. Concentration was below its
+random reference (-0.819), with badly drifting critics, so it needs stability
+and history-exposed controls before a long run. These are pilot findings, not
+convergence results.
+
+The four Minesweeper checkpoints are being continued to 1M steps (job
+`5251757`, output root `memory-games-5251757`, three original seeds, 128 eval
+episodes every 10k steps). Short fresh-initialization checks run with:
+
+```bash
+sbatch examples/lambda-envs/memory_games_followup.slrm
+```
+
+This is a **three-task array capped at one active task**, four GPUs per task:
+
+| Task | Game | Four conditions |
+|---|---|---|
+| 0 | Minesweeper | SAC / critics-only × α={0.03, 0.1}; FE lr=1e-4 |
+| 1 | Minesweeper | SAC / critics-only × α={0.01, 0.03}; FE lr=1e-5 |
+| 2 | Concentration | partial GRU / history-exposed identity SAC × α={0.01, 0.03}; FE lr=1e-5 |
+
+All run three seeds for 100k steps, using the original tuning seed set and
+unchanged head learning rates (1e-4). They save resumable checkpoints. Default
+evaluation budget is 64 episodes; all runtime artifacts are under project
+storage at `runs/memory-games-followup-<job-id>/<env>/<cohort>/<condition>`.
+Together with the four-GPU continuation, this keeps peak usage at eight GPUs.
+Use `--array=0-1%1` for the Minesweeper checks only or `--array=2` for Concentration.
+Select settings using these tuning runs, then use fresh seeds for confirmation.
+
 ## Runtime measurement
 
 Measured on an RTX 3090, JAX 0.7.1 / Flax 0.11.1, with the actual default model:
