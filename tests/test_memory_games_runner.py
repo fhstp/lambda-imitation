@@ -97,6 +97,8 @@ def test_sweep_overrides_are_applied_and_outputs_are_isolated(runner, monkeypatc
     class Config(dict):
         def update(self, values, *, allow_val_change=False):
             assert allow_val_change
+            assert not set(values) & {"env", "method", "fe_lr", "num_seeds",
+                                      "remember", "lambda_coef", "_wandb"}
             super().update(values)
 
     wb = ModuleType("wandb")
@@ -105,7 +107,8 @@ def test_sweep_overrides_are_applied_and_outputs_are_isolated(runner, monkeypatc
     def initialize(**kwargs):
         run = SimpleNamespace(id=f"trial{len(runs)}", config=Config(
             env="minesweeper", method="ld", fe_lr=2e-5, num_seeds=5,
-            remember=False, lambda_coef=0.04))
+            remember=False, lambda_coef=0.04,
+            _wandb={"cli_version": "0.30.0", "t": {"1": [12]}}))
         runs.append(run)
         return run
 
@@ -124,14 +127,17 @@ def test_sweep_overrides_are_applied_and_outputs_are_isolated(runner, monkeypatc
         runner.resolve_args(parser, args)
         assert args.fe_lr == 2e-5 and args.num_seeds == 5
         assert args.method == "ld" and args.lambda_coef == 0.04 and args.wandb
+        assert not hasattr(args, "_wandb")
         assert args.output_dir == tmp_path / "sweeps" / f"run_trial{i}"
         assert runner.init_tracking(args, runner.config_dict(args), attached) is wb
+        assert attached.config["_wandb"]["cli_version"] == "0.30.0"
         assert len(runs) == i + 1  # tracking attaches to the controller's run
         outputs.append(args.output_dir)
     assert outputs[0] != outputs[1]
 
 
-def test_sweep_rejects_resumed_trials_and_unknown_configuration(runner, monkeypatch, tmp_path):
+@pytest.mark.parametrize("unknown", ["misspelled_lr", "_misspelled_lr"])
+def test_sweep_rejects_resumed_trials_and_unknown_configuration(runner, monkeypatch, tmp_path, unknown):
     monkeypatch.setenv("WANDB_SWEEP_ID", "sweep")
     monkeypatch.setenv("MEMORY_GAMES_OUTPUT_DIR", str(tmp_path))
     parser = runner.build_parser()
@@ -140,7 +146,7 @@ def test_sweep_rejects_resumed_trials_and_unknown_configuration(runner, monkeypa
         runner.prepare_sweep(parser, args)
     args = runner.parse_args(parser, ["--env=minesweeper"])
     monkeypatch.setattr(runner.common, "apply_sweep_config", lambda p, a:
-                        SimpleNamespace(config={"misspelled_lr": 0.01}))
+                        SimpleNamespace(config={"_wandb": {}, unknown: 0.01}))
     with pytest.raises(SystemExit):
         runner.prepare_sweep(parser, args)
 

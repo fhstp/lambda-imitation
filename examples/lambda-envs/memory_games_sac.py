@@ -247,7 +247,9 @@ def prepare_sweep(parser, args):
         args.output_dir = Path(os.environ.get("MEMORY_GAMES_OUTPUT_DIR", "memory_games_output")) / "sweeps"
     sweep_run = common.apply_sweep_config(parser, args)
     known = {action.dest for action in parser._actions}
-    unknown = set(sweep_run.config) - known
+    # W&B may add its own bookkeeping after init, including during a sweep.
+    # Exempt that reserved entry, while still catching misspelled user knobs.
+    unknown = set(sweep_run.config) - known - {"_wandb"}
     if unknown:
         parser.error(f"unrecognized sweep parameters: {sorted(unknown)}")
     if args.resume_from is not None:
@@ -338,6 +340,10 @@ def init_tracking(args, config, attached_run=None):
             and os.environ.get("WANDB_RUN_ID") and os.environ.get("WANDB_RESUME")):
         import wandb
         attached_run = wandb.init(project=args.wandb_project)
+    if attached_run is not None and os.environ.get("WANDB_SWEEP_ID"):
+        # The controller already owns/logs the sampled knobs. Publish only the
+        # additional resolved settings rather than re-setting locked parameters.
+        config = {k: v for k, v in config.items() if k not in attached_run.config}
     tracking = common.init_wandb(args, config, attached_run)
     if tracking is not None:
         for prefix in ("agg", "eval", "reference", "timing"):
