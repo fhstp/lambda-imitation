@@ -61,9 +61,12 @@ def add_common_args(parser, *, output_dir_default, wandb_project_default,
     g.add_argument("--actor-lr", type=float, default=1e-4, help="actor lr (default 1e-4)")
     g.add_argument("--critic-lr", type=float, default=1e-4, help="critic lr (default 2e-4)")
     g.add_argument("--alpha", type=float, default=0.1, help="entropy temperature (default 0.1)")
-    g.add_argument("--autotune-alpha", action="store_true",
+    g.add_argument("--autotune-alpha", dest="autotune_alpha", action="store_true",
                    help="auto-adjust alpha to match --target-entropy (SAC discrete; "
                         "default off — alpha held fixed at --alpha).")
+    g.add_argument("--no-autotune-alpha", dest="autotune_alpha", action="store_false",
+                   help="hold alpha fixed (needed when a script defaults it on)")
+    parser.set_defaults(autotune_alpha=False)
     g.add_argument("--target-entropy", type=float, default=0.0,
                    help="target policy entropy for alpha autotuning (default 0.0). "
                         "For discrete a common heuristic is ~0.5–0.98·ln(num_actions).")
@@ -878,7 +881,11 @@ def make_evaluate(fns, env, env_params, *, zero_carry, zero_prev_action, max_ste
                 )
                 action = jnp.round(raw).astype(jnp.int32)
                 nobs, nst, rew, d, _ = env.step(ek, env_st, action, env_params)
-                npa = fns.encode_action(jnp.atleast_1d(raw))
+                # zero-width prev-action = the agent was built with
+                # use_prev_action=False; encoding one would change the carry's
+                # shape mid-scan, so leave it alone.
+                npa = (prev_action if prev_action.shape[-1] == 0
+                       else fns.encode_action(jnp.atleast_1d(raw)))
                 ret = ret + rew * (1.0 - done)
                 steps = steps + (1.0 - done)   # steps taken until first done
                 done = jnp.maximum(done, d.astype(jnp.float32))
@@ -929,7 +936,10 @@ def make_evaluate_critic(debug_fns, env, env_params, *, zero_carry, zero_prev_ac
                 qrng = (jnp.max(jnp.where(legalb, q, -jnp.inf))
                         - jnp.min(jnp.where(legalb, q, jnp.inf)))
                 action = jnp.argmax(jnp.where(legalb, q, -jnp.inf)).astype(jnp.int32)
-                npa = jax.nn.one_hot(action, num_actions)   # executed action → next prev-action input
+                # executed action → next prev-action input (zero-width when the
+                # agent does not take one; see make_evaluate)
+                npa = (prev_action if prev_action.shape[-1] == 0
+                       else jax.nn.one_hot(action, num_actions))
                 nobs, nst, rew, d, _ = env.step(ek, env_st, action, env_params)
                 ret = ret + rew * (1.0 - done)
                 steps = steps + (1.0 - done)

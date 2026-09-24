@@ -210,3 +210,6 @@ runs
 
 # saved demonstrations for tests
 *.npz
+
+# W&B writes its local run cache into the cwd
+wandb/

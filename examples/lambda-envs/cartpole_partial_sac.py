@@ -52,12 +52,21 @@ common.add_common_args(
     wandb_project_default="offline-lambda-cartpole-results",
     include_probe=False)
 
-# CartPole is small and fast; these defaults make a single-GPU run cheap.
+# Defaults carried over from the stable Battleship 5x5 run (W&B 6d5cfugb,
+# "bright-elevator-59": SAC+LD, 10 seeds, final return 11.9 +- 0.3, ~14.1 shots).
+# The first CartPole defaults here were guesses and trained unstably; these are a
+# configuration that is known to hold together on a harder POMDP.  What does NOT
+# transfer is that run's --paper-arch (a Battleship-specific embedding) and its
+# 100 x 10k schedule; the heads stay (256, 256) and the run stays short.
 parser.set_defaults(
     rounds=20, train_steps=5_000, gamma=0.99, tau=0.005,
-    memory_type="gru", memory_hidden_dim=128, projection_dim=64,
-    batch_size=64, sequence_length=20, burn_in_length=5,
-    online_buffer_size=100_000, alpha=0.2, autotune_alpha=True,
+    memory_type="gru", memory_hidden_dim=512, projection_dim=128,
+    batch_size=128, sequence_length=40, burn_in_length=10,
+    online_buffer_size=100_000,
+    alpha=0.1, autotune_alpha=False, target_entropy=0.0,
+    fe_lr=1e-5, actor_lr=1e-4, critic_lr=1e-4,
+    lambda_coef=0.01, retrace=True, use_sac=False, stop_actor_fe=True,
+    critic_layer_norm=True, actor_critic="sac",
 )
 
 args = common.parse_args(parser, extra_flags_env="CARTPOLE_EXTRA_FLAGS")
