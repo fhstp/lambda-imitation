@@ -9,7 +9,7 @@ import importlib
 import json
 from pathlib import Path
 import pickle
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import NamedTuple
 
 import jax
@@ -42,6 +42,43 @@ def assert_tree_equal(actual, expected):
         if jax.dtypes.issubdtype(a.dtype, jax.dtypes.prng_key):
             a, b = jax.random.key_data(a), jax.random.key_data(b)
         np.testing.assert_array_equal(a, b)
+
+
+def test_tracking_resume_keeps_run_and_updates_budget(runner, monkeypatch):
+    """Resume one W&B record and extend its budget without a second init."""
+    import sys
+
+    calls = []
+    updates = []
+    metrics = []
+
+    class Config(dict):
+        def update(self, values, *, allow_val_change=False):
+            updates.append(allow_val_change)
+            super().update(values)
+
+    run = SimpleNamespace(id="existing", name="original-name", config=Config(rounds=100))
+    wb = ModuleType("wandb")
+    wb.run = run
+
+    def initialize(**kwargs):
+        calls.append(kwargs)
+        return run
+
+    wb.init = initialize
+    wb.define_metric = lambda *args, **kwargs: metrics.append((args, kwargs))
+    monkeypatch.setitem(sys.modules, "wandb", wb)
+    monkeypatch.setenv("WANDB_RUN_ID", "existing")
+    monkeypatch.setenv("WANDB_RESUME", "must")
+    args = SimpleNamespace(wandb=True, wandb_project="test-project",
+                           wandb_run_name="original-name", num_seeds=3)
+    tracking = runner.init_tracking(args, {"rounds": 200})
+    assert tracking is wb
+    assert calls == [{"project": "test-project"}]
+    assert updates == [True]
+    assert run.config["rounds"] == 200
+    assert run.id == "existing" and run.name == "original-name"
+    assert (("eval/*",), {"step_metric": "env_interactions"}) in metrics
 
 
 def fixed_env(runner, game, remember=False):

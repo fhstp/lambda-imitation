@@ -143,6 +143,32 @@ The dependency lets the Concentration diagnostic finish first, keeping total
 usage at eight GPUs while the original 1M Minesweeper comparison runs. Expected
 training time is about 45 minutes after allocation, plus startup/evaluation.
 
+### Continue all four checkpoints and the same W&B curves
+
+`finished` means a process reached its configured step budget, not that learning
+necessarily converged. The matched baselines reached 500k before the new LD runs
+because they resumed at 100k; the plain baseline is also faster per update.
+
+Optional task **4** resumes every matched condition to **1M total steps**.
+Set `MATCHED_RESUME_ROOT` to the completed cohort directory. `WANDB_RUN_IDS`
+contains IDs in the order baseline, extra-critics, LD-small, LD-large. Keep the
+old W&B group as well. Set the comma-containing ID list in the shell environment
+so Slurm does not split it as separate `--export` entries:
+
+```bash
+export WANDB_RUN_IDS=c0v11yvi,rt4nayvx,ykga1pca,j8mkrf1g
+sbatch --array=4 --job-name=minesweeper-matched-1M \
+  --export=ALL,ROUNDS=200,CHECKPOINT_EVERY=10,MATCHED_RESUME_ROOT=/project/home/p201442/$USER/runs/memory-games-followup-5251952/minesweeper/matched-ld,WANDB_GROUP_OVERRIDE=memory-games-minesweeper-matched-ld-5251952 \
+  examples/lambda-envs/memory_games_followup.slrm
+```
+
+Wait for the source job's writers to finish (or use `--dependency=afterok:5251952`)
+before running this command. Only one process may write each W&B run at a time.
+Training resumes from checkpoint state, while `WANDB_RESUME=must` attaches logging
+to the existing run IDs. The runner updates the larger budget in W&B's config
+without resetting its history. New local artifacts go to the new job's project
+directory; source checkpoints and summaries remain available.
+
 ## Runtime measurement
 
 Measured on an RTX 3090, JAX 0.7.1 / Flax 0.11.1, with the actual default model:

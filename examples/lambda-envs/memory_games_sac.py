@@ -291,6 +291,25 @@ def load_checkpoint(path, args):
     return (*restored, saved["round"], saved["history"])
 
 
+def init_tracking(args, config):
+    """Attach to an existing W&B ID without resetting its configuration/history.
+
+    WANDB_RUN_ID + WANDB_RESUME=must are set per process by the resume launcher.
+    Attach first, then update mutable metadata (e.g. the larger round budget)
+    through the shared helper's allow_val_change path. The checkpoint, not W&B,
+    restores the actual training state.
+    """
+    attached_run = None
+    if args.wandb and os.environ.get("WANDB_RUN_ID") and os.environ.get("WANDB_RESUME"):
+        import wandb
+        attached_run = wandb.init(project=args.wandb_project)
+    tracking = common.init_wandb(args, config, attached_run)
+    if tracking is not None:
+        for prefix in ("agg", "eval", "reference", "timing"):
+            tracking.define_metric(f"{prefix}/*", step_metric="env_interactions")
+    return tracking
+
+
 def main(argv=None):
     p = build_parser()
     args = p.parse_args(argv)
@@ -356,10 +375,7 @@ def main(argv=None):
 
     with (args.output_dir / "config.json").open("w") as f:
         json.dump(config, f, indent=2)
-    wandb = common.init_wandb(args, config, None)
-    if wandb is not None:
-        for prefix in ("agg", "eval", "reference", "timing"):
-            wandb.define_metric(f"{prefix}/*", step_metric="env_interactions")
+    wandb = init_tracking(args, config)
 
     def emit(payload):
         # None makes undefined opportunity rates valid JSON rather than NaN.

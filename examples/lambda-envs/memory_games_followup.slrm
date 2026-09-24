@@ -25,6 +25,9 @@
 #   Resume SAC / critics-only from BASELINE_ROOT; start LD 0.03 / 0.1 fresh.
 #   All four use alpha 0.01, FE lr 1e-5, and the original three tuning seeds.
 #   Task 3 is NOT included in the default array; select --array=3 explicitly.
+# Optional task 4 continues all four matched runs from MATCHED_RESUME_ROOT to
+# 1M total steps. Set WANDB_RUN_IDS to their four comma-separated existing IDs
+# and WANDB_GROUP_OVERRIDE to the original group to continue the same curves.
 # The original alpha 0.01 / FE lr 1e-4 baselines already exist in the first pilot.
 # All other model, replay and optimizer settings match memory_games_pilot.slrm.
 # Seeds match that pilot: 0..2 for Concentration, 1000000..1000002 for Minesweeper.
@@ -45,6 +48,7 @@ set -euo pipefail
 default_rounds=20
 lambda_coefs=(0 0 0 0)
 checkpoints=("" "" "" "")
+wandb_ids=("" "" "" "")
 case "${SLURM_ARRAY_TASK_ID:?Submit this script as a Slurm array}" in
     0)
         env_name=minesweeper
@@ -82,7 +86,7 @@ case "${SLURM_ARRAY_TASK_ID:?Submit this script as a Slurm array}" in
         memories=(gru identity gru identity)
         remembered=(0 1 0 1)
         ;;
-    3)
+    3|4)
         env_name=minesweeper
         cohort=matched-ld
         env_args=(--rows 6 --cols 6 --mines 6)
@@ -95,12 +99,31 @@ case "${SLURM_ARRAY_TASK_ID:?Submit this script as a Slurm array}" in
         lambda_coefs=(0 0 0.03 0.1)
         memories=(gru gru gru gru)
         remembered=(0 0 0 0)
-        : "${BASELINE_ROOT:?Set BASELINE_ROOT to the completed low-fe-lr cohort}"
-        checkpoints[0]="$BASELINE_ROOT/sac-a0.01/checkpoint.pkl"
-        checkpoints[1]="$BASELINE_ROOT/critics-a0.01/checkpoint.pkl"
+        if [[ "$SLURM_ARRAY_TASK_ID" == 3 ]]; then
+            : "${BASELINE_ROOT:?Set BASELINE_ROOT to the completed low-fe-lr cohort}"
+            checkpoints[0]="$BASELINE_ROOT/sac-a0.01/checkpoint.pkl"
+            checkpoints[1]="$BASELINE_ROOT/critics-a0.01/checkpoint.pkl"
+        else
+            default_rounds=200
+            : "${MATCHED_RESUME_ROOT:?Set MATCHED_RESUME_ROOT to the completed matched-ld cohort}"
+            : "${WANDB_RUN_IDS:?Set four comma-separated existing W&B run IDs}"
+            : "${WANDB_GROUP_OVERRIDE:?Set the existing W&B group}"
+            IFS=',' read -r -a wandb_ids <<< "$WANDB_RUN_IDS"
+            if [[ "${#wandb_ids[@]}" != 4 ]]; then
+                printf 'WANDB_RUN_IDS must contain four comma-separated IDs\n' >&2
+                exit 2
+            fi
+            for i in "${!names[@]}"; do
+                if [[ -z "${wandb_ids[$i]}" ]]; then
+                    printf 'Missing W&B ID for %s\n' "${names[$i]}" >&2
+                    exit 2
+                fi
+                checkpoints[$i]="$MATCHED_RESUME_ROOT/${names[$i]}/checkpoint.pkl"
+            done
+        fi
         ;;
     *)
-        printf 'Unsupported array task: %s (expected 0, 1, 2 or 3)\n' "$SLURM_ARRAY_TASK_ID" >&2
+        printf 'Unsupported array task: %s (expected 0 through 4)\n' "$SLURM_ARRAY_TASK_ID" >&2
         exit 2
         ;;
 esac
@@ -141,7 +164,7 @@ export WANDB_DIR="$RUN_ROOT/$env_name/$cohort/wandb"
 export WANDB_CACHE_DIR="$XDG_CACHE_HOME/wandb"
 export WANDB_CONFIG_DIR="$runtime/config/wandb"
 export WANDB_DATA_DIR="$runtime/wandb-data"
-export WANDB_RUN_GROUP="memory-games-$env_name-$cohort-$job_id"
+export WANDB_RUN_GROUP="${WANDB_GROUP_OVERRIDE:-memory-games-$env_name-$cohort-$job_id}"
 mkdir -p "$TMPDIR" "$MPLCONFIGDIR" "$CUDA_CACHE_PATH" \
     "$JAX_COMPILATION_CACHE_DIR" "$WANDB_DIR" "$WANDB_CACHE_DIR" \
     "$WANDB_CONFIG_DIR" "$WANDB_DATA_DIR"
@@ -206,6 +229,8 @@ trap 'stop_all 130' INT
 trap 'stop_all 143' TERM
 
 for i in "${!names[@]}"; do
+    tracking_env=()
+    run_name="memory-games-$env_name-$cohort-${names[$i]}-${NUM_SEEDS}seed-$job_id"
     condition_args=(
         --method "${methods[$i]}" --alpha "${alphas[$i]}"
         --fe-lr "${fe_lrs[$i]}" --memory-type "${memories[$i]}"
@@ -215,6 +240,11 @@ for i in "${!names[@]}"; do
         condition_args+=(--resume-from "${checkpoints[$i]}")
         printf 'GPU %s (%s) resume: %s\n' "$i" "${names[$i]}" "${checkpoints[$i]}"
     fi
+    if [[ -n "${wandb_ids[$i]}" ]]; then
+        tracking_env=("WANDB_RUN_ID=${wandb_ids[$i]}" "WANDB_RESUME=must")
+        run_name=$(python -c 'import json,sys; from pathlib import Path; print(json.loads((Path(sys.argv[1]).parent / "config.json").read_text())["wandb_run_name"])' "${checkpoints[$i]}")
+        printf 'GPU %s continues W&B run %s\n' "$i" "${wandb_ids[$i]}"
+    fi
     if [[ "${remembered[$i]}" == 1 ]]; then
         condition_args+=(--remember)
     fi
@@ -222,10 +252,10 @@ for i in "${!names[@]}"; do
     printf 'GPU %s -> %s; alpha=%s FE-lr=%s LD-weight=%s memory=%s remembered=%s; output: %s\n' \
         "$i" "${names[$i]}" "${alphas[$i]}" "${fe_lrs[$i]}" \
         "${lambda_coefs[$i]}" "${memories[$i]}" "${remembered[$i]}" "$out"
-    CUDA_VISIBLE_DEVICES="$i" python -u "$SCRIPT" \
+    env CUDA_VISIBLE_DEVICES="$i" "${tracking_env[@]}" python -u "$SCRIPT" \
         "${args[@]}" "${env_args[@]}" "${condition_args[@]}" \
         --output-dir "$out" \
-        --wandb-run-name "memory-games-$env_name-$cohort-${names[$i]}-${NUM_SEEDS}seed-$job_id" \
+        --wandb-run-name "$run_name" \
         >> "$out/run.log" 2>&1 &
     pids+=("$!")
 done
