@@ -27,11 +27,16 @@ import numpy as np
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
-def add_common_args(parser, *, output_dir_default, wandb_project_default):
+def add_common_args(parser, *, output_dir_default, wandb_project_default,
+                    include_probe=True):
     """Add every flag that is not environment-specific.
 
     The caller adds its own environment group (board size, ship lengths, maze
     options, …) and its network-architecture flags before calling this.
+
+    ``include_probe=False`` omits the collection, probe and visualisation flags,
+    for environments where training and evaluation are the whole story and there
+    is no hidden state worth decoding.  Everything else is unchanged.
     """
     g = parser.add_argument_group("agent training")
     g.add_argument("--rounds", type=int, default=100, help="training rounds (default 100)")
@@ -220,30 +225,7 @@ def add_common_args(parser, *, output_dir_default, wandb_project_default):
     g.add_argument("--no-use-sac", dest="use_sac", action="store_false")
     parser.set_defaults(use_sac=False)
 
-    g = parser.add_argument_group("data collection")
-    g.add_argument("--collect-steps", type=int, default=100_000, help="total env steps to collect (default 100 000)")
-    g.add_argument("--collect-epsilon", type=float, default=0.1, help="epsilon-greedy rate during collection (default 0.1)")
-
-    g = parser.add_argument_group("probe training")
-    g.add_argument("--probe-steps", type=int, default=500_000, help="SGD steps (default 500 k)")
-    g.add_argument("--probe-lr", type=float, default=1e-4)
-    g.add_argument("--probe-hidden-dim", type=int, default=1024)
-    g.add_argument("--probe-batch-size", type=int, default=32)
-    g.add_argument("--probe-eval-interval", type=int, default=10,
-                   help="during agent training, train+score a lightweight probe every "
-                        "N rounds and log it under probe_eval/ (0 disables; default 10)")
-    g.add_argument("--probe-eval-steps", type=int, default=100_000,
-                   help="SGD steps for each periodic probe eval (default 100 k)")
-    g.add_argument("--probe-eval-collect-steps", type=int, default=20_000,
-                   help="env steps collected per dataset for each periodic probe eval "
-                        "(default 20 k; a train and a test set are collected)")
-    g.add_argument("--probe-eval-vis", dest="probe_eval_vis", action="store_true",
-                   help="also render episode/accuracy/retention images + an mp4 for each "
-                        "periodic probe eval and log them to W&B (default on)")
-    g.add_argument("--no-probe-eval-vis", dest="probe_eval_vis", action="store_false")
-    parser.set_defaults(probe_eval_vis=False)
-
-    g = parser.add_argument_group("I/O & visualisation")
+    g = parser.add_argument_group("I/O")
     g.add_argument("--output-dir",
                    default=os.environ.get("PROBE_OUTPUT_DIR", output_dir_default),
                    help="where artefacts go (default $PROBE_OUTPUT_DIR, else "
@@ -253,25 +235,51 @@ def add_common_args(parser, *, output_dir_default, wandb_project_default):
                         "environment.  Each sweep run still gets its own "
                         "run_<id> subdirectory underneath.")
     g.add_argument("--skip-train", action="store_true", help="load agent from output-dir")
-    g.add_argument("--skip-collect", action="store_true", help="load dataset from output-dir")
-    g.add_argument("--skip-probe", action="store_true", help="load probe from output-dir")
-    g.add_argument("--setup-only", action="store_true",
-                   help="build the env / agent / probe helpers, then exit before "
-                        "the training phase, so an importing script can drive its "
-                        "own pipeline from this module's globals")
     g.add_argument("--train-only", action="store_true",
-                   help="stop after training (skip collect/probe/visualise)")
+                   help="stop after training (skip any collect/probe/visualise)")
     g.add_argument("--save-checkpoint-at", type=int, default=0, metavar="ROUND",
                    help="save a resumable checkpoint after this round (0 = off)")
     g.add_argument("--resume-from", default=None, metavar="PATH",
                    help="resume training from a checkpoint written by "
                         "--save-checkpoint-at")
-    g.add_argument("--vis-only", action="store_true",
-                   help="skip phases 1-3 and render from saved artefacts "
-                        "(needs only jax + matplotlib)")
-    g.add_argument("--mp4", action="store_true", help="also write an animation")
-    g.add_argument("--vis-episodes", type=int, default=3, help="episodes to render (default 3)")
-    g.add_argument("--vis-frames", type=int, default=8, help="frames per episode figure (default 8)")
+
+    if include_probe:
+        g = parser.add_argument_group("data collection")
+        g.add_argument("--collect-steps", type=int, default=100_000, help="total env steps to collect (default 100 000)")
+        g.add_argument("--collect-epsilon", type=float, default=0.1, help="epsilon-greedy rate during collection (default 0.1)")
+
+        g = parser.add_argument_group("probe training")
+        g.add_argument("--probe-steps", type=int, default=500_000, help="SGD steps (default 500 k)")
+        g.add_argument("--probe-lr", type=float, default=1e-4)
+        g.add_argument("--probe-hidden-dim", type=int, default=1024)
+        g.add_argument("--probe-batch-size", type=int, default=32)
+        g.add_argument("--probe-eval-interval", type=int, default=10,
+                       help="during agent training, train+score a lightweight probe every "
+                            "N rounds and log it under probe_eval/ (0 disables; default 10)")
+        g.add_argument("--probe-eval-steps", type=int, default=100_000,
+                       help="SGD steps for each periodic probe eval (default 100 k)")
+        g.add_argument("--probe-eval-collect-steps", type=int, default=20_000,
+                       help="env steps collected per dataset for each periodic probe eval "
+                            "(default 20 k; a train and a test set are collected)")
+        g.add_argument("--probe-eval-vis", dest="probe_eval_vis", action="store_true",
+                       help="also render episode/accuracy/retention images + an mp4 for each "
+                            "periodic probe eval and log them to W&B (default on)")
+        g.add_argument("--no-probe-eval-vis", dest="probe_eval_vis", action="store_false")
+        parser.set_defaults(probe_eval_vis=False)
+
+        g = parser.add_argument_group("probe I/O & visualisation")
+        g.add_argument("--skip-collect", action="store_true", help="load dataset from output-dir")
+        g.add_argument("--skip-probe", action="store_true", help="load probe from output-dir")
+        g.add_argument("--setup-only", action="store_true",
+                       help="build the env / agent / probe helpers, then exit before "
+                            "the training phase, so an importing script can drive its "
+                            "own pipeline from this module's globals")
+        g.add_argument("--vis-only", action="store_true",
+                       help="skip phases 1-3 and render from saved artefacts "
+                            "(needs only jax + matplotlib)")
+        g.add_argument("--mp4", action="store_true", help="also write an animation")
+        g.add_argument("--vis-episodes", type=int, default=3, help="episodes to render (default 3)")
+        g.add_argument("--vis-frames", type=int, default=8, help="frames per episode figure (default 8)")
 
     g = parser.add_argument_group("logging")
     g.add_argument("--wandb", action="store_true", help="log metrics/images to Weights & Biases")
@@ -411,15 +419,15 @@ def common_wandb_config(args):
         "online_buffer_size": args.online_buffer_size,
         "rounds": args.rounds,
         "train_steps": args.train_steps,
-        "collect_steps": args.collect_steps,
-        "collect_epsilon": args.collect_epsilon,
-        "probe_steps": args.probe_steps,
-        "probe_lr": args.probe_lr,
-        "probe_hidden_dim": args.probe_hidden_dim,
-        "probe_batch_size": args.probe_batch_size,
-        "probe_eval_interval": args.probe_eval_interval,
-        "probe_eval_steps": args.probe_eval_steps,
-        "probe_eval_collect_steps": args.probe_eval_collect_steps,
+        "collect_steps": getattr(args, "collect_steps", None),
+        "collect_epsilon": getattr(args, "collect_epsilon", None),
+        "probe_steps": getattr(args, "probe_steps", None),
+        "probe_lr": getattr(args, "probe_lr", None),
+        "probe_hidden_dim": getattr(args, "probe_hidden_dim", None),
+        "probe_batch_size": getattr(args, "probe_batch_size", None),
+        "probe_eval_interval": getattr(args, "probe_eval_interval", None),
+        "probe_eval_steps": getattr(args, "probe_eval_steps", None),
+        "probe_eval_collect_steps": getattr(args, "probe_eval_collect_steps", None),
         "use_sac": args.use_sac,
         "stop_critic_fe": args.stop_critic_fe,
         "ld_center": args.ld_center,
@@ -442,7 +450,7 @@ def init_wandb(args, config, sweep_run):
     Vis-only mode is portable (no agent/env), so wandb stays off there.
     Returns the wandb module, or None when logging is off.
     """
-    if not args.wandb or args.vis_only:
+    if not args.wandb or getattr(args, "vis_only", False):
         return None
     try:
         import wandb as _wandb
