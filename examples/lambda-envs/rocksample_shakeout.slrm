@@ -1,0 +1,100 @@
+#!/bin/bash -l
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=128
+#SBATCH --gpus-per-node=4
+#SBATCH --time=12:00:00
+#SBATCH --account=p201442
+#SBATCH --partition=gpu
+#SBATCH --qos=default
+#SBATCH --job-name=rs11-shakeout
+#SBATCH --output=/project/home/p201442/u104493/slurm-logs/%x-%j.out
+
+# RockSample 11x11 shakeout: four hyperparameter settings, one per GPU, 3 seeds
+# each.  The question is only "does this train at all, and in which regime", so
+# the four span the range between the reference's PPO settings and the recipe
+# that actually held together on Battleship, plus a no-LD control:
+#
+#   gpu0  paper     alpha 0.35, lambda-coef 0.5   -- the reference's entropy
+#                   coefficient and ld_weight for 11x11, lrs at our 1e-4
+#   gpu1  stable    alpha 0.1,  lambda-coef 0.01  -- the Battleship 6d5cfugb
+#                   recipe: fe-lr 1e-5 and the actor kept out of the memory
+#   gpu2  middle    alpha 0.2,  lambda-coef 0.1   -- between the two
+#   gpu3  control   no lambda critics at all (plain SAC), stable settings
+#
+# NOTE alpha here is the SAC temperature, which is NOT the same object as the
+# reference's entropy_coeff (a PPO loss weight).  0.35 is carried over as a
+# starting point, not as an equivalence.
+#
+# Walking east exits with +10, so 10 is the do-nothing floor: a run sitting at
+# 10 has learned to leave, not to collect rocks.
+
+source ~/envs/py314.sh
+export OMP_NUM_THREADS=32                  # 128 cores / 4 processes
+
+# Home has a 100k-file quota and these runs write many small files.
+PROJ=/project/home/p201442/$USER
+export WANDB_DIR=$PROJ/wandb
+export PROBE_OUTPUT_DIR=$PROJ/rocksample
+mkdir -p "$WANDB_DIR" "$PROBE_OUTPUT_DIR"
+
+# ── knobs ────────────────────────────────────────────────────────────────────
+CONFIG=rocksample_11_11
+ROUNDS=40
+TRAIN_STEPS=10000                          # 400k env steps/seed (the paper uses 3e6)
+NUM_SEEDS=3
+PROBE_EVAL_INTERVAL=10
+NAMES=(paper stable middle control)
+EXTRA=("--alpha 0.35 --lambda-coef 0.5"
+       "--alpha 0.1  --lambda-coef 0.01 --fe-lr 1e-5 --stop-actor-fe"
+       "--alpha 0.2  --lambda-coef 0.1  --fe-lr 1e-5"
+       "--alpha 0.1  --no-approximate-lambda --fe-lr 1e-5 --stop-actor-fe")
+# ─────────────────────────────────────────────────────────────────────────────
+
+SCRIPT=~/git/lambda-imitation/examples/lambda-envs/rocksample_probe.py
+RUNDIR=$PROJ/runs/$SLURM_JOB_ID
+mkdir -p "$RUNDIR"
+
+# Random base seed per submission; processes spaced 1e6 apart so one run's
+# probe-eval keys cannot collide with another's training keys.
+R=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+BASE=$(( R % 1000000000 ))
+
+# --config carries the paper's gamma (0.99) and hidden size (128) for 11x11, and
+# --paper-arch is the default, so neither is spelled out here.
+ARGS="--config $CONFIG
+      --num-seeds $NUM_SEEDS
+      --rounds $ROUNDS
+      --train-steps $TRAIN_STEPS
+      --probe-eval-interval $PROBE_EVAL_INTERVAL
+      --probe-eval-steps 20000
+      --probe-eval-collect-steps 10000
+      --collect-steps 20000
+      --probe-steps 50000
+      --retrace
+      --wandb"
+
+echo "job $SLURM_JOB_ID on $(hostname)  base seed $BASE"
+echo "$CONFIG, ${NUM_SEEDS} seeds x 4 settings: ${NAMES[*]}"
+
+pids=()
+for i in 0 1 2 3; do
+    name=${NAMES[$i]}
+    seed=$(( BASE + i * 1000000 ))
+    out=$RUNDIR/gpu$i-$name
+    mkdir -p "$out"
+    echo "gpu$i -> $name: ${EXTRA[$i]}"
+    CUDA_VISIBLE_DEVICES=$i python -u "$SCRIPT" $ARGS ${EXTRA[$i]} \
+        --seed "$seed" \
+        --output-dir "$out" \
+        --wandb-run-name "rs11-$name-$SLURM_JOB_ID-s$seed" \
+        > "$out/run.log" 2>&1 &
+    pids+=($!)
+done
+
+rc=0
+for i in "${!pids[@]}"; do
+    wait "${pids[$i]}" || { rc=1; echo "gpu$i (${NAMES[$i]}) FAILED — see $RUNDIR/gpu$i-${NAMES[$i]}/run.log"; }
+done
+echo "done, rc=$rc  (artefacts under $RUNDIR)"
+exit $rc
