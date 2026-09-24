@@ -1,0 +1,93 @@
+#!/bin/bash -l
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=128
+#SBATCH --gpus-per-node=4
+#SBATCH --time=10:00:00
+#SBATCH --account=p201442
+#SBATCH --partition=gpu
+#SBATCH --qos=default
+#SBATCH --job-name=cpnoise-lambda
+#SBATCH --output=/project/home/p201442/u104493/slurm-logs/%x-%j.out
+
+# Noisy partial CartPole: lambda-discrepancy weight vs none, 5 seeds each.
+#
+#   gpu0  ld0.5    --lambda-coef 0.5
+#   gpu1  ld0.1    --lambda-coef 0.1
+#   gpu2  ld0.01   --lambda-coef 0.01
+#   gpu3  sac      --no-approximate-lambda    (no lambda critics at all)
+#
+# All four use --no-use-sac, i.e. a hard Bellman backup; the actor keeps its
+# entropy term either way.
+#
+# Why noise: clean partial CartPole is solved by plain SAC (500.0 +- 0.0 by
+# round 12), because the hidden velocity is recoverable from two consecutive
+# observations -- a 2-step memory, too short for the discrepancy to have
+# anything to measure.  --obs-noise 0.1 is 0.042 rad on the angle against a
+# per-step angle change of ~0.02 rad, so the velocity now needs averaging over
+# roughly 4-10 steps.  That is the horizon band where the discrepancy should
+# matter, if it matters anywhere.
+#
+# Return ceiling is 500 (the CartPole-v1 time limit).
+
+source ~/envs/py314.sh
+export OMP_NUM_THREADS=32
+
+PROJ=/project/home/p201442/$USER
+export WANDB_DIR=$PROJ/wandb
+export PROBE_OUTPUT_DIR=$PROJ/cartpole
+mkdir -p "$WANDB_DIR" "$PROBE_OUTPUT_DIR"
+
+# ── knobs ────────────────────────────────────────────────────────────────────
+OBS_NOISE=0.1
+ROUNDS=40
+TRAIN_STEPS=5000                           # 200k env steps/seed (clean solves by ~60k)
+NUM_SEEDS=5
+NAMES=(ld0.5 ld0.1 ld0.01 sac)
+EXTRA=("--lambda-coef 0.5"
+       "--lambda-coef 0.1"
+       "--lambda-coef 0.01"
+       "--no-approximate-lambda")
+# ─────────────────────────────────────────────────────────────────────────────
+
+SCRIPT=~/git/lambda-imitation/examples/lambda-envs/cartpole_partial_sac.py
+RUNDIR=$PROJ/runs/$SLURM_JOB_ID
+mkdir -p "$RUNDIR"
+
+R=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+BASE=$(( R % 1000000000 ))
+
+# alpha and the rest are the script defaults, carried from the Battleship run
+# that trained stably and which solved the clean task here.
+ARGS="--obs-noise $OBS_NOISE
+      --num-seeds $NUM_SEEDS
+      --rounds $ROUNDS
+      --train-steps $TRAIN_STEPS
+      --no-use-sac
+      --retrace
+      --wandb"
+
+echo "job $SLURM_JOB_ID on $(hostname)  base seed $BASE"
+echo "noisy partial CartPole (sigma=$OBS_NOISE), ${NUM_SEEDS} seeds x {${NAMES[*]}}"
+
+pids=()
+for i in 0 1 2 3; do
+    name=${NAMES[$i]}
+    seed=$(( BASE + i * 1000000 ))
+    out=$RUNDIR/gpu$i-$name
+    mkdir -p "$out"
+    echo "gpu$i -> $name: ${EXTRA[$i]}"
+    CUDA_VISIBLE_DEVICES=$i python -u "$SCRIPT" $ARGS ${EXTRA[$i]} \
+        --seed "$seed" \
+        --output-dir "$out" \
+        --wandb-run-name "cpnoise-$name-5seed-$SLURM_JOB_ID" \
+        > "$out/run.log" 2>&1 &
+    pids+=($!)
+done
+
+rc=0
+for i in "${!pids[@]}"; do
+    wait "${pids[$i]}" || { rc=1; echo "gpu$i (${NAMES[$i]}) FAILED — see $RUNDIR/gpu$i-${NAMES[$i]}/run.log"; }
+done
+echo "done, rc=$rc  (artefacts under $RUNDIR)"
+exit $rc

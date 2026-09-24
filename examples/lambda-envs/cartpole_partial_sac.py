@@ -28,6 +28,7 @@ import argparse
 import os
 import pickle
 import sys
+from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _probe_common as common
@@ -43,6 +44,13 @@ g.add_argument("--full-obs", dest="partial", action="store_false",
 g.add_argument("--partial", dest="partial", action="store_true",
                help="mask cart velocity and pole angular velocity (default)")
 parser.set_defaults(partial=True)
+g.add_argument("--obs-noise", type=float, default=0.0,
+               help="std of Gaussian observation noise, as a FRACTION of each "
+                    "dimension's range (position +-4.8, angle +-0.42 rad), so one "
+                    "value means the same for both.  0 = clean (default).  Noise "
+                    "is what turns this from a 2-step inference problem into one "
+                    "where the memory has to average over a window: the velocity "
+                    "is still recoverable, but no longer from two observations.")
 g.add_argument("--eval-max-steps", type=int, default=500,
                help="episode cap for the evaluation scans (default 500 = the "
                     "CartPole-v1 time limit, which is also the maximum return)")
@@ -84,6 +92,7 @@ _wandb = common.init_wandb(args, {
     "env": "CartPole-v1",
     "experiment": "partial_cartpole",
     "partial": args.partial,
+    "obs_noise": args.obs_noise,
     "algo": ("SAC+LD" if args.approximate_lambda else "SAC") + ("+GVD" if args.gvd else ""),
     "eval_max_steps": args.eval_max_steps,
     **common.common_wandb_config(args),
@@ -103,32 +112,65 @@ from lambda_imitation.iqlearn import Hyperparameters
 from lambda_imitation.utils import create_iqlearn_from_env, env_spec_from_gymnax
 
 
-class PartialObsEnv:
-    """Expose only cart position and pole angle (drop both velocities).
+class _NoisyState(NamedTuple):
+    """Inner env state plus the key that generated the CURRENT observation.
 
-    Same masking as ``examples/cartpole_sac_mc.py`` and as ``mask_dims=[0, 2]``
-    in lambda-envs' ``get_gymnax_env``: obs_shape (4,) -> (2,).
+    The noise has to live in the state: the library calls ``get_obs(state)`` in
+    places where it has no PRNG key (the buffer prefill, for one), and if that
+    returned a differently-noised observation than the one ``step`` returned for
+    the same state, the stored transitions would disagree with the rollout.
+    """
+
+    inner: object
+    noise_key: jax.Array
+
+
+class PartialObsEnv:
+    """Expose only cart position and pole angle, optionally with noise.
+
+    Masking is the same as ``examples/cartpole_sac_mc.py`` and ``mask_dims=[0,
+    2]`` in lambda-envs' ``get_gymnax_env``: obs_shape (4,) -> (2,).
+
+    ``noise_std`` is a fraction of each dimension's own range, because position
+    (±4.8) and angle (±0.42 rad) differ by more than 10x and a single absolute
+    sigma would drown the angle while barely touching the position.  Velocity
+    dimensions have infinite bounds, so they take a scale of 1.0 (their actual
+    spread is order 1) -- only relevant with --full-obs.
     """
 
     _KEEP = jnp.array([0, 2])
 
-    def __init__(self, wrapped):
+    def __init__(self, wrapped, noise_std=0.0, partial=True):
         self._wrapped = wrapped
+        self.noise_std = float(noise_std)
+        self.partial = partial
+        high = jnp.asarray(wrapped.observation_space(wrapped.default_params).high)
+        scale = jnp.where(jnp.isfinite(high), high, 1.0)
+        self._scale = scale[self._KEEP] if partial else scale
 
-    def _mask(self, obs):
-        return obs[self._KEEP]
+    def _observe(self, obs, noise_key):
+        if self.partial:
+            obs = obs[self._KEEP]
+        if self.noise_std > 0.0:
+            obs = obs + self.noise_std * self._scale * jax.random.normal(
+                noise_key, obs.shape)
+        return obs
 
     def get_obs(self, state, params=None):
-        return self._mask(self._wrapped.get_obs(state, params))
+        return self._observe(self._wrapped.get_obs(state.inner, params),
+                             state.noise_key)
 
     def reset(self, key, params):
-        obs, state = self._wrapped.reset(key, params)
-        return self._mask(obs), state
+        env_key, noise_key = jax.random.split(key)
+        obs, inner = self._wrapped.reset(env_key, params)
+        return self._observe(obs, noise_key), _NoisyState(inner, noise_key)
 
     def step(self, key, state, action, params):
-        obs, new_state, reward, done, info = self._wrapped.step(
-            key, state, action, params)
-        return self._mask(obs), new_state, reward, done, info
+        env_key, noise_key = jax.random.split(key)
+        obs, inner, reward, done, info = self._wrapped.step(
+            env_key, state.inner, action, params)
+        return (self._observe(obs, noise_key), _NoisyState(inner, noise_key),
+                reward, done, info)
 
     def __getattr__(self, name):
         return getattr(self._wrapped, name)
@@ -136,14 +178,14 @@ class PartialObsEnv:
 
 _raw_env, env_params = gymnax.make("CartPole-v1")
 spec = env_spec_from_gymnax(_raw_env, env_params)   # CartPole-v1: (4,), 2 actions
+# Always wrapped, so the noise key is carried in the state even when the noise is
+# off (noise_std=0 reproduces the clean env exactly).
+env = PartialObsEnv(_raw_env, noise_std=args.obs_noise, partial=args.partial)
 if args.partial:
     # The wrapper forwards observation_space to the inner env, so the spec has to
     # be narrowed by hand -- otherwise the buffer is built for 4-dim rows and the
     # 2-dim masked observation fails to broadcast into it.
-    env = PartialObsEnv(_raw_env)
     spec = spec._replace(obs_shape=(int(PartialObsEnv._KEEP.shape[0]),))
-else:
-    env = _raw_env
 NUM_ACTIONS = int(spec.action_dim)
 
 if args.memory_type == "identity" and args.partial:
@@ -210,7 +252,8 @@ def _build_agent(seed_val):
 
 tag = ("SAC+LD" if args.approximate_lambda else "SAC") + ("+GVD" if args.gvd else "")
 print(f"Building {tag} agent for CartPole-v1 "
-      f"({'partial: position + angle' if args.partial else 'full observation'}, "
+      f"({'partial: position + angle' if args.partial else 'full observation'}"
+      f"{f', obs noise {args.obs_noise}' if args.obs_noise else ''}, "
       f"memory={args.memory_type}, hidden={args.memory_hidden_dim})…")
 state, fns, debug_fns = _build_agent(args.seed)
 
