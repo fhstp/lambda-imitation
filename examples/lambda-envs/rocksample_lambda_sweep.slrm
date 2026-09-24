@@ -1,0 +1,102 @@
+#!/bin/bash -l
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=128
+#SBATCH --gpus-per-node=4
+#SBATCH --time=18:00:00
+#SBATCH --account=p201442
+#SBATCH --partition=gpu
+#SBATCH --qos=default
+#SBATCH --job-name=rs5-lambda
+#SBATCH --output=/project/home/p201442/u104493/slurm-logs/%x-%j.out
+
+# RockSample 5x5, lambda-discrepancy weight sweep at 10 seeds.
+#
+#   gpu0  ld0.5    --lambda-coef 0.5    the reference's ld_weight for 11x11
+#   gpu1  ld0.1    --lambda-coef 0.1
+#   gpu2  ld0.01   --lambda-coef 0.01   what the local 3-seed run used
+#   gpu3  sac      --no-approximate-lambda   no lambda critics at all
+#
+# This exists to settle two things the local 3-seed run could not:
+#
+#   1. At 3 seeds, SAC+LD finished at 13.50 +- 2.99 and plain SAC at 7.39 +-
+#      5.91 -- but that gap is one collapsing SAC seed (-49.7 averaged over its
+#      last five rounds, a single round at -89.67).  10 seeds says whether that
+#      collapse is a 1-in-3 or a 1-in-10 event, which IS the claim.
+#   2. lambda-coef 0.01 was inherited from Battleship, not tuned here, so a null
+#      result at 0.01 says nothing about the method.  0.5 and 0.1 bracket it.
+#
+# 60 rounds x 10k = 600k env steps per seed, 6x the local run, because that run
+# only took off after round 10 and its last five rounds were its best -- 100k
+# steps was cutting it off mid-flight.
+#
+# alpha 0.5 and the rest of the settings are the local configuration that
+# worked: at 0.1 the policy entropy collapsed to 0.47 of ln(10)=2.303 within 5k
+# steps and the critic inflated to ~52 against a return near 0.
+#
+# Walking east exits with +10, so 10 is the do-nothing floor.
+
+source ~/envs/py314.sh
+export OMP_NUM_THREADS=32                  # 128 cores / 4 processes
+
+PROJ=/project/home/p201442/$USER
+export WANDB_DIR=$PROJ/wandb
+export PROBE_OUTPUT_DIR=$PROJ/rocksample
+mkdir -p "$WANDB_DIR" "$PROBE_OUTPUT_DIR"
+
+# ── knobs ────────────────────────────────────────────────────────────────────
+CONFIG=rocksample_5_5                      # switch to rocksample_11_11 for the paper size
+ROUNDS=60
+TRAIN_STEPS=10000                          # 600k env steps/seed
+NUM_SEEDS=10
+PROBE_EVAL_INTERVAL=15
+NAMES=(ld0.5 ld0.1 ld0.01 sac)
+EXTRA=("--lambda-coef 0.5"
+       "--lambda-coef 0.1"
+       "--lambda-coef 0.01"
+       "--no-approximate-lambda")
+# ─────────────────────────────────────────────────────────────────────────────
+
+SCRIPT=~/git/lambda-imitation/examples/lambda-envs/rocksample_probe.py
+RUNDIR=$PROJ/runs/$SLURM_JOB_ID
+mkdir -p "$RUNDIR"
+
+R=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+BASE=$(( R % 1000000000 ))
+
+ARGS="--config $CONFIG
+      --num-seeds $NUM_SEEDS
+      --rounds $ROUNDS
+      --train-steps $TRAIN_STEPS
+      --alpha 0.5 --fe-lr 1e-5 --stop-actor-fe --retrace
+      --probe-eval-interval $PROBE_EVAL_INTERVAL
+      --probe-eval-steps 20000
+      --probe-eval-collect-steps 10000
+      --collect-steps 20000
+      --probe-steps 50000
+      --wandb"
+
+echo "job $SLURM_JOB_ID on $(hostname)  base seed $BASE"
+echo "$CONFIG, ${NUM_SEEDS} seeds x {${NAMES[*]}}, ${ROUNDS}x${TRAIN_STEPS} steps"
+
+pids=()
+for i in 0 1 2 3; do
+    name=${NAMES[$i]}
+    seed=$(( BASE + i * 1000000 ))
+    out=$RUNDIR/gpu$i-$name
+    mkdir -p "$out"
+    echo "gpu$i -> $name: ${EXTRA[$i]}  seeds $seed..$((seed + NUM_SEEDS - 1))"
+    CUDA_VISIBLE_DEVICES=$i python -u "$SCRIPT" $ARGS ${EXTRA[$i]} \
+        --seed "$seed" \
+        --output-dir "$out" \
+        --wandb-run-name "rs5-$name-10seed-$SLURM_JOB_ID" \
+        > "$out/run.log" 2>&1 &
+    pids+=($!)
+done
+
+rc=0
+for i in "${!pids[@]}"; do
+    wait "${pids[$i]}" || { rc=1; echo "gpu$i (${NAMES[$i]}) FAILED — see $RUNDIR/gpu$i-${NAMES[$i]}/run.log"; }
+done
+echo "done, rc=$rc  (artefacts under $RUNDIR)"
+exit $rc
