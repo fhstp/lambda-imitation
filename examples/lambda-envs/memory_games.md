@@ -111,6 +111,38 @@ Together with the four-GPU continuation, this keeps peak usage at eight GPUs.
 Use `--array=0-1%1` for the Minesweeper checks only or `--array=2` for Concentration.
 Select settings using these tuning runs, then use fresh seeds for confirmation.
 
+### Targeted LD comparison on the improved baseline configuration
+
+The completed lower-FE-rate pilots reached -0.327 (SAC) and -0.315
+(critics-only) at 100k, using FE lr=1e-5 and α=0.01. The latter is close to the
+original LD 0.1 result (-0.311). Apply LD to this better baseline configuration
+before interpreting the original gap as a discrepancy-specific improvement.
+
+Optional task **3** of the follow-up launcher compares:
+
+| Display label | Method | Discrepancy weight | Initialization |
+|---|---|---:|---|
+| `baseline` | SAC | 0 | Resume the low-FE-rate SAC checkpoint |
+| `extra-critics` | Critics only | 0 | Resume the low-FE-rate critics checkpoint |
+| `LD-small` | LD | 0.03 | Fresh |
+| `LD-large` | LD | 0.1 | Fresh |
+
+All use **FE lr=1e-5, α=0.01, three matched seeds, and 500k total steps**.
+Compare equal training-step windows; the resumed controls begin at 100k, while
+the LD runs begin at zero. Their first 100k baseline histories remain in the
+source job. The W&B group includes `matched-ld`, making these four lines easy
+to filter together. This task is excluded from the default three-wave array.
+
+```bash
+sbatch --array=3 --dependency=afterany:5251797 \
+  --export=ALL,ROUNDS=100,BASELINE_ROOT=/project/home/p201442/$USER/runs/memory-games-followup-5251797/minesweeper/low-fe-lr \
+  examples/lambda-envs/memory_games_followup.slrm
+```
+
+The dependency lets the Concentration diagnostic finish first, keeping total
+usage at eight GPUs while the original 1M Minesweeper comparison runs. Expected
+training time is about 45 minutes after allocation, plus startup/evaluation.
+
 ## Runtime measurement
 
 Measured on an RTX 3090, JAX 0.7.1 / Flax 0.11.1, with the actual default model:
