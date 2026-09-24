@@ -6,11 +6,14 @@ observation–action history, which is what the recurrent memory is for — the 
 question the Battleship and PocMan scripts ask, in the cheapest environment that
 asks it.
 
-Unlike those two there is **no probe**: the hidden state here is a pair of
-continuous velocities, not a set of cells, so there is nothing discrete to decode
-and the return curve is the whole story.  The script therefore stops after
-training and evaluation, and `_probe_common.add_common_args(include_probe=False)`
-keeps the probe flags off the CLI rather than accepting and ignoring them.
+The probe is a **regression** one, unlike Battleship's and PocMan's: the hidden
+state here is a pair of continuous velocities, not a set of cells, so it decodes
+the full 4-dim state `[x, x_dot, theta, theta_dot]` from the carry under MSE and
+scores it with per-dimension R2.  `x` and `theta` are in the observation and
+should come out near 1 — they are the wiring check; `x_dot` and `theta_dot` are
+the measurement, since nothing but the observation-action history carries them.
+Only the periodic (every `--probe-eval-interval` rounds) probe exists, so the
+collect/visualise flags of the other two scripts stay off the CLI.
 
 Everything else matches the other runners: multi-seed vmapped training, the same
 flag names, offline / expert-prefill / PER / Retrace, per-round evaluation and
@@ -28,6 +31,7 @@ import argparse
 import os
 import pickle
 import sys
+from functools import partial
 from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -51,25 +55,43 @@ g.add_argument("--obs-noise", type=float, default=0.0,
                     "is what turns this from a 2-step inference problem into one "
                     "where the memory has to average over a window: the velocity "
                     "is still recoverable, but no longer from two observations.")
+g.add_argument("--head-dim", type=int, default=64,
+               help="width of every actor/critic hidden layer (2 layers)")
 g.add_argument("--eval-max-steps", type=int, default=500,
                help="episode cap for the evaluation scans (default 500 = the "
                     "CartPole-v1 time limit, which is also the maximum return)")
+
+g = parser.add_argument_group("full-state probe")
+g.add_argument("--probe-eval-interval", type=int, default=10, metavar="ROUNDS",
+               help="train and score a probe every N rounds (0 disables)")
+g.add_argument("--probe-eval-steps", type=int, default=20_000,
+               help="SGD steps per probe eval (default 20 k)")
+g.add_argument("--probe-eval-collect-steps", type=int, default=4_000,
+               help="env steps per probe dataset (a train and a test set)")
+g.add_argument("--probe-hidden-dim", type=int, default=256)
+g.add_argument("--probe-lr", type=float, default=1e-3)
+g.add_argument("--probe-batch-size", type=int, default=256)
 
 common.add_common_args(
     parser, output_dir_default="./cartpole_partial_output",
     wandb_project_default="offline-lambda-cartpole-results",
     include_probe=False)
 
-# Defaults carried over from the stable Battleship 5x5 run (W&B 6d5cfugb,
-# "bright-elevator-59": SAC+LD, 10 seeds, final return 11.9 +- 0.3, ~14.1 shots).
-# The first CartPole defaults here were guesses and trained unstably; these are a
-# configuration that is known to hold together on a harder POMDP.  What does NOT
-# transfer is that run's --paper-arch (a Battleship-specific embedding) and its
-# 100 x 10k schedule; the heads stay (256, 256) and the run stays short.
+# Sized for speed, not for headroom: CartPole's state is four numbers and its
+# observation two, so a 32-unit GRU and 64-wide heads are not the bottleneck --
+# a 512/256 network here mostly buys compile time.  The stability settings (the
+# learning rates, alpha, stop-actor-fe, layer norm) are still the ones from the
+# Battleship 5x5 run that held together (W&B 6d5cfugb); only the sizes shrank.
+#
+# A round is 1000 steps, so the return curve and the probe both report early and
+# often: --probe-eval-interval 10 is a probe every 10k env steps.  Sequences are
+# short (5 with a 3-step burn-in) because velocity is recoverable from a couple
+# of observations; lambda_truncation stays at 30, which is what sets how far the
+# lambda-discrepancy target looks ahead.
 parser.set_defaults(
-    rounds=20, train_steps=5_000, gamma=0.99, tau=0.005,
-    memory_type="gru", memory_hidden_dim=512, projection_dim=128,
-    batch_size=128, sequence_length=40, burn_in_length=10,
+    rounds=200, train_steps=1_000, gamma=0.99, tau=0.005,
+    memory_type="gru", memory_hidden_dim=32, projection_dim=32,
+    batch_size=64, sequence_length=5, burn_in_length=3,
     online_buffer_size=100_000,
     alpha=0.1, autotune_alpha=False, target_entropy=0.0,
     fe_lr=1e-5, actor_lr=1e-4, critic_lr=1e-4,
@@ -217,7 +239,7 @@ hp = Hyperparameters(
     alpha=args.alpha, autotune_alpha=args.autotune_alpha,
     gamma=args.gamma, tau=args.tau,
     lambda1=0.05, lambda2=0.85,
-    c_bar=1.0, rho_bar=1.0, lambda_truncation=20,
+    c_bar=1.0, rho_bar=1.0, lambda_truncation=30,
     sequence_length=args.sequence_length,
     burn_in_length=args.burn_in_length,
     lambda_coef=args.lambda_coef, fake_onpolicy_loss=False,
@@ -236,17 +258,20 @@ expert_data = {"observations": jnp.zeros((1, *spec.obs_shape), dtype=jnp.float32
                "actions": jnp.zeros((1, 1), dtype=jnp.float32)}
 
 
+_HEAD = (args.head_dim, args.head_dim)
+
+
 def _build_agent(seed_val):
     return create_iqlearn_from_env(
         spec, expert_data, buffer_size=1, hp=hp,
         projection=args.projection_dim if args.projection_dim > 0 else None,
         memory_type=args.memory_type, memory_hidden_dim=args.memory_hidden_dim,
-        actor_dims=(256, 256), critic_dims=(256, 256),
-        lambda1_critic_dims=(256, 256), lambda2_critic_dims=(256, 256),
+        actor_dims=_HEAD, critic_dims=_HEAD,
+        lambda1_critic_dims=_HEAD, lambda2_critic_dims=_HEAD,
         train_steps=args.train_steps, approximate_lambda=args.approximate_lambda,
         use_prev_action=True, critic_layer_norm=args.critic_layer_norm,
         burn_in_from_stored_carry=args.burn_in_from_stored_carry,
-        use_gvd=args.gvd, gvd_sf_dims=(256, 256),
+        use_gvd=args.gvd, gvd_sf_dims=_HEAD,
         debug=True, seed=seed_val, use_sac=args.use_sac)
 
 
@@ -267,6 +292,102 @@ evaluate_critic = (
     if (args.critic_greedy_eval
         and getattr(debug_fns, "predict_qpi", None) is not None)
     else None)
+
+# ── full-state probe ─────────────────────────────────────────────────────────
+#
+# What the mask removes is velocity, so the probe regresses the whole 4-dim
+# CartPole state out of the carry.  x and theta are in the observation and
+# should decode near R2 1 -- they are the wiring check, not the result.  x_dot
+# and theta_dot are the result: nothing but the observation-action history
+# carries them, so their R2 IS "how much velocity does this memory hold".
+#
+# Targets are z-scored with the training set's mean/std before the MSE, because
+# theta (+-0.21 rad) is an order of magnitude smaller than x_dot and an
+# unnormalised MSE would simply ignore it.  R2 is invariant to that rescaling.
+
+STATE_NAMES = ("x", "x_dot", "theta", "theta_dot")
+PROBE_ON = (args.probe_eval_interval > 0 and CARRY_DIM > 0
+            and not args.skip_train)
+
+
+@partial(jax.jit, static_argnames=["n_steps"])
+def _collect_probe_data(agent_state, key, n_steps):
+    """One on-policy stream: (carry after obs_t, true state at t) per step."""
+    key, rk = jax.random.split(key)
+    obs, env_st = env.reset(rk, env_params)
+
+    def step_fn(s, _):
+        obs, env_st, carry, pa, key = s
+        key, sk, ek = jax.random.split(key, 3)
+        # sampled, not greedy: the probe wants the states the agent visits
+        # while still exploring, not a single deterministic trajectory.
+        raw, nc = fns.predict(agent_state, obs, carry, sk, deterministic=False,
+                              prev_action=pa)
+        inner = env_st.inner
+        truth = jnp.stack([inner.x, inner.x_dot, inner.theta, inner.theta_dot])
+        action = jnp.round(raw).astype(jnp.int32)
+        nobs, nst, _rew, d, _ = env.step(ek, env_st, action, env_params)
+        npa = fns.encode_action(jnp.atleast_1d(raw))
+        # gymnax auto-resets the env; only the memory has to be reset by hand.
+        # nc is recorded BEFORE this, so the pair is (history through t, state t).
+        return (nobs, nst,
+                jnp.where(d, jnp.zeros_like(nc), nc),
+                jnp.where(d, jnp.zeros_like(npa), npa), key), (nc, truth)
+
+    init = (obs, env_st, zero_carry(), zero_prev_action(), key)
+    _, (carries, truths) = jax.lax.scan(step_fn, init, length=n_steps)
+    return carries, truths
+
+
+if PROBE_ON:
+    _collect_v = jax.jit(jax.vmap(
+        lambda s, k: _collect_probe_data(s, k, args.probe_eval_collect_steps)))
+    _probe_train_v = common.make_probe_trainer(
+        optax.adam(args.probe_lr), carry_dim=CARRY_DIM, n_out=len(STATE_NAMES),
+        hidden=args.probe_hidden_dim, batch_size=args.probe_batch_size,
+        loss="mse")[1]
+
+
+def make_probe_hook(gidxs):
+    """A `common.Hooks` that trains a fresh probe on the current memory."""
+    n = len(gidxs)
+    rng = jax.random.PRNGKey(args.seed + 9973)
+
+    def compute(batched, rnd):
+        nonlocal rng
+        rng, tr_k, te_k, init_k, train_k = jax.random.split(rng, 5)
+        c_tr, t_tr = _collect_v(batched, jax.random.split(tr_k, n))
+        c_te, t_te = _collect_v(batched, jax.random.split(te_k, n))
+        mu = t_tr.mean(axis=1, keepdims=True)
+        sd = t_tr.std(axis=1, keepdims=True) + 1e-6
+        params = _probe_train_v(c_tr, (t_tr - mu) / sd,
+                                jax.random.split(init_k, n),
+                                jax.random.split(train_k, n),
+                                args.probe_eval_steps)
+        preds = jax.vmap(common.probe_forward)(params, c_te)
+        return rnd, np.array(preds), np.array((t_te - mu) / sd)
+
+    def render(host):
+        rnd, preds, targets = host
+        per_seed = [common.probe_metrics_regression(preds[j], targets[j],
+                                                    STATE_NAMES)
+                    for j in range(n)]
+        r2 = {nm: np.array([m[f"r2_{nm}"] for m in per_seed]) for nm in STATE_NAMES}
+        print("  probe R2  " + "  ".join(
+            f"{nm}={float(np.nanmean(v)):+.3f}" for nm, v in r2.items()))
+        if _wandb is None:
+            return
+        payload = {"round": rnd, "env_interactions": rnd * args.train_steps}
+        for k in per_seed[0]:
+            payload.update(common.agg(
+                np.array([m[k] for m in per_seed]), f"probe_eval/{k}"))
+        for j, gi in enumerate(gidxs):
+            for k, v in per_seed[j].items():
+                payload[f"seed_{gi}/probe/{k}"] = float(v)
+        _wandb.log(payload)
+
+    return common.Hooks(compute, render)
+
 
 # ── multi-seed training ──────────────────────────────────────────────────────
 
@@ -369,6 +490,8 @@ def run_group(group_idx, gidxs):
         keys=keys, batched=batched, env_state=env_state,
         zero_carry_b=zero_carry_b, train_v=_train_v,
         round_eval=round_eval, on_round=on_round,
+        probe=make_probe_hook(gidxs) if PROBE_ON else None,
+        probe_interval=args.probe_eval_interval if PROBE_ON else 0,
         tqdm=tqdm, desc=f"Group {group_idx + 1}")
     return batched
 

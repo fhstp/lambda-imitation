@@ -3,10 +3,10 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=128
 #SBATCH --gpus-per-node=4
-#SBATCH --time=10:00:00
+#SBATCH --time=02:00:00
 #SBATCH --account=p201442
 #SBATCH --partition=gpu
-#SBATCH --qos=default
+#SBATCH --qos=short
 #SBATCH --job-name=cpnoise-lambda
 #SBATCH --output=/project/home/p201442/u104493/slurm-logs/%x-%j.out
 
@@ -29,6 +29,13 @@
 # matter, if it matters anywhere.
 #
 # Return ceiling is 500 (the CartPole-v1 time limit).
+#
+# Everything is deliberately small (32-unit GRU, 64-wide heads, batch 64,
+# 5-step sequences with a 3-step burn-in) and a round is 1000 steps, so the
+# curves and the probe both report early: 200 rounds is still the same 200k env
+# steps per seed, just read 5x more often.  The probe every 10 rounds regresses
+# the full 4-dim state out of the carry -- r2_x_dot / r2_theta_dot are the
+# velocity that the mask removed, r2_x / r2_theta the wiring check.
 
 source ~/envs/py314.sh
 export OMP_NUM_THREADS=32
@@ -40,8 +47,9 @@ mkdir -p "$WANDB_DIR" "$PROBE_OUTPUT_DIR"
 
 # ── knobs ────────────────────────────────────────────────────────────────────
 OBS_NOISE=0.1
-ROUNDS=40
-TRAIN_STEPS=5000                           # 200k env steps/seed (clean solves by ~60k)
+ROUNDS=200
+TRAIN_STEPS=1000                           # 200k env steps/seed (clean solves by ~60k)
+PROBE_EVAL_INTERVAL=10                     # a probe every 10k env steps
 NUM_SEEDS=5
 NAMES=(ld0.5 ld0.1 ld0.01 sac)
 EXTRA=("--lambda-coef 0.5"
@@ -63,6 +71,7 @@ ARGS="--obs-noise $OBS_NOISE
       --num-seeds $NUM_SEEDS
       --rounds $ROUNDS
       --train-steps $TRAIN_STEPS
+      --probe-eval-interval $PROBE_EVAL_INTERVAL
       --no-use-sac
       --retrace
       --wandb"

@@ -520,12 +520,18 @@ def auroc(scores, labels):
     return float((ranks[labels].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
 
 def make_probe_trainer(optimiser, *, carry_dim, n_out, hidden, batch_size,
-                       tqdm=None, wandb=None):
+                       tqdm=None, wandb=None, loss="bce"):
     """Build the (jitted) probe SGD chunk plus its single- and multi-seed drivers.
 
     One optimiser / jitted chunk, reused across every probe trained (the final
     one and each periodic eval), so the chunk compiles only once.
+
+    ``loss="bce"`` decodes binary cells (a board, a pellet map); ``loss="mse"``
+    regresses continuous targets (a velocity), where the head is read as the
+    value itself rather than a logit.
     """
+    if loss not in ("bce", "mse"):
+        raise ValueError(f"loss must be 'bce' or 'mse', got {loss!r}")
     import optax  # lazy: --vis-only renders with just jax + matplotlib
 
     @partial(jax.jit, static_argnames=["n_steps", "batch_size"])
@@ -538,12 +544,16 @@ def make_probe_trainer(optimiser, *, carry_dim, n_out, hidden, batch_size,
             idx = jax.random.randint(bk, (batch_size,), 0, n)
 
             def loss_fn(p):
-                logits = probe_forward(p, c_data[idx])
-                return optax.sigmoid_binary_cross_entropy(logits, t_data[idx]).mean()
+                out = probe_forward(p, c_data[idx])
+                if loss == "mse":
+                    return jnp.mean((out - t_data[idx]) ** 2)
+                return optax.sigmoid_binary_cross_entropy(out, t_data[idx]).mean()
 
-            loss, grads = jax.value_and_grad(loss_fn)(params)
+            # not `loss` — that name is the enclosing kwarg, and rebinding it
+            # here makes loss_fn's read of it an unbound local.
+            loss_val, grads = jax.value_and_grad(loss_fn)(params)
             updates, new_os = optimiser.update(grads, opt_state, params)
-            return (optax.apply_updates(params, updates), new_os, key), loss
+            return (optax.apply_updates(params, updates), new_os, key), loss_val
 
         (params, opt_state, key), losses = jax.lax.scan(
             body, (params, opt_state, key), length=n_steps)
@@ -766,6 +776,29 @@ def probe_metrics_visitation(probs_all, t_truth, t_eb=None):
                 horizon = min(hi, 50)
         out["horizon_steps"] = horizon
     return out
+
+def probe_metrics_regression(preds, targets, names):
+    """Per-dimension R2 and RMSE for a probe that regresses continuous state.
+
+    R2 is against the variance of the target itself, so it answers "how much of
+    this quantity does the memory carry", independent of the quantity's units:
+    0 = no better than predicting the mean, 1 = exact.  Dimensions the agent
+    observes directly should come out near 1 and are the sanity check; the ones
+    it cannot see are the measurement.
+    """
+    preds, targets = np.asarray(preds), np.asarray(targets)
+    out = {}
+    for i, nm in enumerate(names):
+        p_i, t_i = preds[..., i].ravel(), targets[..., i].ravel()
+        resid = float(np.mean((p_i - t_i) ** 2))
+        var = float(np.var(t_i))
+        out[f"r2_{nm}"] = float(1.0 - resid / var) if var > 1e-12 else float("nan")
+        out[f"rmse_{nm}"] = float(np.sqrt(resid))
+        out[f"std_{nm}"] = float(np.sqrt(var))
+    hidden = [k for k in out if k.startswith("r2_") and not np.isnan(out[k])]
+    out["r2_mean"] = float(np.mean([out[k] for k in hidden])) if hidden else float("nan")
+    return out
+
 
 def agg(values, prefix):
     """mean / std / sterr (+ band edges) of per-seed scalars (NaN-safe).
