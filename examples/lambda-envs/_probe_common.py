@@ -313,10 +313,22 @@ def parse_args(parser, *, extra_flags_env):
 
     _bad = [t for t in _unknown if _is_flag(t) and t.split("=")[0] not in _allowed_extra]
     if _bad:
+        # Quote them: a token containing a space is almost always a W&B sweep
+        # `command:` entry written as "- --flag value", which arrives as ONE argv
+        # element.  Unquoted, the message reads like a perfectly normal command
+        # line and the real problem is invisible.
+        hint = ""
+        if any(" " in t for t in _bad):
+            hint = ("\nOne of these contains a space, so it arrived as a single "
+                    "argument.  In a W&B sweep `command:` list, write "
+                    "`- --flag=value` (or put the flag and its value on separate "
+                    "lines) — each list entry becomes one argv element.")
         sys.exit(
-            f"{parser.prog}: unrecognised argument(s): {' '.join(_bad)}\n"
+            f"{parser.prog}: unrecognised argument(s): "
+            f"{' '.join(repr(t) for t in _bad)}\n"
             "Note flags use hyphens, not underscores (e.g. --probe-eval-interval). "
             f"If another script owns these flags, list them in {extra_flags_env}."
+            + hint
         )
     return args
 

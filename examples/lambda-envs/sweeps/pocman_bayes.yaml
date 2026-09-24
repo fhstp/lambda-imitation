@@ -3,7 +3,12 @@
 #   wandb sweep examples/lambda-envs/sweeps/pocman_bayes.yaml
 #   CUDA_VISIBLE_DEVICES=0 wandb agent <entity>/<project>/<sweep-id>
 #
-# Run it from the repo root (`program:` is a repo-relative path).  Every
+# Run it from the repo root (`program:` is a repo-relative path).
+#
+# Every entry in `command:` becomes ONE argv element, so a flag and its value
+# must be joined with '=' (or split into two entries).  Writing
+# `- --gamma 0.95` hands the script the single token '--gamma 0.95', space
+# included, which is not a flag it knows.  Every
 # batch_size is the sequences-per-gradient-step knob: it absorbed the old
 # online_batch_size (the live one), while the old batch_size only sized an
 # expert buffer that nothing sampled.  Every parameter below is a real flag
@@ -29,12 +34,12 @@ command:
 - --retrace
 - --no-use-sac
 - --paper-arch
-- --memory-type gru
-- --memory-hidden-dim 512
+- --memory-type=gru
+- --memory-hidden-dim=512
 - --stop-actor-fe
-- --gamma 0.95
-- --tau 0.005
-- --train-steps 10000
+- --gamma=0.95
+- --tau=0.005
+- --train-steps=10000
 - ${args_no_boolean_flags}
 method: bayes
 metric:
