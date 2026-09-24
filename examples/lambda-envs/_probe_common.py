@@ -244,7 +244,14 @@ def add_common_args(parser, *, output_dir_default, wandb_project_default):
     parser.set_defaults(probe_eval_vis=False)
 
     g = parser.add_argument_group("I/O & visualisation")
-    g.add_argument("--output-dir", default=output_dir_default)
+    g.add_argument("--output-dir",
+                   default=os.environ.get("PROBE_OUTPUT_DIR", output_dir_default),
+                   help="where artefacts go (default $PROBE_OUTPUT_DIR, else "
+                        f"{output_dir_default!r}).  The env var exists for W&B\n"
+                        "sweeps: the agent runs the command from the sweep config, "
+                        "so the only way to redirect output per machine is the "
+                        "environment.  Each sweep run still gets its own "
+                        "run_<id> subdirectory underneath.")
     g.add_argument("--skip-train", action="store_true", help="load agent from output-dir")
     g.add_argument("--skip-collect", action="store_true", help="load dataset from output-dir")
     g.add_argument("--skip-probe", action="store_true", help="load probe from output-dir")
