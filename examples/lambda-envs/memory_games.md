@@ -254,6 +254,25 @@ wandb sweep --entity fhstp-data-intelligence-research-group \
   examples/lambda-envs/sweeps/minesweeper_ld.yaml
 ```
 
+### Cluster agents: one node per sweep, 12-hour maximum
+
+```bash
+sbatch examples/lambda-envs/memory_games_sweeps.slrm
+```
+
+This starts two independent array tasks, each reserving one node with four GPUs
+and 128 CPUs for at most 12 hours. Task 0 runs four baseline agents; task 1 runs
+four LD agents. They join the same sweep queues as the internal-server agents.
+The shared sweep caps still apply, so jobs can finish before the time limit.
+
+Outputs, W&B data and caches go to
+`/project/home/p201442/$USER/runs/minesweeper-sweeps-<array-id>/{baseline,LD}/`.
+Each node has `agent-gpu0.log` through `agent-gpu3.log`; trial outputs are under
+`sweeps/run_<id>/`. A committed code snapshot under `code/` is also the working
+directory, keeping runtime files out of home and code fixed across trials.
+`BASELINE_SWEEP` and `LD_SWEEP` can override the full sweep
+paths, and `RUN_ROOT` can override the project-storage root.
+
 ## Runtime measurement
 
 Measured on an RTX 3090, JAX 0.7.1 / Flax 0.11.1, with the actual default model:

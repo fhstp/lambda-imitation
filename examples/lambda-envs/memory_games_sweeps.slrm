@@ -1,0 +1,118 @@
+#!/bin/bash -l
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=128
+#SBATCH --gpus-per-node=4
+#SBATCH --array=0-1
+#SBATCH --time=12:00:00
+#SBATCH --account=p201442
+#SBATCH --partition=gpu
+#SBATCH --qos=default
+#SBATCH --job-name=minesweeper-sweeps
+#SBATCH --chdir=/project/home/p201442/u104493
+#SBATCH --output=/project/home/p201442/u104493/slurm-logs/%x-%A_%a.out
+#SBATCH --error=/project/home/p201442/u104493/slurm-logs/%x-%A_%a.err
+
+# Two independent nodes: task 0 runs four baseline agents, task 1 four LD agents.
+# Agents share the existing sweeps with any internal-server agents. Each trial
+# trains five seeds together on one GPU. The sweep-wide 40-trial caps still apply;
+# a completed sweep releases its node early. The allocation has a 12-hour maximum.
+#
+#   sbatch examples/lambda-envs/memory_games_sweeps.slrm
+# Optional BASELINE_SWEEP / LD_SWEEP overrides take entity/project/sweep-id.
+# RUN_ROOT defaults to project storage and holds code snapshots, outputs and caches.
+# Failed agents are reported, not automatically restarted in an unbounded loop.
+
+set -euo pipefail
+
+case "${SLURM_ARRAY_TASK_ID:?Submit this script as an array}" in
+    0)
+        method=baseline
+        sweep="${BASELINE_SWEEP:-fhstp-data-intelligence-research-group/offline-lambda-minesweeper-sweeps/clilku6c}"
+        ;;
+    1)
+        method=LD
+        sweep="${LD_SWEEP:-fhstp-data-intelligence-research-group/offline-lambda-minesweeper-sweeps/07kd6rfn}"
+        ;;
+    *)
+        printf 'Expected array task 0 or 1, got %s\n' "$SLURM_ARRAY_TASK_ID" >&2
+        exit 2
+        ;;
+esac
+
+PROJ="/project/home/p201442/$USER"
+job_id="${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:?Submit with sbatch}}"
+RUN_ROOT="${RUN_ROOT:-$PROJ/runs/minesweeper-sweeps-$job_id}"
+REPO_ROOT="${REPO_ROOT:-$HOME/git/lambda-imitation}"
+code_commit="${CODE_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
+export MEMORY_GAMES_OUTPUT_DIR="$RUN_ROOT/$method"
+CODE_ROOT="$MEMORY_GAMES_OUTPUT_DIR/code"
+export PYTHONDONTWRITEBYTECODE=1
+export OMP_NUM_THREADS=32
+export TMPDIR="$MEMORY_GAMES_OUTPUT_DIR/runtime/launcher/tmp"
+export XDG_CACHE_HOME="$MEMORY_GAMES_OUTPUT_DIR/runtime/launcher/cache"
+mkdir -p "$CODE_ROOT" "$TMPDIR" "$XDG_CACHE_HOME"
+source "${PYTHON_ENV_SCRIPT:-$HOME/envs/py314.sh}"
+
+# Freeze the code for the entire sweep-agent allocation and keep even the
+# working directory in project storage. PYTHONPATH selects this package copy
+# rather than the editable installation in the home checkout.
+git -C "$REPO_ROOT" archive "$code_commit" src \
+    examples/lambda-envs/memory_games_sac.py \
+    examples/lambda-envs/memory_games_sweep_agent.sh \
+    examples/lambda-envs/_probe_common.py \
+    examples/lambda-envs/_concentration_env.py \
+    examples/lambda-envs/_minesweeper_env.py | tar -xf - -C "$CODE_ROOT"
+export PYTHONPATH="$CODE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+AGENT="$CODE_ROOT/examples/lambda-envs/memory_games_sweep_agent.sh"
+if [[ ! -f "$AGENT" ]]; then
+    printf 'Sweep agent launcher not found: %s\n' "$AGENT" >&2
+    exit 1
+fi
+# W&B's program path is relative to the code snapshot.
+cd "$CODE_ROOT"
+printf 'Job %s task %s on %s: four %s agents\n' \
+    "$job_id" "$SLURM_ARRAY_TASK_ID" "$(hostname)" "$method"
+printf 'Sweep: %s\nOutputs: %s\nCommit: %s\n' \
+    "$sweep" "$MEMORY_GAMES_OUTPUT_DIR" "$code_commit"
+
+pids=()
+wait_all() {
+    local i status result=0
+    for i in "${!pids[@]}"; do
+        if wait "${pids[$i]}"; then
+            status=0
+        else
+            status=$?
+            result=1
+        fi
+        printf 'GPU %s agent exit=%s; log=%s/agent-gpu%s.log\n' \
+            "$i" "$status" "$MEMORY_GAMES_OUTPUT_DIR" "$i"
+    done
+    return "$result"
+}
+
+stop_all() {
+    local status="$1" pid
+    trap '' INT TERM
+    for pid in "${pids[@]}"; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    wait_all || true
+    exit "$status"
+}
+trap 'stop_all 130' INT
+trap 'stop_all 143' TERM
+
+for gpu in 0 1 2 3; do
+    CUDA_VISIBLE_DEVICES="$gpu" bash "$AGENT" "$sweep" \
+        > "$MEMORY_GAMES_OUTPUT_DIR/agent-gpu$gpu.log" 2>&1 &
+    pids+=("$!")
+    printf 'GPU %s agent PID=%s\n' "$gpu" "${pids[$gpu]}"
+    sleep 2
+done
+
+rc=0
+wait_all || rc=$?
+trap - INT TERM
+exit "$rc"
