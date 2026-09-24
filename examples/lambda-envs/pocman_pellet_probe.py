@@ -63,7 +63,7 @@ g.add_argument("--paper-arch", dest="paper_arch", action="store_true",
                     "(256, 256) heads with LayerNorm.")
 g.add_argument("--no-paper-arch", dest="paper_arch", action="store_false")
 parser.set_defaults(paper_arch=True)
-g.add_argument("--lambda1", type=float, default=0.5,
+g.add_argument("--lambda1", type=float, default=0.1,
                help="lambda of the first lambda-critic (default 0.5)")
 g.add_argument("--lambda2", type=float, default=0.95,
                help="lambda of the second lambda-critic (default 0.95).  The "
@@ -86,8 +86,8 @@ common.add_common_args(
 # PocMan-tuned defaults (the values the earlier PocMan runs used); every one of
 # these is still a flag, this only changes what you get without passing it.
 parser.set_defaults(
-    rounds=8, gamma=0.95, tau=0.006,
-    fe_lr=7e-5, actor_lr=6e-5, critic_lr=2e-4,
+    gamma=0.95, tau=0.005,
+    fe_lr=1e-5, actor_lr=1e-4, critic_lr=1e-4,
     memory_hidden_dim=512, batch_size=512,   # 512 = the paper's hidden_size
     sequence_length=20, burn_in_length=32, online_buffer_size=200_000,
 )
@@ -128,6 +128,7 @@ probe_forward = common.probe_forward
 # (wall grid + pellet cell coordinates), so --vis-only needs no env.
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.colors import LinearSegmentedColormap  # noqa: E402
@@ -293,14 +294,15 @@ if not args.vis_only:
     from tqdm.rich import tqdm
 
     try:
-        from lambda_envs.envs.pocman import PocMan, SMALLER_GAME_MAP
+        from lambda_envs.envs.pocman import SMALLER_GAME_MAP, PocMan
     except ImportError:
         sys.exit("lambda-envs[pocman] required.  pip install 'lambda-envs[pocman]'")
+
+    from pocman_expert import make_pocman_expert
 
     from lambda_imitation.iqlearn import Hyperparameters
     from lambda_imitation.utils import (create_iqlearn_from_env,
                                         env_spec_from_gymnax, relu_projection)
-    from pocman_expert import make_pocman_expert
 
     # ── env setup ────────────────────────────────────────────────────────────
     #
@@ -400,7 +402,7 @@ if not args.vis_only:
         alpha=args.alpha, autotune_alpha=args.autotune_alpha,
         gamma=args.gamma, tau=args.tau,
         lambda1=args.lambda1, lambda2=args.lambda2,
-        c_bar=1.17, rho_bar=1.15, lambda_truncation=17,
+        c_bar=1.0, rho_bar=1.0, lambda_truncation=30,
         sequence_length=args.sequence_length,
         burn_in_length=args.burn_in_length,
         lambda_coef=args.lambda_coef, fake_onpolicy_loss=False,
