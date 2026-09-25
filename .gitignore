@@ -213,3 +213,14 @@ runs
 
 # W&B writes its local run cache into the cwd
 wandb/
+
+# Local experiment artifacts and development tooling
+outputs/
+*_output/
+tmaze_ld_output/
+jax-trace*/
+logs/
+lambda/
+sac/
+.claude/
+.opencode/

@@ -11,7 +11,7 @@ memory carry — it is not packed into the carry.  These tests cover:
 * the default ``LinearProjection`` and a custom builder projection module,
 * ``predict`` returning a memory-only carry + the exposed ``encode_action``,
 * ``calculate_latent`` consuming the shifted, done-masked prev-action input,
-* construction-time validation in ``create_iqlearn``,
+* construction-time validation in ``create_actor_critic``,
 * end-to-end smoke ``train`` rounds with ``use_prev_action=True`` and with a
   custom skip-connection projection.
 """
@@ -22,11 +22,11 @@ import jax.numpy as jnp
 import pytest
 from flax import nnx
 
-from lambda_imitation.iqlearn import Hyperparameters
+from lambda_imitation.actor_critic import Hyperparameters
 from lambda_imitation.utils import (
     LinearProjection,
     RecurrentFeatureExtractor,
-    create_iqlearn_from_env,
+    create_actor_critic_from_env,
     env_spec_from_gymnax,
 )
 
@@ -224,7 +224,6 @@ class TestWrapperEquivalence:
 
 def _tiny_hp():
     return Hyperparameters(
-        target_entropy=0.2,
         batch_size=4,
         online_buffer_size=256,
         burn_in_length=2,
@@ -236,20 +235,15 @@ def _tiny_hp():
 def cartpole_agent():
     env, env_params = gymnax.make("CartPole-v1")
     spec = env_spec_from_gymnax(env, env_params)
-    expert_data = {
-        "observations": jnp.zeros((4, *spec.obs_shape), dtype=jnp.float32),
-        "actions": jnp.zeros((4, 1), dtype=jnp.float32),
-    }
-    state, fns, debug_fns = create_iqlearn_from_env(
+    state, fns, debug_fns = create_actor_critic_from_env(
         spec,
-        expert_data,
-        buffer_size=4,
         hp=_tiny_hp(),
         projection=16,
         memory_type="gru",
         memory_hidden_dim=HIDDEN,
         use_prev_action=True,
         critic_dims=(16,),
+        lambda1_critic_dims=(16,), lambda2_critic_dims=(16,),
         train_steps=4,
         approximate_lambda=True,
         debug=True,
@@ -338,16 +332,7 @@ class TestValidation:
     def test_mismatched_fe_raises(self):
         env, env_params = gymnax.make("CartPole-v1")
         spec = env_spec_from_gymnax(env, env_params)
-        from lambda_imitation.iqlearn import create_iqlearn
-        from lambda_imitation.buffer import create_buffer
-
-        buffer, buf_fns = create_buffer(
-            shapes={"observations": spec.obs_shape, "actions": (1,)},
-            size=4,
-            sampling_size=2,
-            this_step_infos=["observations", "actions"],
-            next_step_infos=["observations"],
-        )
+        from lambda_imitation.actor_critic import create_actor_critic
         fe = RecurrentFeatureExtractor(
             input_shape=spec.obs_shape[0],
             projection=16,
@@ -356,30 +341,20 @@ class TestValidation:
             prev_action_dim=0,
             rngs=nnx.Rngs(jax.random.key(0)),
         )
-        with pytest.raises(ValueError, match="use_prev_action"):
-            create_iqlearn(
+        with pytest.raises(ValueError, match="prev_action_dim"):
+            create_actor_critic(
                 params=_tiny_hp(),
-                buffer=buffer,
+                obs_shape=spec.obs_shape,
                 action_dim=spec.action_dim,
                 feature_extractor=fe,
                 key=jax.random.key(1),
-                is_discrete=True,
                 use_prev_action=True,
             )
 
     def test_enabled_fe_without_flag_raises(self):
         env, env_params = gymnax.make("CartPole-v1")
         spec = env_spec_from_gymnax(env, env_params)
-        from lambda_imitation.iqlearn import create_iqlearn
-        from lambda_imitation.buffer import create_buffer
-
-        buffer, _ = create_buffer(
-            shapes={"observations": spec.obs_shape, "actions": (1,)},
-            size=4,
-            sampling_size=2,
-            this_step_infos=["observations", "actions"],
-            next_step_infos=["observations"],
-        )
+        from lambda_imitation.actor_critic import create_actor_critic
         fe = RecurrentFeatureExtractor(
             input_shape=spec.obs_shape[0],
             projection=16,
@@ -389,15 +364,21 @@ class TestValidation:
             rngs=nnx.Rngs(jax.random.key(0)),
         )
         with pytest.raises(ValueError, match="prev_action_dim"):
-            create_iqlearn(
+            create_actor_critic(
                 params=_tiny_hp(),
-                buffer=buffer,
+                obs_shape=spec.obs_shape,
                 action_dim=spec.action_dim,
                 feature_extractor=fe,
                 key=jax.random.key(1),
-                is_discrete=True,
                 use_prev_action=False,
             )
+
+def _one_round(state, fns, env, params, env_state, key):
+    state, _ = fns.prefill_buffer(state, env, params, env_state, 64, key)
+    return jax.jit(lambda s, es, k: fns.train_unrolled(
+        s, env, params, es, jnp.zeros(HIDDEN), jnp.zeros(env.num_actions), k)
+    )(state, env_state, key)
+
 
 class TestEndToEnd:
     def test_train_round_finite_metrics(self, cartpole_agent):
@@ -405,7 +386,7 @@ class TestEndToEnd:
         key = jax.random.key(2)
         key, reset_key = jax.random.split(key)
         _, env_state = env.reset(reset_key, env_params)
-        new_state, _, metrics = fns.train(state, env, env_params, env_state, key)
+        new_state, _, _, _, metrics = _one_round(state, fns, env, env_params, env_state, key)
         for name, value in metrics.items():
             assert jnp.isfinite(value).all(), f"non-finite metric {name}: {value}"
 
@@ -426,20 +407,15 @@ class TestEndToEnd:
 
         env, env_params = gymnax.make("CartPole-v1")
         spec = env_spec_from_gymnax(env, env_params)
-        expert_data = {
-            "observations": jnp.zeros((4, *spec.obs_shape), dtype=jnp.float32),
-            "actions": jnp.zeros((4, 1), dtype=jnp.float32),
-        }
-        state, fns, _ = create_iqlearn_from_env(
+        state, fns, _ = create_actor_critic_from_env(
             spec,
-            expert_data,
-            buffer_size=4,
             hp=_tiny_hp(),
             projection=lambda s, p, r: Skip(s, p, r),
             memory_type="gru",
             memory_hidden_dim=HIDDEN,
             use_prev_action=True,
             critic_dims=(16,),
+            lambda1_critic_dims=(16,), lambda2_critic_dims=(16,),
             train_steps=4,
             approximate_lambda=True,
             debug=True,
@@ -448,6 +424,6 @@ class TestEndToEnd:
         key = jax.random.key(2)
         key, reset_key = jax.random.split(key)
         _, env_state = env.reset(reset_key, env_params)
-        _, _, metrics = fns.train(state, env, env_params, env_state, key)
+        _, _, _, _, metrics = _one_round(state, fns, env, env_params, env_state, key)
         for name, value in metrics.items():
             assert jnp.isfinite(value).all(), f"non-finite metric {name}: {value}"

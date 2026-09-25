@@ -5,23 +5,31 @@ build-backend = "hatchling.build"
 [project]
 name = "lambda-imitation"
 version = "0.1.0"
+description = "Replay-based recurrent memory learning with Retrace discrepancy"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "jax>=0.4.30",
     "jaxlib>=0.4.30",
-    "flax>=0.9.0",
+    "flax>=0.10.7",
     "optax>=0.2.0",
     "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
-gymnasium = ["gymnasium"]
 gymnax = ["gymnax"]
-jumanji = ["jumanji"]
-dev = ["pytest"]
+experiments = ["gymnax>=0.0.9", "chex", "jumanji>=1.1.0,<2", "matplotlib", "wandb"]
+dev = ["pytest", "pyyaml", "build"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lambda_imitation"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"THIRD_PARTY_NOTICES.md" = "lambda_imitation/THIRD_PARTY_NOTICES.md"
+"licenses/Apache-2.0.txt" = "lambda_imitation/licenses/Apache-2.0.txt"
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/examples", "/tests", "/licenses", "/README.md", "/THIRD_PARTY_NOTICES.md", "/pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

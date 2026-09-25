@@ -1,8 +1,5 @@
 """POPGym rule checks against deterministic boards, without importing POPGym."""
 
-import importlib.util
-from pathlib import Path
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -10,10 +7,7 @@ import pytest
 
 pytest.importorskip("gymnax")
 
-_path = Path(__file__).resolve().parents[1] / "examples/lambda-envs/_minesweeper_env.py"
-_spec = importlib.util.spec_from_file_location("minesweeper_env", _path)
-ms = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(ms)
+from lambda_imitation.envs import minesweeper as ms
 
 
 def _numpy_counts(mines):
@@ -59,26 +53,24 @@ def env():
     return ms.MineSweeper(rows=4, cols=4, num_mines=2)
 
 
-@pytest.mark.parametrize("rows,cols,mines,partial_dim,history_dim", [
-    (6, 6, 6, 8, 289), (4, 4, 2, 4, 65), (8, 8, 10, 10, 641),
+@pytest.mark.parametrize("rows,cols,mines,partial_dim", [
+    (6, 6, 6, 8), (4, 4, 2, 4), (8, 8, 10, 10),
 ])
-@pytest.mark.parametrize("remember", [False, True])
-def test_public_contract_and_observation_spaces(rows, cols, mines, partial_dim,
-                                                history_dim, remember):
-    env = ms.MineSweeper(rows, cols, mines, remember=remember)
+def test_public_contract_and_observation_spaces(rows, cols, mines, partial_dim):
+    env = ms.MineSweeper(rows, cols, mines)
     assert isinstance(env, ms.environment.Environment)
     assert type(env.num_actions) is int and env.num_actions == rows * cols
     assert type(env.episode_length) is int and env.episode_length == rows * cols - mines
     assert env.default_params.max_steps_in_episode == env.episode_length
     assert type(env.default_params.max_steps_in_episode) is int
-    assert env.obs_requires_prev_action == (not remember)
+    assert env.obs_requires_prev_action
     assert env.action_space().n == rows * cols
     assert env.action_space().shape == ()
     assert env.action_space().contains(rows * cols - 1)
     assert not env.action_space().contains(rows * cols)
     obs, state = env.reset(jax.random.key(0))
     space = env.observation_space()
-    assert space.shape == obs.shape == ((history_dim if remember else partial_dim),)
+    assert space.shape == obs.shape == (partial_dim,)
     assert obs.dtype == space.dtype == jnp.float32
     assert space.contains(obs)
     assert env.state_space().contains(state)
@@ -134,9 +126,8 @@ def test_reset_exact_mine_count_independent_counts_and_immutable_state(env):
 
 
 @pytest.mark.parametrize("num_mines,count", [(n, n) for n in range(9)] + [(10, 8)])
-@pytest.mark.parametrize("remember", [False, True])
-def test_every_clue_including_num_mines_and_eight_has_a_bin(num_mines, count, remember):
-    env = ms.MineSweeper(4, 4, num_mines, remember=remember)
+def test_every_clue_including_num_mines_and_eight_has_a_bin(num_mines, count):
+    env = ms.MineSweeper(4, 4, num_mines)
     neighbors = [(0, 0), (0, 1), (0, 2), (1, 0),
                  (1, 2), (2, 0), (2, 1), (2, 2)]
     locations = neighbors[:count] + [(3, c) for c in range(num_mines - count)]
@@ -144,8 +135,7 @@ def test_every_clue_including_num_mines_and_eight_has_a_bin(num_mines, count, re
     np.testing.assert_array_equal(ms._count_neighbors(initial.mines), initial.neighbor_counts)
     obs, state, reward, done, _ = _step(env, initial, 5)  # center (1, 1)
     width = min(8, num_mines) + 2
-    clue_obs = obs[:-1].reshape(16, width)[5] if remember else obs
-    np.testing.assert_array_equal(clue_obs, np.eye(width)[count])
+    np.testing.assert_array_equal(obs, np.eye(width)[count])
     assert int(state.last_value) == count
     assert float(reward) == pytest.approx(1 / (16 - num_mines))
     assert not done
@@ -273,9 +263,8 @@ def test_exhausted_zero_opportunity_does_not_use_unseen_safe_cells(env):
     assert float(diagnostic["safe_cells_revealed"]) == 4
 
 
-@pytest.mark.parametrize("remember", [False, True])
-def test_observations_and_diagnostics_do_not_leak_unobserved_board(remember):
-    env = ms.MineSweeper(4, 4, 2, remember=remember)
+def test_observations_and_diagnostics_do_not_leak_unobserved_board():
+    env = ms.MineSweeper(4, 4, 2)
     first = _board_state(env, ((0, 0), (3, 3)))
     second = _board_state(env, ((0, 0), (3, 2)))
     np.testing.assert_array_equal(env.get_obs(first), env.get_obs(second))
@@ -299,38 +288,14 @@ def test_observations_and_diagnostics_do_not_leak_unobserved_board(remember):
                            env.diagnostics(hidden_changed, action))
 
 
-def test_partial_observation_omits_location_but_history_control_retains_it(env):
+def test_partial_observation_omits_location(env):
     initial = _board_state(env)
     obs1, first, _, _, _ = _step(env, initial, 3)
     obs2, second, _, _, _ = _step(env, initial, 12)
     np.testing.assert_array_equal(obs1, obs2)  # both zero, different queried cells
-    history_env = ms.MineSweeper(4, 4, 2, remember=True)
-    assert not np.array_equal(history_env.get_obs(first), history_env.get_obs(second))
-
-
-def test_remember_layout_unknowns_zero_clues_and_repeat_time():
-    env = ms.MineSweeper(4, 4, 2, remember=True)
-    state = _board_state(env)
-    initial = env.get_obs(state)
-    np.testing.assert_array_equal(initial[:-1].reshape(16, 4), np.tile([0, 0, 0, 1], (16, 1)))
-    assert float(initial[-1]) == 0
-    for action in [3, 5, 3]:
-        obs, state, _, _, _ = _step(env, state, action)
-    expected = np.full(16, 3)  # slot 3 is unknown, including both mine locations
-    expected[3], expected[5] = 0, 1
-    np.testing.assert_array_equal(obs[:-1].reshape(16, 4), np.eye(4)[expected])
-    assert float(obs[-1]) == pytest.approx(3 / 14)
-    assert state.viewed.sum() == 2
-    np.testing.assert_array_equal(obs, env.get_obs(state))
-    # Optional timeout params do not change observation reconstruction.
-    np.testing.assert_array_equal(obs, env.get_obs(state, env.default_params._replace(
-        max_steps_in_episode=4)))
-
-
-@pytest.mark.parametrize("remember", [False, True])
 @pytest.mark.parametrize("ending", ["bomb", "win", "timeout"])
-def test_base_auto_reset_returns_consistent_obs_state_and_terminal_info(remember, ending):
-    env = ms.MineSweeper(4, 4, 2, remember=remember)
+def test_base_auto_reset_returns_consistent_obs_state_and_terminal_info(ending):
+    env = ms.MineSweeper(4, 4, 2)
     state = _board_state(env)
     action = 0
     if ending == "win":
@@ -360,9 +325,8 @@ def test_base_auto_reset_returns_consistent_obs_state_and_terminal_info(remember
     assert float(info["safe_cells_revealed"]) == {"bomb": 0, "win": 14, "timeout": 1}[ending]
 
 
-@pytest.mark.parametrize("remember", [False, True])
-def test_jit_vmap_scan_mixed_live_and_auto_reset_episodes(remember):
-    env = ms.MineSweeper(4, 4, 2, remember=remember)
+def test_jit_vmap_scan_mixed_live_and_auto_reset_episodes():
+    env = ms.MineSweeper(4, 4, 2)
     batch, steps = 8, 32
     keys = jax.random.split(jax.random.key(51), batch)
     _, initial = jax.jit(jax.vmap(env.reset))(keys)

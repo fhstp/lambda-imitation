@@ -1,4 +1,4 @@
-"""The PocMan --paper-arch network must match the reference implementation.
+"""The PocMan network must match the reference implementation.
 
 Reference: ``DiscreteActorCriticRNN`` in ``lamb/models.py`` of
 brownirl/lambda_discrepancy, with PocMan's selected hyperparameters
@@ -18,8 +18,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from lambda_imitation.iqlearn import Hyperparameters
-from lambda_imitation.utils import (create_iqlearn_from_env, EnvSpec,
+from lambda_imitation.actor_critic import Hyperparameters
+from lambda_imitation.utils import (create_actor_critic_from_env, EnvSpec,
                                     relu_projection)
 
 H = 512
@@ -32,18 +32,14 @@ def _kernels(tree):
 
 @pytest.fixture(scope="module")
 def paper_state():
-    spec = EnvSpec(obs_shape=(OBS_DIM,), action_dim=NUM_ACTIONS,
-                   action_low=None, action_high=None, is_discrete=True)
-    expert = {"observations": jnp.zeros((1, OBS_DIM), dtype=jnp.float32),
-              "actions": jnp.zeros((1, 1), dtype=jnp.float32)}
-    state, _, _ = create_iqlearn_from_env(
-        spec, expert, buffer_size=1,
+    spec = EnvSpec(obs_shape=(OBS_DIM,), action_dim=NUM_ACTIONS)
+    state, _, _ = create_actor_critic_from_env(
+        spec,
         hp=Hyperparameters(lambda1=0.5, lambda2=0.95, gamma=0.95),
         projection=relu_projection(H), memory_type="gru", memory_hidden_dim=H,
         actor_dims=(H,), critic_dims=(H,), lambda1_critic_dims=(H,),
         lambda2_critic_dims=(H,), train_steps=2, approximate_lambda=True,
-        use_prev_action=True, critic_layer_norm=False, debug=True, seed=0,
-        use_sac=False)
+        use_prev_action=True, critic_layer_norm=False, debug=True, seed=0)
     return state
 
 def test_embedding_takes_obs_and_prev_action(paper_state):
