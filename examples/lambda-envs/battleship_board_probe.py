@@ -653,18 +653,15 @@ if not args.vis_only:
         CARRY_DIM = args.memory_hidden_dim
 
     _memoryless = (CARRY_DIM == 0)
-    if _memoryless and not args.full_obs:
-        sys.exit("Probe needs recurrent memory (--memory-type rnn/gru/lstm), not identity.")
     # Cadence for the critic-Q / actor-π heatmaps.  These only need predict_qpi
     # (NOT the board probe / a recurrent carry), so they render even in the
-    # memoryless diagnostic — captured here before the probe is disabled below.
+    # memoryless case — captured here before the probe is disabled below.
     _qpi_interval = args.probe_eval_interval if args.probe_eval_interval > 0 else 10
     if _memoryless:
-        # Feedforward-value diagnostic (full-obs, no memory needed): the board
-        # probe needs a carry to read, so it's skipped — but the critic/actor
-        # heatmaps + critic-greedy metrics still run.
-        print("[memoryless diagnostic] identity memory + full-obs: board-probe "
-              "phases disabled; training + eval + critic/actor heatmaps only.")
+        # The board probe needs a carry to read, but agent training, evaluation,
+        # and critic/actor heatmaps work with either partial or full observations.
+        print("Warning: identity memory has no carry to probe; disabling board "
+              "probe collection, training, and evaluation.")
         args.probe_eval_interval = 0
 
     # The carry is the memory state only; the prev-action one-hot is threaded
