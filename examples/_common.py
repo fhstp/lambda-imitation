@@ -25,7 +25,7 @@ class Experiment(NamedTuple):
     mask_fn: object = None
     reference: object = None
     probe: object = None
-    # Battleship/PocMan reset rollout memory at host-round boundaries in the
+    # Battleship resets rollout memory at host-round boundaries in the
     # reported runs. Minesweeper retains it. Both reset at episode boundaries.
     reset_memory_each_round: bool = True
 

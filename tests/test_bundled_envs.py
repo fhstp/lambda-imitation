@@ -3,7 +3,6 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 from lambda_imitation.envs.battleship import Battleship
 
@@ -36,20 +35,3 @@ def test_battleship_public_step_auto_resets():
     assert done and reward == 25
     np.testing.assert_array_equal(obs, env.get_obs(reset))
     assert not reset.hits_misses.any()
-
-
-def test_pocman_wall_bits_match_every_walkable_cell():
-    pytest.importorskip("jumanji")
-    from lambda_imitation.envs.pocman import PocMan
-    from jumanji.environments.routing.pac_man.types import Position
-
-    env = PocMan()
-    _, state = env.reset(jax.random.key(0), env.default_params)
-    grid = np.asarray(state.grid)
-    get_obs = jax.jit(env.get_obs)
-    for row, col in np.argwhere(grid == 1):
-        at_cell = state.replace(player_locations=Position(x=jnp.int32(row), y=jnp.int32(col)))
-        obs = get_obs(at_cell)
-        expected = [grid[max(row - 1, 0), col], grid[row, min(col + 1, grid.shape[1] - 1)],
-                    grid[min(row + 1, grid.shape[0] - 1), col], grid[row, max(col - 1, 0)]]
-        np.testing.assert_array_equal(obs[:4], expected)

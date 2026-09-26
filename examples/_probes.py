@@ -1,4 +1,4 @@
-"""Optional post-hoc memory decoding, shared by all three environments.
+"""Optional post-hoc memory decoding, shared by Battleship and Minesweeper.
 
 Probe labels are privileged diagnostic data. They never enter agent training,
 action selection or replay. Train and test rollouts have independent RNG streams.
@@ -14,9 +14,6 @@ class ProbeSpec(NamedTuple):
     shape: tuple
     title: str
     classes: int = 0  # 0 means binary cells; positive means categorical clues
-    cells: object = None
-    walls: object = None
-    split_observed: bool = True
 
 
 def auroc(scores, labels):
@@ -47,9 +44,8 @@ def score_probe(targets, probs, observed, ages, spec):
         probs = probs.reshape(*observed.shape, spec.classes)
         truth, pred = targets.argmax(-1), probs.argmax(-1)
         nll = -(targets * np.log2(np.clip(probs, 1e-7, 1))).sum(-1)
-    groups = {"all": np.ones_like(observed, bool)}
-    if spec.split_observed:
-        groups.update(observed=observed.astype(bool), unobserved=~observed.astype(bool))
+    groups = {"all": np.ones_like(observed, bool),
+              "observed": observed.astype(bool), "unobserved": ~observed.astype(bool)}
     result = {}
     for group, mask in groups.items():
         if not mask.any():
@@ -73,8 +69,6 @@ def score_probe(targets, probs, observed, ages, spec):
     for low, high in ((0, 1), (1, 5), (5, 10), (10, 20), (20, 50), (50, 100), (100, 1000000)):
         mask = (ages >= low) & (ages < high)
         if mask.any():
-            # PocMan eaten cells have only the absent-pellet class: this is
-            # retention recall, not balanced accuracy or inference performance.
             result[f"retention/age_{low}_{high}"] = float((pred[mask] == truth[mask]).mean())
     return result
 
@@ -86,11 +80,7 @@ def render_probe(path, data, probabilities, spec):
     import numpy as np
 
     def grid(x):
-        if spec.cells is None:
-            return x.reshape(spec.shape)
-        result = np.full(spec.shape, np.nan)
-        result[spec.cells[:, 0], spec.cells[:, 1]] = x
-        return result
+        return x.reshape(spec.shape)
 
     ends = np.flatnonzero(data["dones"])
     length = int(ends[0]) + 1 if ends.size else len(data["targets"])
@@ -104,8 +94,6 @@ def render_probe(path, data, probabilities, spec):
             prediction = prediction.reshape(-1, spec.classes) @ np.arange(spec.classes)
         for row, values in enumerate((truth, prediction)):
             ax = axes[row, col]
-            if spec.walls is not None:
-                ax.imshow(spec.walls, cmap="Greys")
             ax.imshow(grid(values), vmin=0, vmax=vmax, cmap="viridis")
             # Outline observed cells; never overwrite predictions with labels.
             seen = np.argwhere(grid(data["observed"][frame]).astype(float) == 1)

@@ -17,11 +17,10 @@ with patch.object(sys, "path", [str(EXAMPLES), *sys.path]):
     import _common as common
     import _probes as probes
     import battleship
-    import pocman
     import minesweeper
 
 
-@pytest.mark.parametrize("module", [battleship, pocman, minesweeper])
+@pytest.mark.parametrize("module", [battleship, minesweeper])
 @pytest.mark.parametrize("flag", ["--retrace", "--gvd", "--offline", "--grad-clip",
                                   "--per-alpha", "--stop-actor-fe", "--use-sac"])
 def test_removed_flags_are_rejected(module, flag):

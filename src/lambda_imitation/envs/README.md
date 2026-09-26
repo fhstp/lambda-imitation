@@ -20,7 +20,6 @@ through `get_obs(state, params=None)`.
 | Module / class | Default observation | Actions | Episode end |
 |---|---|---|---|
 | `battleship.Battleship` | last hit bit + legal-action mask | row-major cell | all ship cells hit |
-| `pocman.PocMan` | 11 wall/food/ghost/power-pill sensor values | four directions | death, cleared pellets, or 1,000 steps |
 | `minesweeper.MineSweeper` | last clue one-hot, including reset marker | row-major cell | mine, cleared safe cells, or safe-cell-count steps |
 | `tmaze.TMaze` | initial cue, corridor, junction one-hot | north, south, east, west | choosing a junction branch |
 
@@ -37,18 +36,6 @@ return is `rows × cols + 1 - number_of_shots`. The environment's observation
 tail contains the legal-action mask; the experiment strips it from the network
 input and applies it to the categorical policy separately. `last_hit_miss` is
 the outcome of the previous action. Hidden boards are only used by diagnostics.
-
-## PocMan
-
-The environment adapts Jumanji's PacMan engine to Gymnax and the partial sensor
-observation. The map and line-of-sight construction follow Allen et al. Player
-coordinates are `(row, column)` while ghost/pellet arrays are `(column, row)`.
-Eaten pellets occupy an unreachable `(0,0)` sentinel slot.
-
-The standalone extraction's wall-below sensor correction is included. The
-sensor reads `grid[row + 1, column]`, with boundary clipping. Position and the
-remaining-pellet map are not policy inputs. Importing this module requires
-Jumanji; the other environments do not import it.
 
 ## Minesweeper
 
@@ -77,10 +64,9 @@ verify every nonterminal state/action transition against this environment.
 
 ## Provenance
 
-Battleship, PocMan and T-maze are adapted from Allen et al.'s
+Battleship and T-maze are adapted from Allen et al.'s
 [λ-discrepancy repository](https://github.com/brownirl/lambda_discrepancy), via
 the standalone `lambda-envs` extraction at revision
 `dbd9dfc069430b3c4c1694bf18b8e3b14eda18df`. These sources are Apache-2.0.
-PocMan also derives its step adapter from InstaDeep's Apache-2.0 Jumanji.
 See the repository's `THIRD_PARTY_NOTICES.md` and `licenses/Apache-2.0.txt`,
 also included under `lambda_imitation/` in the built wheel.

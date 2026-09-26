@@ -1,7 +1,7 @@
 # Online memory-learning experiments
 
 Run from the repository root after `pip install -e ".[experiments]"`.
-The three entry points share the same training, evaluation, checkpoint and
+The two entry points share the same training, evaluation, checkpoint and
 optional probe implementation. `--help` lists the complete supported interface;
 unknown flags and unknown sweep parameters are errors.
 
@@ -79,25 +79,6 @@ The reference is evaluation-only. The paper's exact reference expectation is
 computed by the paper repository's enumeration script; the runner reports a
 sampled reference evaluation.
 
-## PocMan
-
-```bash
-python examples/pocman.py --method ld --num-seeds 3 \
-  --output-dir outputs/pocman-ld
-python examples/pocman.py --method ac --num-seeds 3 \
-  --output-dir outputs/pocman-ac
-```
-
-Defaults: 512-unit GRU, Dense–ReLU embedding, one-hidden-layer 512-wide heads,
-no critic LayerNorm, γ=0.95, α=0.1, replay capacity 200,000, batch size 512,
-burn-in 32, learning length 20, tail 30, and λ=(0.1,0.95). Previous-action
-input is always present. Evaluation runs to the environment's 1,000-step cap.
-
-The bundled environment includes the corrected wall-below sensor from
-`lambda-envs` revision `dbd9dfc069430b3c4c1694bf18b8e3b14eda18df`.
-PocMan is an additional experiment; it is not in the current paper's result
-tables. Its defaults are starting settings, not a claimed selected result.
-
 ## Minesweeper
 
 ```bash
@@ -121,7 +102,7 @@ zero clues, falling back to unqueried cells. It never consults unseen mines.
 `known_safe_choice` and `repeat_fraction` report history-based decision
 diagnostics. An evaluation with no known-safe opportunities records JSON null.
 
-Minesweeper is also an additional experiment, not yet a paper result.
+Minesweeper is an additional experiment, not yet a paper result.
 
 ### Matched sweeps
 
@@ -154,7 +135,7 @@ device-synchronised; the first round's timing explicitly includes compilation.
   `--prefill-steps` can override it and must fit the buffer.
 
 All environments reset memory and previous-action input at episode boundaries.
-For the recorded Battleship/PocMan protocol, rollout history additionally
+For the recorded Battleship protocol, rollout history additionally
 starts at zero at each training round; the environment state continues.
 Minesweeper retains rollout history across rounds, matching its original
 pilot protocol. These choices are fixed by the environment specification and
@@ -203,9 +184,6 @@ test rollouts. They never train the agent or provide privileged input to it.
 
 - **Battleship:** binary ship occupancy. Observed-cell scores measure retention;
   unobserved-cell scores measure inference.
-- **PocMan:** remaining pellets in fixed initial pellet slots. Report all-cell
-  scores and absent-pellet recall by time since consumption. An observed versus
-  unobserved split is inappropriate because it separates the two label classes.
 - **Minesweeper:** categorical neighbour counts. Observed-cell scores measure
   clue retention; unobserved-cell scores measure clue inference. This is not a
   mine-location oracle for the policy.
@@ -213,6 +191,6 @@ test rollouts. They never train the agent or provide privileged input to it.
 Outputs include balanced accuracy, per-class recalls, errors per state, exact
 map accuracy and cross-entropy in bits; binary probes also report tie-corrected
 AUROC. Missing-class statistics are null. Recency buckets use time since first
-observation/consumption. Figures outline observed cells rather than replacing
+observation. Figures outline observed cells rather than replacing
 predictions with known truth. Probe scores should be interpreted alongside
 class balance and untrained-memory controls, not raw accuracy alone.

@@ -6,7 +6,7 @@ the disagreement between two Retrace value estimates as an auxiliary loss.
 
 The publication implementation supports **discrete actions**, a recurrent
 actor–critic baseline, auxiliary-critic regression, and Retrace discrepancy.
-Battleship, PocMan, Minesweeper, and the paper's T-maze reproduction code ship
+Battleship, Minesweeper, and the paper's T-maze reproduction code ship
 in this repository.
 
 ## Installation
@@ -25,7 +25,7 @@ The package itself is still installed/imported as `lambda-imitation` /
 `lambda_imitation`.
 
 Core learning needs JAX, Flax NNX, Optax and NumPy. The `experiments` extra adds
-Gymnax, Jumanji (PocMan's game engine), Matplotlib and optional W&B logging.
+Gymnax, Matplotlib and optional W&B logging.
 No separate `lambda-envs` checkout is needed. A smaller installation for
 Battleship/Minesweeper without plotting is `pip install -e ".[gymnax]"`.
 
@@ -39,9 +39,8 @@ python examples/battleship.py \
   --lambda-truncation 4 --online-buffer-size 1000 \
   --eval-episodes 4 --output-dir outputs/battleship-smoke
 
-# The three main runners share a CLI.
+# The two main runners share a CLI.
 python examples/battleship.py --help
-python examples/pocman.py --help
 python examples/minesweeper.py --help
 ```
 
@@ -91,10 +90,9 @@ src/lambda_imitation/
     actor_critic.py       # functional learner, networks, Retrace targets
     buffer.py             # immutable circular replay and uniform sampling
     utils.py              # projections, recurrent cells and Gymnax factory
-    envs/                 # bundled Battleship, PocMan, Minesweeper and T-maze
+    envs/                 # bundled Battleship, Minesweeper and T-maze
 examples/
     battleship.py
-    pocman.py
     minesweeper.py
     _common.py            # shared training/evaluation/checkpoint runner
     _probes.py            # optional post-hoc memory decoding
@@ -124,13 +122,12 @@ exact checkpoint continuation, and the T-maze population/empirical operators.
 
 ## Attribution
 
-The bundled Battleship, PocMan and T-maze environments and the reference
+The bundled Battleship and T-maze environments and the reference
 network architectures build on **Allen et al. (NeurIPS 2024),
 *Mitigating Partial Observability in Sequential Decision Processes via the
 Lambda Discrepancy***:
 <https://github.com/brownirl/lambda_discrepancy>.
-PocMan additionally uses InstaDeep's Jumanji PacMan. Minesweeper independently
-implements the POPGym task rules.
+Minesweeper independently implements the POPGym task rules.
 
 See **[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)** for source revisions,
 modifications, authors and the included Apache-2.0 license, and the

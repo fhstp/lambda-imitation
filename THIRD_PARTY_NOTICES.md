@@ -2,7 +2,7 @@
 
 ## Allen et al.: λ-discrepancy environments and network architectures
 
-The bundled **Battleship, PocMan, and T-maze** environments are adapted from
+The bundled **Battleship and T-maze** environments are adapted from
 the implementation accompanying:
 
 > Cameron Allen, Aaron Kirtland, Ruo Yu Tao, Sam Lobel, Daniel Scott,
@@ -11,7 +11,7 @@ the implementation accompanying:
 > Processes via the Lambda Discrepancy*. NeurIPS, 2024.
 
 - Upstream repository: <https://github.com/brownirl/lambda_discrepancy>
-- Upstream files: `lamb/envs/battleship.py`, `lamb/envs/pocman.py`,
+- Upstream files: `lamb/envs/battleship.py`,
   `lamb/envs/tmaze.py`; network architectures in `lamb/models.py`.
 - License: **Apache License 2.0**, reproduced in
   [licenses/Apache-2.0.txt](licenses/Apache-2.0.txt).
@@ -22,7 +22,7 @@ the implementation accompanying:
   not a claim that the extraction is byte-identical to that revision.
 
 Adaptations include the Gymnax interface, last-shot Battleship observations and
-action masking, and the corrected PocMan wall-below column index. Publication
+action masking. Publication
 cleanup bundles only the environments used here, makes `get_obs` accept optional
 environment parameters, removes unused environment demos and reward/slip
 variants, fixes rectangular Battleship placement bounds, and aligns T-maze's
@@ -30,19 +30,10 @@ terminal predicate with the branch-selection transition. The deterministic
 T-maze and square Battleship transition/reward laws are retained. Each adapted
 source file carries an attribution and modification notice.
 
-`src/lambda_imitation/utils.py` implements the Battleship skip-connection and
-PocMan Dense–ReLU architectures described by the same upstream implementation,
-using Flax NNX and explicit previous-action inputs. Credit for those
-architectures belongs to Allen et al.
-
-## Jumanji / InstaDeep
-
-PocMan uses the PacMan engine and ASCII generator from
-<https://github.com/instadeepai/jumanji>. Its Gymnax `step_env` adapter derives
-from Jumanji's `jumanji/environments/routing/pac_man/env.py`.
-Jumanji is Copyright 2022 InstaDeep Ltd and distributed under **Apache-2.0**.
-The license is included at [licenses/Apache-2.0.txt](licenses/Apache-2.0.txt).
-Jumanji remains an installable dependency; its engine is not copied here.
+`src/lambda_imitation/utils.py` implements the Battleship skip-connection
+architecture described by the same upstream implementation, using Flax NNX and
+explicit previous-action inputs. Credit for that architecture belongs to Allen
+et al.
 
 ## POPGym Minesweeper rules
 

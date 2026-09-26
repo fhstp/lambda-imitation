@@ -75,24 +75,6 @@ class BattleshipProjection(nnx.Module):
         return nnx.relu(self.dense3(e)) if self.dense3 is not None else e
 
 
-class ReluProjection(nnx.Module):
-    """Dense→ReLU embedding used by Allen et al.'s PocMan network."""
-
-    def __init__(self, hidden_size, flat_in, prev_action_dim, *, rngs):
-        self.linear = nnx.Linear(flat_in + prev_action_dim, hidden_size, rngs=rngs)
-
-    def __call__(self, obs, prev_action):
-        x = obs.reshape(obs.shape[0], -1)
-        if prev_action is not None and prev_action.shape[-1]:
-            x = jnp.concatenate([x, prev_action], axis=-1)
-        return nnx.relu(self.linear(x))
-
-
-def relu_projection(hidden_size):
-    return lambda shape, pa_dim, rngs: ReluProjection(
-        hidden_size, math.prod(shape), pa_dim, rngs=rngs)
-
-
 def battleship_projection(hidden_size, extra_layer=False):
     return lambda shape, pa_dim, rngs: BattleshipProjection(
         hidden_size, math.prod(shape), pa_dim, extra_layer=extra_layer, rngs=rngs)
