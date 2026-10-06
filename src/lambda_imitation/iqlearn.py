@@ -1657,6 +1657,10 @@ def create_iqlearn(
         latents: jax.Array,
         alpha: jax.Array,
         key: jax.Array,
+        lambda1_critic: TwinCriticState,
+        lambda2_critic: TwinCriticState,
+        lambda1_graph: TwinCriticGraph,
+        lambda2_graph: TwinCriticGraph,
         mask: jax.Array | None = None,
     ) -> Tuple[jax.Array, dict]:
         """Actor loss: maximise the soft state value V(s) = Q(s,a) - α log π(a|s).
@@ -1678,7 +1682,7 @@ def create_iqlearn(
             ``(scalar_loss, metrics)`` where metrics contains ``"q"``,
             ``"entropy"`` and ``"v"``.
         """
-        key_v = key
+        key_v, key_actions = jax.random.split(key)
         mask_kw = {"mask": mask} if is_discrete else {}
         v, metrics = get_v(
             actor,
@@ -1691,8 +1695,13 @@ def create_iqlearn(
             include_log=True,
             **mask_kw,
         )
+        logits = _apply_mask(run_actor(actor, x), mask)  # (batch, num_actions)
+        actions = jax.random.categorical(key_actions, logits)
+        q1 = get_q(jax.lax.stop_gradient(lambda1_critic), lambda1_graph, latents, actions)
+        q2 = get_q(jax.lax.stop_gradient(lambda2_critic), lambda2_graph, latents, actions)
+        ld_loss = ((q1-q2)**2).mean()
         metrics.update({"v": v.mean()})
-        return -v.mean(), metrics
+        return -v.mean()-ld_loss, metrics
 
     def loss_critic(
         actor_target: nnx.GraphState,
