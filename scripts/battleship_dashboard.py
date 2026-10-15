@@ -360,10 +360,12 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         template = Path(__file__).with_suffix('.html')
         shutil.copyfile(template, args.output/'index.html')
-        api = wandb.Api(timeout=45)
         while True:
             try:
-                publish(api, args)
+                # Api.flush() clears _runs only,not cached Sweep objects or their
+                # run lists. A long-lived client can keep an initially empty
+                # sweep forever (and stale states/summaries after runs start).
+                publish(wandb.Api(timeout=45), args)
             except Exception as error:
                 # Keep the last good publication. Do not expose exception URLs.
                 atomic_json(args.output/'health.json', dict(ok=False, at=now(), error=type(error).__name__))

@@ -45,6 +45,7 @@ def fixture():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--url', default='http://127.0.0.1:8000/b200-sweep/')
+    parser.add_argument('--min-runs', type=int, default=0)
     parser.add_argument('--output', type=Path, default=Path('/tmp/opencode/battleship-sweep-dashboard/browser-proof'))
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -55,7 +56,7 @@ def main():
         page = browser.new_page(viewport={'width': 1480, 'height': 1100})
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.goto(args.url)
-        page.wait_for_function('DATA', timeout=120000)
+        page.wait_for_function('(minimum)=>DATA && DATA.runs.length>=minimum',arg=args.min_runs,timeout=120000)
         assert page.evaluate('DATA.sweep.endsWith("/ekvudzlb")')
         assert page.locator('#runs tr').count() == page.evaluate('DATA.runs.length')
         measured = page.evaluate('DATA.runs.find(r=>r.checkpoints.length)?.id')

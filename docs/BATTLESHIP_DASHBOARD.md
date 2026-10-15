@@ -43,6 +43,8 @@ Add `--watch` for recurring publication. Defaults:
 - At least2.5GiB free disk required before importing additional measurements.
 
 History is unsampled and incremental by W&B row ID, preserving sparse rows.
+A fresh W&B API client is used for every poll:the SDK's `Api.flush()` clears
+run caches but does not invalidate cached sweep objects/their run lists.
 Only native `result.json`/`reconstructions.json` measurement entries are downloaded,
 with SDK caching disabled, into short-lived owned temporary directories. Compact
 gzip snapshots retain source SHA256s and native support; checkpoint identity,

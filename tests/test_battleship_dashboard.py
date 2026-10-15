@@ -251,3 +251,56 @@ def test_finite_parity_mismatch_is_preserved_not_falsely_certified():
     compact=dashboard.compact_result(r,42,10000)
     assert compact['certificate']['state_unchanged']
     assert compact['certificate']['policy_memory_parity']==entries
+
+
+def test_watch_refreshes_initially_empty_sweep_and_later_states_and_history(tmp_path,monkeypatch):
+    """Match the SDK's separate sweep cache,which Api.flush() does not clear."""
+    import copy
+    import sys
+    import wandb
+    remote=[];clients=[];snapshots=[]
+    class Run:
+        id='new-trial'
+        name='new-trial'
+        created_at='today'
+        entity='entity'
+        project='project'
+        config=dict(n_seeds=3,seed_base=42)
+        state='running'
+        summary={'_step':0,'steps':10000}
+        rows=[{'_step':0,'steps':10000,'eval/stochastic/return_mean/mean':.1}]
+        def scan_history(self,**kwargs):
+            return [row for row in self.rows if row['_step']>=kwargs['min_step']]
+    class API:
+        def __init__(self,**kwargs):
+            assert kwargs==dict(timeout=45)
+            self.cached_sweep=None
+            clients.append(self)
+        def flush(self):
+            pass # Like the SDK,this does NOT invalidate the cached sweep.
+        def sweep(self,path):
+            assert path==dashboard.DEFAULT_SWEEP
+            if self.cached_sweep is None:self.cached_sweep=SimpleNamespace(runs=copy.deepcopy(remote))
+            return self.cached_sweep
+    def sleep(interval):
+        assert interval==30
+        snapshots.append(dashboard.read_json(tmp_path/'web/data.json'))
+        if len(snapshots)==1:
+            remote.append(Run())
+        elif len(snapshots)==2:
+            remote[0].state='finished'
+            remote[0].summary={'_step':1,'steps':20000}
+            remote[0].rows=remote[0].rows+[{'_step':1,'steps':20000,'eval/stochastic/return_mean/mean':.4}]
+        else:
+            raise KeyboardInterrupt('End three-cycle test')
+    monkeypatch.setattr(wandb,'Api',API)
+    monkeypatch.setattr(dashboard.time,'sleep',sleep)
+    monkeypatch.setattr(sys,'argv',['dashboard','--watch','--interval','30','--output',str(tmp_path/'web'),'--state',str(tmp_path/'private')])
+    with pytest.raises(KeyboardInterrupt,match='three-cycle'):
+        dashboard.main()
+    assert len(clients)==3
+    assert snapshots[0]['runs']==[]
+    assert snapshots[1]['runs'][0]['state']=='running'
+    assert snapshots[1]['runs'][0]['returns'][-1]['mean']==.1
+    assert snapshots[2]['runs'][0]['state']=='finished'
+    assert [p['mean'] for p in snapshots[2]['runs'][0]['returns']]==[.1,.4]
