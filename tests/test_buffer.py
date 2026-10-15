@@ -336,8 +336,8 @@ class TestCreateSequenceSample:
             keys=["obs"],
         )
         _, seq_indices = sample_fn(buffer, jax.random.key(42))
-        # each row should be [k, k+1, k+2] for some start k
-        diffs = jnp.diff(seq_indices, axis=1)
+        # Each row advances by one slot,including wraparound in the ring.
+        diffs = jnp.diff(seq_indices, axis=1) % buffer.size
         assert jnp.all(diffs == 1)
 
     def test_sequence_sample_wraps_around_ring(self, shapes):

@@ -1,5 +1,23 @@
 # AGENTS.md
 
+## Portable B200 sweep branch
+
+This branch adds a NEW study,not a migration of any live development-host jobs.
+See docs/B200_SWEEP.md,examples/battleship_sweep.py,examples/battleship_memory.py
+and sweeps/battleship_bayes.yaml. Training/prefill MUST remain seed-vmapped.
+Default3 seeds/5M broad Bayesian search;explicit new5/10-seed10M finalist sweep.
+Never bypass native repeatability/lane-isolation/resume gates or silently fall
+back to scalar/other precision. Legacy categorical vmap failures are NOT erased.
+Dense non-scatter categorical projection is an explicit new-study implementation,
+mathematically tested but not a claim of bitwise legacy trajectory equivalence.
+Runtime policy may change ONLY diagnostics frequency/suite,never learning/RNG.
+No host-specific service/plan guards or archives are required for the new runner.
+Old imported experiment modules are frozen builder/measurement dependencies,
+not executable orchestration for this server. Do not run their old supervisors.
+All metrics/media/artifacts use outbound W&B HTTPS,no dashboard/ports required.
+Retain explicit seed identities/support;undefined AUROC is not zero. Memory
+decodability is not policy use,unseen-ship inference or causal performance proof.
+
 ## Overview
 
 IQ-Learn (Inverse Q-Learning) imitation learning implementation in **Python** using **JAX + Flax NNX + Optax**. Currently on the `fresh_start` branch. The project is structured as an installable Python package (`lambda-imitation`) with a `src/` layout.

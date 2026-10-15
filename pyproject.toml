@@ -16,12 +16,18 @@ dependencies = [
 
 [project.optional-dependencies]
 gymnasium = ["gymnasium"]
-gymnax = ["gymnax"]
+gymnax = ["gymnax>=0.0.9,<1"]
 jumanji = ["jumanji"]
+popgym = ["popgym[navigation]>=1.0.6", "cloudpickle>=3"]
+popgym-jax = ["gymnax>=0.0.9,<1", "popjym @ git+https://github.com/EdanToledo/popjym.git@2cd2ee4114579e25577c34a90695cebfc80f714d"]
 dev = ["pytest"]
+sweep = ["wandb>=0.19,<1", "cloudpickle>=3.1,<4", "PyYAML>=6,<7", "pillow>=10"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lambda_imitation"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

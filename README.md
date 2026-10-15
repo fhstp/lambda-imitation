@@ -1,6 +1,15 @@
 
 # Lambda Imitation
 
+## B200 Battleship search
+
+See [B200 setup and runbook](docs/B200_SWEEP.md) for the portable W&B Bayesian
+sweep:3 vmapped seeds,5M broad-search budget,configurable full memory diagnostics
+and a separate5/10-seed10M finalist sweep. No inbound ports needed.
+
+Sweep configuration: [`sweeps/battleship_bayes.yaml`](sweeps/battleship_bayes.yaml).
+Target-device repeatability,isolation and resume gates must pass before training.
+
 ## Roadmap
 
  - [ ] WP1: Buffer

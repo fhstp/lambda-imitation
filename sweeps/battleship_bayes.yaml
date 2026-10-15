@@ -1,0 +1,55 @@
+name: battleship-residual-categorical-3seed-5M
+program: examples/battleship_sweep.py
+method: bayes
+metric:
+  name: objective/return_mean
+  goal: maximize
+# No early-return Hyperband pruning:weak first100k–1M is not a reliable failure.
+# Every completed score has the SAME5M budget and last-five-checkpoint objective.
+run_cap: 2048
+parameters:
+  n_seeds: {value: 3}
+  seed_base: {value: 42}
+  max_steps: {value: 5000000}
+  lambda_coef:
+    distribution: log_uniform_values
+    min: 0.03
+    max: 100.0
+  fe_lr:
+    distribution: log_uniform_values
+    min: 0.000001
+    max: 0.0003
+  actor_lr:
+    distribution: log_uniform_values
+    min: 0.00003
+    max: 0.001
+  critic_lr:
+    distribution: log_uniform_values
+    min: 0.00003
+    max: 0.001
+  alpha_final:
+    distribution: log_uniform_values
+    min: 0.003
+    max: 0.3
+  alpha_decay_steps:
+    values: [100000, 250000, 500000, 1000000]
+  tau:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 0.02
+  memory_hidden_dim:
+    values: [128, 256, 512]
+  # Fixed algorithm/architecture to keep the search interpretable.
+  batch_size: {value: 128}
+  gamma: {value: 0.99}
+  lambda1: {value: 0.05}
+  lambda2: {value: 0.85}
+  memory_suite: {value: full}
+  memory_schedule: {value: dense}
+  runtime_policy: {value: memory-policy.json}
+  artifact_policy: {value: metrics}
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args}

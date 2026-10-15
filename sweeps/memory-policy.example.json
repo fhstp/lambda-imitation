@@ -1,0 +1,5 @@
+{
+  "memory_schedule": "dense",
+  "memory_suite": "full",
+  "memory_milestones": [100000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000, 10000000]
+}

@@ -1,0 +1,14 @@
+{
+  "n_seeds": 3,
+  "max_steps": 5000000,
+  "lambda_coef": 0.0,
+  "fe_lr": 0.0001,
+  "actor_lr": 0.0001,
+  "critic_lr": 0.0001,
+  "alpha_final": 0.01,
+  "alpha_decay_steps": 500000,
+  "tau": 0.005,
+  "memory_hidden_dim": 512,
+  "memory_suite": "full",
+  "runtime_policy": "memory-policy.json"
+}

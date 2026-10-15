@@ -1,4 +1,10 @@
 # Byte-compiled / optimized / DLL files
+# New portable sweep outputs/config;never training data in the source branch.
+/runs/
+/logs/battleship-agents/
+/wandb/
+/memory-policy.json
+/b200-environment.txt
 __pycache__/
 *.py[codz]
 *$py.class

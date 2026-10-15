@@ -1,9 +1,9 @@
-"""SAC actor-critic with optional λ-discrepancy V-trace critics and GVD.
+"""SAC actor-critic with optional λ-discrepancy V-trace/Retrace critics and GVD.
 
 Implements a SAC-style actor-critic agent.  When ``approximate_lambda=True``,
-two additional V-trace λ-return critics (one per λ value) are trained
-alongside the standard SAC critic; their Huber discrepancy is added to the
-joint loss as a regulariser (the "λ-discrepancy" line of work).  When
+two additional λ-return critics (V-trace or Q-Retrace, one per λ value) are
+trained with MSE alongside the standard SAC critic; their squared discrepancy
+is added to the joint loss as a regulariser (the "λ-discrepancy" line of work). When
 ``use_gvd=True``, two successor-feature V-heads are additionally trained on
 observable-feature cumulants (``gvd_feature_fn(obs, prev_action)``) at
 ``gvd_lambda{1,2}`` and their squared discrepancy is added as a reward-free
@@ -328,6 +328,10 @@ class SACFunctions(NamedTuple):
             action values for continuous spaces.  Manual rollout loops that
             enable ``use_prev_action`` use this to thread the prev-action
             across steps; obs-only callers never need it.
+        update: ``(state, key) -> (state, metrics)`` -- one joint gradient
+            update on an already populated online replay buffer, without
+            collecting experience. Useful for host-side Gymnasium rollouts.
+            The caller must ensure at least one complete sequence is valid.
     """
 
     predict: Callable
@@ -336,6 +340,7 @@ class SACFunctions(NamedTuple):
     prefill_buffer: Callable
     train_unrolled: Callable
     encode_action: Callable
+    update: Callable | None = None
 
 
 class DebugFunctions(NamedTuple):
@@ -343,8 +348,8 @@ class DebugFunctions(NamedTuple):
 
     These functions expose internal computations that are useful for
     introspection and unit testing but are not required for normal training.
-    All accept **post-FE features** (latents), not raw observations — callers
-    must first run the FE to produce ``x``.
+    Low-level helpers accept **post-FE features** (latents); ``predict_*``
+    helpers accept raw observations and thread the memory carry.
 
     Attributes:
         get_q: ``(critic, graph, x, actions) -> q_values`` -- evaluate the
@@ -370,12 +375,18 @@ class DebugFunctions(NamedTuple):
             observation, plus the post-FE memory carry.  Discrete-only
             (``None`` for continuous action spaces).  Used for critic-Q /
             actor-π introspection; reads the existing critic/actor only.
+        predict_values: same inputs as ``predict_qpi``; returns
+            ``(values, new_carry)``. ``values`` contains raw per-action twin
+            arrays ``q``, ``lambda1_q``, ``lambda2_q`` (shape ``(A, 2)``),
+            and masked ``probs``. Lambda entries are absent when disabled.
+            Discrete-only; this read-only helper uses the online networks.
     """
 
     get_q: Callable
     get_entropy: Callable
     calculate_latent: Callable
     predict_qpi: Callable | None = None
+    predict_values: Callable | None = None
 
 
 class Hyperparameters(NamedTuple):
@@ -384,7 +395,7 @@ class Hyperparameters(NamedTuple):
     All fields have sensible defaults so callers only need to override what
     differs from the standard SAC setup.  λ-discrepancy fields
     (``lambda{1,2}``, ``lambda_critic_lr``, ``c_bar``, ``rho_bar``,
-    ``lambda_truncation``, ``lambda_coef``, ``fake_onpolicy_loss``) are
+    ``lambda_truncation``, ``lambda_coef``, ``fake_onpolicy_loss``, ``retrace``) are
     ignored unless ``approximate_lambda=True``.
 
     Attributes:
@@ -422,7 +433,7 @@ class Hyperparameters(NamedTuple):
             V-trace loss to avoid biasing the λ-return by missing bootstrap
             mass at the end of the unroll.  Each sampled sequence has total
             length ``burn_in_length + sequence_length + lambda_truncation``.
-        lambda_coef: Multiplier on the Huber λ-discrepancy regulariser
+        lambda_coef: Multiplier on the squared λ-discrepancy regulariser
             ``‖Q_λ1 − Q_λ2‖`` added to the joint loss.
         fake_onpolicy_loss: If True, set every V-trace importance ratio to
             1.0 (i.e. assume on-policy data).  Used as an ablation.  Applies
@@ -435,6 +446,9 @@ class Hyperparameters(NamedTuple):
             default 1.0 — Monte-Carlo).  Ignored unless ``use_gvd=True``.
         gvd_sf_lr: Learning rate for each SF-head Adam optimiser.  Ignored
             unless ``use_gvd=True``.
+        retrace: If True, use action-conditioned Retrace(λ) targets for the
+            λ-critics instead of V-trace. The current TD error is not scaled
+            by its importance ratio; small ratios only cut future corrections.
     """
 
     fe_lr: float = 1e-4
@@ -474,6 +488,9 @@ class Hyperparameters(NamedTuple):
     # never by the policy-improvement gradient. The actor is a head on detached
     # features. Removes actor↔critic gradient conflict on the shared encoder.
     stop_actor_fe: bool = False
+    # Restored from 16c12e0 (origin/fix/retrace-lambda-critics). Appended with
+    # a default to preserve older positional constructions/checkpoints.
+    retrace: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +513,75 @@ def extract_buffer_shapes(buffer: Buffer) -> dict[str, tuple[int, ...]]:
         ``buffer.info[k].shape[1:]`` for every key ``k``).
     """
     return {k: v.shape[1:] for k, v in buffer.info.items()}
+
+
+def retrace_targets(
+    q_taken: jax.Array,
+    v: jax.Array,
+    rewards: jax.Array,
+    dones: jax.Array,
+    ratios: jax.Array,
+    gamma: float,
+    lam: float,
+    c_bar: float,
+) -> jax.Array:
+    """Retrace(λ) targets for a Q-critic over a time-major sequence.
+
+    ``target_t = Q̄(s_t,a_t) + Σ_{k≥t} γ^(k-t) (Π_{j=t+1..k} c_j) δ_k`` with
+    ``δ_k = r_k + γ(1-done_k) V̄(s_{k+1}) - Q̄(s_k,a_k)`` and
+    ``c_j = λ·min(c_bar, ρ_j)`` (Munos et al. 2016).
+
+    The difference from V-trace that matters here: the ``k = t`` term sits
+    *outside* the trace product, so its coefficient is 1 regardless of the
+    ratios.  V-trace instead multiplies the current delta by ``ρ_t``, so when
+    the target policy disagrees with the behaviour policy (ρ → 0) its target
+    collapses to ``V(s_t)`` and carries no reward at all — which is how the
+    λ-critics' value level drifts free.  Under Retrace small ratios only cut
+    the tail: the estimator degrades to 1-step TD, which is safe but slow.
+
+    Implemented as a reverse ``jax.lax.scan`` carrying ``(acc_{t+1}, c_{t+1})``:
+
+        acc_t = δ_t + (1 - done_t) · γ · c_{t+1} · acc_{t+1}
+
+    with a zero terminal carry, so the trace is truncated at the unroll tail
+    (the caller drops the last ``lambda_truncation`` steps) and at every
+    episode boundary.
+
+    Args:
+        q_taken: ``(T', B)`` TARGET-critic Q for the action actually taken.
+        v: ``(T', B)`` TARGET-critic state values ``V̄(s_t) = E_π[Q̄(s_t,·)]``;
+            shifted internally to give the bootstrap ``V̄(s_{t+1})``.
+        rewards: ``(T', B)`` rewards.
+        dones: ``(T', B)`` termination flags (float 0/1).
+        ratios: ``(T', B)`` importance ratios ``π(a|s) / b(a|s)``.
+        gamma: Discount factor.
+        lam: λ for this head — the only place λ enters, controlling how far
+            credit propagates.
+        c_bar: Trace truncation cap (``min(c_bar, ρ)``).
+
+    Returns:
+        ``(T', B)`` Retrace targets, to be regressed against the ONLINE critic's
+        Q for the taken action.
+
+    Restored from commit ``16c12e0`` on ``origin/fix/retrace-lambda-critics``.
+    """
+    v_next = jnp.concatenate([v[1:], jnp.zeros_like(v[:1])], axis=0)
+    deltas = rewards + (1.0 - dones) * gamma * v_next - q_taken
+
+    def scan_fn(carry, x):
+        acc_next, c_next = carry
+        delta, done, ratio = x
+        acc = delta + (1.0 - done) * gamma * c_next * acc_next
+        return (acc, lam * jnp.minimum(c_bar, ratio)), acc
+
+    _carry, accs = jax.lax.scan(
+        scan_fn,
+        (jnp.zeros_like(deltas[0]), jnp.zeros_like(deltas[0])),
+        (deltas, dones, ratios),
+        reverse=True,
+        unroll=8,
+    )
+    return q_taken + accs
 
 
 def sf_vtrace_targets(
@@ -658,7 +744,7 @@ def create_iqlearn(
             squashed-Gaussian actor and a continuous critic that takes
             actions as additional input.
         approximate_lambda: If True, additionally train two V-trace
-            λ-return critics (one per ``lambda{1,2}``) and add their Huber
+            λ-return critics (one per ``lambda{1,2}``) and add their squared
             discrepancy to the joint loss as a regulariser.
         use_prev_action: If True, the previously executed action is fed to
             the feature extractor's projection alongside the observation
@@ -1320,6 +1406,27 @@ def create_iqlearn(
             )
 
         @jax.jit
+        def predict_values(iqlearn, obs, carry, prev_action=None):
+            """Read all online value heads after one shared FE step (no updates)."""
+            pa = jnp.expand_dims(prev_action, 0) if prev_action is not None else None
+            new_carry, x = nnx.merge(
+                feature_extractor_graph, iqlearn.feature_extractor
+            )(carry[None], obs_fn(obs)[None], pa)
+            mask = mask_fn(obs) if mask_fn is not None else None
+            values = {
+                "q": run_critic(iqlearn.critic, critic_graph, x)[0],
+                "probs": jax.nn.softmax(_apply_mask(run_actor(iqlearn.actor, x)[0], mask)),
+            }
+            if approximate_lambda:
+                values["lambda1_q"] = run_critic(
+                    iqlearn.lambda1_critic, lambda1_critic_graph, x
+                )[0]
+                values["lambda2_q"] = run_critic(
+                    iqlearn.lambda2_critic, lambda2_critic_graph, x
+                )[0]
+            return values, new_carry[0]
+
+        @jax.jit
         def predict_qpi(
             iqlearn: SACState,
             obs: jax.Array,
@@ -1338,20 +1445,8 @@ def create_iqlearn(
             Used by the critic-Q / actor-π heatmaps; mirrors ``predict``'s FE
             roll exactly and reads the existing critic/actor only.
             """
-            obs_batch = jnp.expand_dims(obs_fn(obs), 0)
-            carry_batch = jnp.expand_dims(carry, 0)
-            prev_action_batch = (
-                jnp.expand_dims(prev_action, 0) if prev_action is not None else None
-            )
-            new_carry, x = nnx.merge(
-                feature_extractor_graph, iqlearn.feature_extractor
-            )(carry_batch, obs_batch, prev_action_batch)
-            mask = mask_fn(obs) if mask_fn is not None else None
-            logits = _apply_mask(run_actor(iqlearn.actor, x)[0], mask)
-            probs = jax.nn.softmax(logits)               # (num_actions,)
-            q_twin = run_critic(iqlearn.critic, critic_graph, x)  # (1, n, 2)
-            q_min = jnp.minimum(q_twin[..., 0], q_twin[..., 1])[0]  # (num_actions,)
-            return q_min, probs, new_carry[0]
+            values, new_carry = predict_values(iqlearn, obs, carry, prev_action)
+            return jnp.min(values["q"], axis=-1), values["probs"], new_carry
 
         @jax.jit
         def get_importance_ratios(
@@ -1626,6 +1721,7 @@ def create_iqlearn(
 
         # Per-action Q/π diagnostic is discrete-only (all-actions critic).
         predict_qpi = None
+        predict_values = None
 
     # ------------------------------------------------------------------
     # Loss functions and other helpers which are structurally identical
@@ -1695,13 +1791,18 @@ def create_iqlearn(
             include_log=True,
             **mask_kw,
         )
-        logits = _apply_mask(run_actor(actor, x), mask)  # (batch, num_actions)
-        actions = jax.random.categorical(key_actions, logits)
-        q1 = get_q(jax.lax.stop_gradient(lambda1_critic), lambda1_graph, latents, actions)
-        q2 = get_q(jax.lax.stop_gradient(lambda2_critic), lambda2_graph, latents, actions)
-        ld_loss = ((q1-q2)**2).mean()
+        #ld_loss = jnp.float32(0.0)
+        #if approximate_lambda:
+            #if is_discrete:
+                #logits = _apply_mask(run_actor(actor, latents), mask)
+                #actions = jax.random.categorical(key_actions, logits)
+            #else:
+                #actions, _, _ = sample_action_logprob(actor, latents, key_actions)
+            #q1 = get_q(jax.lax.stop_gradient(lambda1_critic), lambda1_graph, jax.lax.stop_gradient(latents), actions)
+            #q2 = get_q(jax.lax.stop_gradient(lambda2_critic), lambda2_graph, jax.lax.stop_gradient(latents), actions)
+            #ld_loss = ((q1-q2)**2).mean()
         metrics.update({"v": v.mean()})
-        return -v.mean()-ld_loss, metrics
+        return -v.mean(), metrics
 
     def loss_critic(
         actor_target: nnx.GraphState,
@@ -1775,9 +1876,9 @@ def create_iqlearn(
     ) -> Tuple[jax.Array, dict]:
         """λ-discrepancy regulariser pulling the two λ-critics together.
 
-        Computes the Huber loss between the conservative (min-over-twin)
+        Computes the squared discrepancy between the conservative (min-over-twin)
         Q-values of the short-horizon (``params.lambda1``) and long-horizon
-        (``params.lambda2``) V-trace critics evaluated at the same
+        (``params.lambda2``) V-trace/Retrace critics evaluated at the same
         ``(s, a)``.  Added to the joint loss with weight
         ``params.lambda_coef``.
 
@@ -1799,7 +1900,7 @@ def create_iqlearn(
         # Without the stop_gradient the heads can trivially collapse q1≈q2 by
         # themselves (the cheapest descent direction), self-satisfying the
         # regulariser and leaving the FE — and thus ``lambda_coef`` — with no
-        # effect.  The λ-critics still train via their V-trace losses.
+        # effect.  The λ-critics still train via their V-trace/Retrace losses.
         q1 = get_q(jax.lax.stop_gradient(lambda1_critic), lambda1_graph, latents, actions)
         q2 = get_q(jax.lax.stop_gradient(lambda2_critic), lambda2_graph, latents, actions)
         loss = ((q1-q2)**2).mean()
@@ -2030,14 +2131,17 @@ def create_iqlearn(
         key: jax.Array,
         masks: jax.Array | None = None,
     ):
-        """V-trace λ-return Huber loss for one λ-critic over a time-major sequence.
+        """V-trace/Retrace λ-return MSE loss for one twin λ-critic.
 
         Inputs are time-major (``T - burn_in_length`` along axis 0).  Per-step
         importance ratios ``π_target(a|s) / b(a|s)`` are recomputed inline
         from the rolled features (no separate raw-obs IS pass).  When
         ``params.fake_onpolicy_loss`` is set the ratios are clamped to 1.
 
-        The V-trace recursion uses ``(1 - done)`` to mask both the
+        With ``params.retrace=True`` the target is action-conditioned
+        Retrace(λ); terminal Q targets equal the reward even when the current
+        importance ratio is zero. Otherwise the legacy V-trace recursion uses
+        ``(1 - done)`` to mask both the
         ``δ_V = r + γ(1-done) V_{s+1} - V_s`` term and the correction
         ``(1-done) γ c (v_{s+1} - V_{s+1})``.  The last
         ``params.lambda_truncation`` time-steps are dropped from the loss to
@@ -2122,22 +2226,40 @@ def create_iqlearn(
             v_s = V_s + rho * delta_V + (1 - done) * params.gamma * c * (v_sp1 - V_sp1)
             return (v_s, V_s), v_s
 
-        _carry, targets = jax.lax.scan(
-            scan_target,
-            (jnp.zeros_like(v[0]), jnp.zeros_like(v[0])),
-            (v, dones, rewards, ratios),
-            reverse=True,
-            unroll=8,  # fuse across timesteps -> fewer tiny per-step kernels
-        )
+        if params.retrace:
+            q_target_taken = get_q(
+                q_target_state, q_graph, _tb(target_latents), _tb(actions)
+            ).reshape(Tp, B)
+            targets = retrace_targets(
+                q_target_taken, v, rewards, dones, ratios,
+                params.gamma, lam, params.c_bar,
+            )
+        else:
+            _carry, targets = jax.lax.scan(
+                scan_target,
+                (jnp.zeros_like(v[0]), jnp.zeros_like(v[0])),
+                (v, dones, rewards, ratios),
+                reverse=True,
+                unroll=8,  # fuse across timesteps -> fewer tiny per-step kernels
+            )
 
-        loss = optax.losses.huber_loss(
-            q[: -params.lambda_truncation],
-            jax.lax.stop_gradient(targets)[: -params.lambda_truncation],
-        ).mean()
+        # Fit BOTH branches, keeping min() only for targets/diagnostics.
+        # Squared regression preserves the mean-return objective; Huber can
+        # instead downweight rare, large terminal rewards in aliased features.
+        q1, q2 = jax.tree.map(
+            lambda a: a.reshape(Tp, B),
+            get_q_both(q_state, q_graph, _tb(latents), _tb(actions)),
+        )
+        target = jax.lax.stop_gradient(targets)[: -params.lambda_truncation]
+        loss = 0.5 * (
+            jnp.mean((q1[: -params.lambda_truncation] - target) ** 2)
+            + jnp.mean((q2[: -params.lambda_truncation] - target) ** 2)
+        )
         metrics = {
             "loss": loss,
             f"lambda{lam}_critic:": q[: -params.lambda_truncation].mean(),
             f"lambda{lam}_target:": targets[: -params.lambda_truncation].mean(),
+            f"lambda{lam}_twin_gap:": jnp.abs(q1 - q2).mean(),
         }
 
         return loss, metrics
@@ -2347,8 +2469,8 @@ def create_iqlearn(
         - **Critic loss** with the off-by-one bootstrap pair
           ``latent[t] → target_latent[t+1]``, action/reward/terminated at
           index ``t``.
-        - **λ-critic V-trace losses** (when ``approximate_lambda=True``), one
-          per λ value, plus a Huber λ-discrepancy term ``loss_ld`` scaled by
+        - **λ-critic V-trace/Retrace losses** (when ``approximate_lambda=True``), one
+          per λ value, plus a squared λ-discrepancy term ``loss_ld`` scaled by
           ``params.lambda_coef``.
         - **GVD SF V-trace losses + discrepancy** (when ``use_gvd=True``):
           two successor-feature heads trained on feature-difference
@@ -2439,6 +2561,10 @@ def create_iqlearn(
             _flat(actor_latent),
             alpha,
             key_actor,
+            lambda1_critic_state,
+            lambda2_critic_state,
+            lambda1_critic_graph if approximate_lambda else None,
+            lambda2_critic_graph if approximate_lambda else None,
             mask=_flat(masks_tm) if masks_tm is not None else None,
         )
 
@@ -2996,11 +3122,12 @@ def create_iqlearn(
         prefill_buffer,
         _train_unrolled,
         encode_action,
+        update_step,
     )
     if debug:
         return (
             iqlearn,
             fns,
-            DebugFunctions(get_q, get_entropy, calculate_latent, predict_qpi),
+            DebugFunctions(get_q, get_entropy, calculate_latent, predict_qpi, predict_values),
         )
     return (iqlearn, fns)
