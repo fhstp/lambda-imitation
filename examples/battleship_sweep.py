@@ -274,7 +274,7 @@ def run_trial(values,output,resume=None):
     import jax
     import numpy as np
     import wandb
-    from battleship_memory import analyze,log_memory
+    from battleship_memory import analyze,log_memory,optional_diagnostic,DiagnosticUnavailable
     from popgym_jax import evaluation_result
     saved=None
     if resume:
@@ -303,6 +303,24 @@ def run_trial(values,output,resume=None):
             states,rollouts,_=jax.block_until_ready(batch.prefill(states,rollouts,c['prefill_steps']));step=0;history=[]
             save_checkpoint(folder/'latest.pkl',states,rollouts,c,step,history,run.id,manifest)
         args,config,port,fns,debug,sampler,components,context=built
+        warning_path=folder/'diagnostic-warnings.jsonl'
+        warning_count=sum(1 for line in warning_path.read_text().splitlines() if line) if warning_path.exists() else 0
+        def diagnostic_warning(seed,stage,message,details=None,error=None):
+            nonlocal warning_count
+            warning_count+=1
+            if error is not None:
+                import traceback
+                # Preserve the cause locally,without exposing exception URLs/tokens
+                # in the public structured warning consumed by the dashboard.
+                with (folder/'diagnostic-errors.log').open('a') as f:
+                    f.write(f'\nstep={step} seed={seed} stage={stage}\n'+''.join(traceback.format_exception(error)))
+                message+=';local traceback: diagnostic-errors.log'
+            record=dict(steps=step,seed=seed,stage=stage,message=message,details=details,wall_time=time.time())
+            with warning_path.open('a') as f:f.write(json.dumps(record,allow_nan=False)+'\n')
+            print('DIAGNOSTIC WARNING '+json.dumps(record,allow_nan=False),flush=True)
+            # Local evidence survives even if optional W&B warning logging fails.
+            try:run.log({'steps':step,'diagnostics/warning_count':warning_count,'diagnostics/warning_json':json.dumps(record,allow_nan=False)})
+            except Exception as error:print(f'Warning publication unavailable ({type(error).__name__});retained in {warning_path}',flush=True)
         last_policy=None;next_eval=((step//10000)+1)*10000;started=time.monotonic();start_step=step
         while step<c['max_steps']:
             disk_check(folder,c);n=min(c['chunk_steps'],next_eval-step,c['max_steps']-step)
@@ -334,12 +352,30 @@ def run_trial(values,output,resume=None):
                 from popgym_memory_diagnostics import tree_digest
                 before=tree_digest((states,rollouts))
                 atomic_json(folder/'status.json',dict(state='observing',steps=step,policy=policy))
-                memory_results=[]
-                for lane,seed in enumerate(seeds):
-                    state=jax.tree.map(lambda x:x[lane],states)
-                    memory_results.append(analyze(state,built,c,policy,folder,seed,step))
-                if before!=tree_digest((states,rollouts)):raise AssertionError('Diagnostics modified training/rollout/RNG state')
-                payload.update(log_memory(run,memory_results,seeds,step,folder,c))
+                memory_results=[];complete=False
+                try:
+                    for lane,seed in enumerate(seeds):
+                        state=jax.tree.map(lambda x:x[lane],states)
+                        try:
+                            memory_results.append(analyze(state,built,c,policy,folder,seed,step,
+                                on_warning=lambda stage,message,details,seed=seed:diagnostic_warning(seed,stage,message,details)))
+                        except DiagnosticUnavailable as error:
+                            diagnostic_warning(seed,error.stage,str(error),dict(error_type=error.error_type),error=error)
+                            break # Do not publish a partial seed set as a complete memory checkpoint.
+                    if len(memory_results)==len(seeds):
+                        try:
+                            memory_payload=optional_diagnostic('memory_publication',lambda:log_memory(run,memory_results,seeds,step,folder,c))
+                            # Media serialization/upload is OPTIONAL;never mix it into
+                            # the required return/training scalar publication below.
+                            optional_diagnostic('memory_publication',lambda:run.log({'steps':step,**memory_payload}))
+                            complete=True
+                        except DiagnosticUnavailable as error:
+                            diagnostic_warning(None,error.stage,str(error),dict(error_type=error.error_type),error=error)
+                finally:
+                    # This remains fatal even when the optional measurement failed.
+                    if before!=tree_digest((states,rollouts)):raise AssertionError('Diagnostics modified training/rollout/RNG state')
+                payload['diagnostics/memory_complete']=int(complete)
+                payload['diagnostics/warning_count']=warning_count
             if should_eval or scheduled(step,c,policy):
                 payload.update(seed_aggregate([{k:float(np.asarray(v)[i]) for k,v in metrics.items()} for i in range(c['n_seeds'])],seeds,'train'))
                 payload['throughput/online_steps_per_second_per_seed']=(step-start_step)/max(time.monotonic()-started,1e-6)

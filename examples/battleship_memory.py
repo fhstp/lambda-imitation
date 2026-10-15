@@ -9,7 +9,57 @@ from pathlib import Path
 import tempfile
 
 
-def collect(state,built,c,folder,save_datasets):
+class DiagnosticUnavailable(RuntimeError):
+    """An optional measurement failed;never a training/return-evaluation error."""
+    def __init__(self,stage,error):
+        self.stage,self.error_type=stage,type(error).__name__
+        super().__init__(f'{stage} unavailable ({self.error_type});measurement omitted')
+
+
+def optional_diagnostic(stage,call):
+    """Only use around probe fitting/formatting/publication,not safety gates."""
+    try:return call()
+    except (AssertionError,FloatingPointError,OSError,MemoryError,SystemError):raise
+    except Exception as error:
+        # Device/runtime failures may leave the process unsafe to continue.
+        if type(error).__module__.startswith(('jax','jaxlib')):raise
+        raise DiagnosticUnavailable(stage,error) from error
+
+
+def probability_parity(replayed,recorded,mode,block):
+    """Measure the ORIGINAL tolerance without aborting on finite roundoff/drift.
+
+    A warning is not a parity certificate. Shapes/nonfinite values remain fatal.
+    No precision,policy,history or training/RNG changes are made here.
+    """
+    import numpy as np
+    if replayed.shape!=recorded.shape:raise AssertionError('Policy replay probability shape mismatch')
+    if not np.isfinite(replayed).all() or not np.isfinite(recorded).all():
+        raise FloatingPointError('Nonfinite policy replay probabilities')
+    mismatch=~np.isclose(replayed,recorded,atol=1e-5,rtol=1e-4)
+    delta=np.abs(replayed.astype(np.float64)-recorded.astype(np.float64))
+    nonzero=recorded!=0
+    relative=delta[nonzero]/np.abs(recorded[nonzero].astype(np.float64))
+    index=tuple(int(i) for i in np.unravel_index(np.argmax(delta),delta.shape))
+    count=int(mismatch.sum())
+    return dict(mode=mode,block=block,passed=count==0,atol=1e-5,rtol=1e-4,
+        elements=int(mismatch.size),mismatched_elements=count,mismatched_fraction=count/mismatch.size,
+        max_probability_error=float(delta.max()),max_relative_error=float(relative.max()) if relative.size else None,
+        zero_reference_mismatches=int((mismatch&~nonzero).sum()),worst_index=list(index),
+        worst_replayed=float(replayed[index]),worst_recorded=float(recorded[index]))
+
+
+def parity_summary(entries):
+    elements=sum(p['elements'] for p in entries)
+    mismatched=sum(p['mismatched_elements'] for p in entries)
+    relative=[p['max_relative_error'] for p in entries if p['max_relative_error'] is not None]
+    return dict(checked_blocks=len(entries),warning_blocks=sum(not p['passed'] for p in entries),
+        elements=elements,mismatched_elements=mismatched,mismatched_fraction=mismatched/elements if elements else None,
+        max_probability_error=max((p['max_probability_error'] for p in entries),default=None),
+        max_relative_error=max(relative,default=None))
+
+
+def collect(state,built,c,folder,save_datasets,on_warning=None):
     import jax
     import numpy as np
     import popgym_flash_memory_probe as probes
@@ -26,7 +76,12 @@ def collect(state,built,c,folder,save_datasets):
             data=jax.device_get(collector(state,seed,mode=mode,episodes=100))
             if not data['history_label_parity'].all():raise AssertionError('Native fired labels disagree')
             carry,probs,instant=jax.device_get(encode(state,data['observations'],data['actions'],data['hits']))
-            np.testing.assert_allclose(probs[:,:-1],data['probs'],atol=1e-5,rtol=1e-4)
+            comparison=probability_parity(probs[:,:-1],data['probs'],mode,block)
+            parity.append(comparison)
+            if not comparison['passed']:
+                message='Policy replay probability tolerance exceeded;memory interpretation requires caution,not a training failure'
+                __import__('logging').getLogger(__name__).warning('%s: %s',message,json.dumps(comparison))
+                if on_warning:on_warning('policy_memory_parity',message,comparison)
             if not np.isfinite(carry).all():raise FloatingPointError('Nonfinite frozen memory')
             item=dict(memory=carry,last_input=instant,**probes.history_labels(data,64),actions=data['actions'],outcomes=data['hits'],
                 mode=np.full(100,mode_index,np.int8),episode_id=np.arange(seed,seed+100,dtype=np.int64),
@@ -41,7 +96,6 @@ def collect(state,built,c,folder,save_datasets):
                 actor_repeat_mass=float(data['seen_mass'].sum()/active.sum()),entropy=float(data['entropy'].sum()/active.sum()),
                 q_mc_rmse=float(np.sqrt((error**2).mean())),q_mc_bias=float(error.mean())))
             if save_datasets:np.savez_compressed(folder/f'{mode}-block{block}.npz',**item)
-            parity.append(dict(mode=mode,block=block,max_probability_error=float(np.max(np.abs(probs[:,:-1]-data['probs'])))))
     merged={k:np.concatenate([p[k] for p in pieces]) for k in pieces[0]}
     if len(np.unique(merged['episode_id']))!=len(merged['episode_id']):raise AssertionError('Episode split leakage')
     summaries={mode:{k:float(np.mean([r[k] for r in policy_rows if r['mode']==mode])) for k in policy_rows[0] if k!='mode'} for mode in probes.MODES}
@@ -79,7 +133,7 @@ def reconstruction_rows(data,folder,seed,step):
     return rows
 
 
-def analyze(state,built,c,policy,root,seed,step):
+def analyze(state,built,c,policy,root,seed,step,on_warning=None):
     import jax
     import numpy as np
     import popgym_flash_memory_probe as probes
@@ -97,35 +151,35 @@ def analyze(state,built,c,policy,root,seed,step):
     with tempfile.TemporaryDirectory(prefix='probe-',dir=folder) as temporary:
         work=folder/'raw' if c['artifact_policy']=='all' else Path(temporary)
         if c['artifact_policy']=='all':work.mkdir()
-        data,parity,policy_summary=collect(state,built,c,work,c['artifact_policy']=='all')
+        data,parity,policy_summary=collect(state,built,c,work,c['artifact_policy']=='all',on_warning)
         run_probes=flash.base.normalization.clone_globals(probes.run_probes,{'require_disk':lambda:disk_check(folder,c)})
-        full,coverage=run_probes(data,settings,work)
-        reconstructions=reconstruction_rows(data,work,seed,step)
+        full,coverage=optional_diagnostic('full_history_probe_fit',lambda:run_probes(data,settings,work))
+        reconstructions=optional_diagnostic('reconstruction_formatting',lambda:reconstruction_rows(data,work,seed,step))
         small,excluded=compact(data);train=small['split']==0
         if not all((small['split']==s).any() for s in range(3)):raise ValueError('No horizon-eligible episodes in a split')
         fitters={}
         for model in h.MODELS:
             raw=small['memory'] if model.startswith('memory-') else small['recent']
             mean=raw[train].mean(0);scale=np.maximum(raw[train].std(0),1e-4);x=(raw-mean)/scale
-            fit,predict=h.make_fitter(x.shape[1],model!='memory-linear',settings);fitters[model]=(fit,predict,x,mean,scale)
+            fit,predict=optional_diagnostic('horizon_probe_setup',lambda:h.make_fitter(x.shape[1],model!='memory-linear',settings));fitters[model]=(fit,predict,x,mean,scale)
         horizons=[];ns=range(1,65) if policy['memory_suite']=='full' else (1,5,10,16,32,64)
         for task in ('window','lag'):
             for n in ns:
                 disk_check(folder,c)
                 # Per-task scratch files are kept only in 'all' mode. Metrics
                 # remain complete in either policy,including all64 curve points.
-                if c['artifact_policy']=='all':result=h.run_one(small,task,n,fitters,settings,work/task/f'n{n:02d}')
+                if c['artifact_policy']=='all':result=optional_diagnostic('horizon_probe_fit',lambda:h.run_one(small,task,n,fitters,settings,work/task/f'n{n:02d}'))
                 else:
                     with tempfile.TemporaryDirectory(prefix=f'{task}{n}-',dir=temporary) as taskdir:
-                        result=h.run_one(small,task,n,fitters,settings,Path(taskdir)/'fit')
+                        result=optional_diagnostic('horizon_probe_fit',lambda:h.run_one(small,task,n,fitters,settings,Path(taskdir)/'fit'))
                 horizons.append(result)
     after=probes.memory.tree_digest(state)
     if before!=after:raise AssertionError('Diagnostics changed frozen training state')
     # Same-batch gradient vectors,clipping/edge mass,OFN/Q norms and replay
     # actor/main-Q grounding. Diagnostic float32 does NOT change training math.
     _,_,port,_,debug,sampler,components,context=built
-    extra=flash.extra_probe(state,debug,sampler,components,context,'all-categorical',seed,step)
-    extra.update(flash.base.probe(state,debug,sampler,context,jax.random.PRNGKey(28000000+seed)))
+    extra=optional_diagnostic('extra_grounding_probe',lambda:flash.extra_probe(state,debug,sampler,components,context,'all-categorical',seed,step))
+    extra.update(optional_diagnostic('extra_grounding_probe',lambda:flash.base.probe(state,debug,sampler,context,jax.random.PRNGKey(28000000+seed))))
     if before!=probes.memory.tree_digest(state):raise AssertionError('Extra diagnostics changed frozen state')
     result=dict(seed=seed,step=step,full_history=full,coverage=coverage,horizons=horizons,excluded_early_episodes=excluded,
         policy_summary=policy_summary,extra_diagnostics=extra,
@@ -154,6 +208,7 @@ def log_memory(run,results,seeds,step,folder,c):
         scalar.update(flatten_scalars(result['policy_summary'],'policy'))
         scalar.update(flatten_scalars(result['extra_diagnostics'],'grounding'))
         scalar['diagnostic_seconds']=result['seconds']
+        scalar.update(flatten_scalars(parity_summary(result['certificate']['policy_memory_parity']),'parity'))
         scalar.update(flatten_scalars(result['excluded_early_episodes'],'excluded_early_episodes'))
         for task in result['horizons']:
             for model,entry in task['models'].items():

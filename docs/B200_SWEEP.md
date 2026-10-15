@@ -12,7 +12,8 @@ steps per seed**,plus12800 random-prefill steps (finish at natural boundary).
 **Then:** narrower search/confirmation,5 or10 vmapped seeds and10M steps.
 No performance pruning before1M,and no Hyperband in the default YAML:the old
 experiments showed weak early returns are not a dependable failure signal.
-Numerical/integrity failures fail closed rather than silently retrying.
+Training numerical/integrity failures fail closed rather than silently retrying.
+Optional measurement failures are explicitly warned/omitted as described below.
 
 Eight independent agents run one trial per GPU. Within a trial,training,prefill,
 replay,optimizer moments,memory and RNGs are genuinely `jax.vmap`-batched across
@@ -171,6 +172,52 @@ still changes with checkpoint/hyperparameters. Exact-lag hits can be very sparse
 no automatic hard horizon,simultaneous-CI or oracle-Q claim. Q-return comparisons
 on greedy/random rollouts change the future policy;only stochastic-current
 rollouts are on-policy MC grounding,still not exact representation-conditional Q.
+
+## Diagnostic warnings must not discard valid return evaluations
+
+The rollout-versus-replayed policy probability comparison is **warning-only for
+finite,shape-compatible arrays**. The original `atol=1e-5,rtol=1e-4` is unchanged:
+we record violations rather than claiming they passed. Counts/fractions,max
+absolute/relative errors,worst coordinates,mode/block and seed/checkpoint remain
+available. Neither policy precision nor the learner/rollout/RNG is changed.
+Memory measurements with mismatches require caution;parity is NOT certified just
+because the trial completes. The independently evaluated return remains valid.
+
+W&B exposes:
+
+- `diagnostics/warning_json` (one structured event per warning) and cumulative
+  `diagnostics/warning_count`,also immediately retained in the trial's
+  `diagnostic-warnings.jsonl` before any W&B warning publication.
+  Omitted optional stages retain full exception causes in local
+  `diagnostic-errors.log`;public warning records contain only safe stage/type
+  information,not exception URLs/tokens.
+- `seed/SEED/memory/parity/...` and `memory/parity/.../{mean,std,n_seeds}` for
+  `warning_blocks`,`mismatched_elements`,`mismatched_fraction`,
+  `max_probability_error`,`max_relative_error`,and collection support.
+- `diagnostics/memory_complete`:1 for a complete multi-seed report successfully
+  submitted,0 when an optional probe/media report was omitted. This is NOT a
+  memory score. Complete raw JSON artifacts retain per-block parity records in
+  `certificate.policy_memory_parity`,including explicit `passed:false` values.
+
+Ordinary Python exceptions in explicitly optional probe-fit/setup,grounding,
+reconstruction-formatting and W&B memory-publication stages produce warnings and
+omit the affected checkpoint report. Partial seed sets are never published as
+complete. Existing partial/complete files are preserved,no silent retry/reuse.
+Memory/media logs are separate from required return/training scalar logs,so a
+media-serialization error cannot discard the return. The fixed return schedule
+and final equal-budget,last5-checkpoint Bayesian objective are unchanged.
+
+**Still fatal:** native repeatability/lane-isolation/resume/source/version gates,
+training or final-return-evaluation errors,nonfinite model/probability/memory,
+shape/label/split assertions,frozen-state mutation (also checked after an optional
+exception),device/runtime or out-of-memory failures,disk reserve/I/O errors,and
+attempts to overwrite existing diagnostics. Unexpected errors outside explicitly
+optional stages are not broadly suppressed. No precision or scalar fallback.
+
+Deploy changed source only before starting fresh trials. The replacement sweep
+is `fhstp-data-intelligence-research-group/retrace-discrepancy-battleship-popgym/ekvudzlb`.
+Do not overwrite code beneath old workers or rewrite checkpoint manifests to
+resume under different sources. Keep the previous sweep/artifacts as evidence.
 
 ## Reduce observation frequency without stopping agents
 

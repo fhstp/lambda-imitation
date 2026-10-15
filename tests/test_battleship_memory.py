@@ -66,3 +66,83 @@ def test_window_hit_target_does_not_refresh_old_hits_with_repeat_misses():
     assert h.targets(actions,hits,'window',64)[0,64]
     assert h.targets(actions,hits,'lag',1)[0,3]
     assert h.targets(actions,hits,'lag',64)[0,64]
+
+
+def test_probability_parity_records_the_reported_one_element_failure_without_raising():
+    recorded=np.full((100,64,64),1/64,np.float32);replayed=recorded.copy()
+    replayed[2,30,7]+=1.2638047e-5
+    p=memory.probability_parity(replayed,recorded,'stochastic',0)
+    assert not p['passed'] and p['mismatched_elements']==1 and p['elements']==409600
+    assert p['worst_index']==[2,30,7]
+    assert p['mismatched_fraction']==1/409600
+    assert 1.26e-5<p['max_probability_error']<1.27e-5
+    assert p['atol']==1e-5 and p['rtol']==1e-4
+    good=memory.probability_parity(recorded,recorded,'random',1)
+    summary=memory.parity_summary([p,good])
+    assert good['passed'] and summary['warning_blocks']==1 and summary['checked_blocks']==2
+    assert summary['mismatched_fraction']==1/819200
+
+
+def test_nonfinite_and_shape_mismatches_are_still_fatal():
+    with pytest.raises(AssertionError,match='shape'):
+        memory.probability_parity(np.zeros(3),np.zeros(4),'random',0)
+    for bad in (np.nan,np.inf):
+        with pytest.raises(FloatingPointError):
+            memory.probability_parity(np.array([bad]),np.zeros(1),'random',0)
+
+
+def test_collection_warns_immediately_and_still_returns_memories(tmp_path,monkeypatch):
+    import battleship_sweep
+    import popgym_flash_memory_probe as probes
+    n,t=100,64
+    data=dict(observations=np.zeros((n,t,1)),actions=np.zeros((n,t),int),hits=np.zeros((n,t)),
+        history_label_parity=np.ones((n,t),bool),probs=np.full((n,t,64),1/64,np.float32),
+        active=np.ones((n,t),bool),rewards=np.zeros((n,t)),done=np.zeros((n,t),bool),q=np.zeros((n,t)),
+        repeat=np.zeros((n,t)),seen_mass=np.zeros((n,t)),entropy=np.zeros((n,t)))
+    replayed=np.full((n,t+1,64),1/64,np.float32);replayed[0,0,0]+=1.2638e-5
+    monkeypatch.setattr(probes.memory,'make_collect',lambda *a:lambda *a,**k:data)
+    monkeypatch.setattr(probes,'make_encoder',lambda *a:lambda *a:(np.zeros((n,t+1,2)),replayed,np.zeros((n,t+1,65))))
+    monkeypatch.setattr(battleship_sweep,'disk_check',lambda *a:None)
+    warnings=[]
+    built=(None,dict(memory_hidden_dim=2),None,None,None)
+    c=dict(probe_blocks=1,probe_train_blocks=1,probe_val_blocks=1,gamma=.99)
+    dataset,parity,summary=memory.collect(None,built,c,tmp_path,False,lambda *args:warnings.append(args))
+    assert len(warnings)==3 and len(parity)==3 and dataset['memory'].shape==(300,65,2)
+    assert all(p['mismatched_elements']==1 and not p['passed'] for p in parity)
+    assert all(w[0]=='policy_memory_parity' for w in warnings)
+    assert set(summary)==set(probes.MODES)
+
+
+@pytest.mark.parametrize('error',[AssertionError('integrity'),FloatingPointError('nonfinite'),
+    OSError('disk reserve'),FileExistsError('preserved attempt'),MemoryError('OOM'),SystemError('runtime'),
+    type('XlaRuntimeError',(RuntimeError,),{'__module__':'jaxlib.xla_extension'})('device failure')])
+def test_optional_wrapper_never_swallows_integrity_resource_or_device_errors(error):
+    def fail():raise error
+    with pytest.raises(type(error)) as caught:memory.optional_diagnostic('fit',fail)
+    assert caught.value is error
+
+
+def test_only_explicit_optional_stages_can_be_omitted():
+    def fail():raise ValueError('probe fit failed')
+    with pytest.raises(memory.DiagnosticUnavailable) as caught:memory.optional_diagnostic('probe_fit',fail)
+    assert caught.value.stage=='probe_fit' and caught.value.error_type=='ValueError'
+    assert memory.optional_diagnostic('fit',lambda:42)==42
+
+
+def test_parity_statistics_are_logged_to_wandb_as_seed_and_aggregate_scalars(tmp_path,monkeypatch):
+    import json
+    from types import SimpleNamespace
+    import wandb
+    monkeypatch.setattr(wandb,'Table',lambda **kw:kw)
+    monkeypatch.setattr(wandb,'Artifact',lambda *a,**kw:SimpleNamespace(add_file=lambda *a,**kw:None))
+    base=tmp_path/'diagnostics/step10000/seed42';base.mkdir(parents=True)
+    (base/'reconstructions.json').write_text('[]')
+    p=memory.probability_parity(np.array([.0160127]),np.array([.016]),'stochastic',0)
+    result=dict(seed=42,full_history={},horizons=[],policy_summary={},extra_diagnostics={},seconds=1.,
+        excluded_early_episodes={},certificate=dict(policy_memory_parity=[p]))
+    run=SimpleNamespace(id='test',log_artifact=lambda *a,**kw:None)
+    payload=memory.log_memory(run,[result],[42],10000,tmp_path,dict(artifact_policy='metrics'))
+    assert payload['seed/42/memory/parity/warning_blocks']==1
+    assert payload['memory/parity/max_probability_error/mean']==p['max_probability_error']
+    assert payload['memory/parity/mismatched_fraction/mean']==1.
+    json.dumps({k:v for k,v in payload.items() if isinstance(v,(int,float))},allow_nan=False)
