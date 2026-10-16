@@ -13,6 +13,8 @@ import math
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 
@@ -341,6 +343,27 @@ def publish(api, args):
     print(json.dumps(dict(at=now(), runs=len(published), snapshots_attempted=len(chosen), pending_before=len(pending), warnings=warnings)), flush=True)
 
 
+def watch(args):
+    """Bound SDK/JSON memory lifetime to ONE refresh,not the whole study."""
+    import fcntl
+    command=[sys.executable,'-u',str(Path(__file__).resolve()),'--sweep',args.sweep,
+             '--state',str(args.state),'--output',str(args.output),'--interval',str(args.interval),
+             '--artifacts-per-cycle',str(args.artifacts_per_cycle),'--min-free-gib',str(args.min_free_gib)]
+    # The supervisor and worker use distinct locks. Each worker still owns the
+    # normal publisher lock,so independent one-shot invocations cannot overlap.
+    with (args.state/'.watch.lock').open('w') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        while True:
+            try:
+                subprocess.run(command,check=True,timeout=900)
+            except (subprocess.CalledProcessError,subprocess.TimeoutExpired) as error:
+                status=dict(ok=False,at=now(),error=type(error).__name__)
+                if isinstance(error,subprocess.CalledProcessError):status['returncode']=error.returncode
+                atomic_json(args.output/'health.json',status)
+                print(f'{now()} refresh worker failed: {type(error).__name__};last publication retained',flush=True)
+            time.sleep(args.interval)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sweep', type=sweep_path, default=DEFAULT_SWEEP)
@@ -354,29 +377,26 @@ def main():
     if args.interval < 30 or args.artifacts_per_cycle < 1 or args.min_free_gib < 2:
         parser.error('Use interval>=30s, positive artifact budget and at least2GiB disk reserve')
     args.state.mkdir(parents=True, exist_ok=True); args.output.mkdir(parents=True, exist_ok=True)
+    if args.watch:
+        watch(args)
+        return
     import fcntl
     import wandb
     with (args.state/'.publisher.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         template = Path(__file__).with_suffix('.html')
         shutil.copyfile(template, args.output/'index.html')
-        while True:
-            try:
-                # Api.flush() clears _runs only,not cached Sweep objects or their
-                # run lists. A long-lived client can keep an initially empty
-                # sweep forever (and stale states/summaries after runs start).
-                publish(wandb.Api(timeout=45), args)
-            except Exception as error:
-                # Keep the last good publication. Do not expose exception URLs.
-                atomic_json(args.output/'health.json', dict(ok=False, at=now(), error=type(error).__name__))
-                print(f'{now()} refresh failed: {type(error).__name__}', flush=True)
-                if not args.watch:
-                    raise
-            else:
-                atomic_json(args.output/'health.json', dict(ok=True, at=now()))
-            if not args.watch:
-                break
-            time.sleep(args.interval)
+        try:
+            # Api.flush() does not clear cached sweep objects. The one-shot
+            # worker always starts with a fresh client AND fresh process heap.
+            publish(wandb.Api(timeout=45), args)
+        except Exception as error:
+            # Keep the last good publication. Do not expose exception URLs.
+            atomic_json(args.output/'health.json', dict(ok=False, at=now(), error=type(error).__name__))
+            print(f'{now()} refresh failed: {type(error).__name__}', flush=True)
+            raise
+        else:
+            atomic_json(args.output/'health.json', dict(ok=True, at=now()))
 
 
 if __name__ == '__main__':

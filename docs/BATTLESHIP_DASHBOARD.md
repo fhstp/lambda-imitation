@@ -45,6 +45,10 @@ Add `--watch` for recurring publication. Defaults:
 History is unsampled and incremental by W&B row ID, preserving sparse rows.
 A fresh W&B API client is used for every poll:the SDK's `Api.flush()` clears
 run caches but does not invalidate cached sweep objects/their run lists.
+Watch mode also uses a fresh one-shot subprocess for each poll,so SDK objects,
+JSON parsing heaps and allocator high-water marks cannot accumulate overnight.
+The small supervisor retries failed/killed workers and times out a stuck worker
+after15 minutes,retaining the last publication and marking refresh health failed.
 Only native `result.json`/`reconstructions.json` measurement entries are downloaded,
 with SDK caching disabled, into short-lived owned temporary directories. Compact
 gzip snapshots retain source SHA256s and native support; checkpoint identity,
@@ -74,14 +78,17 @@ systemctl --user restart lambda-battleship-sweep-dashboard.service
 ```
 
 Publisher logs: `/tmp/opencode/battleship-sweep-dashboard/publisher.log`.
-Service limits:768MiB RAM,50% of one CPU,64 tasks. The transient service is not a
-reboot-persistent installation. To recreate it (only if not already installed):
+Service limits:1.5GiB RAM,50% of one CPU,64 tasks. Automatic service restart after
+failure/OOM is enabled with a15-second delay;worker failures also retry on the
+normal polling cadence. The transient service is not reboot-persistent.
+To recreate it (only if not already installed):
 
 ```bash
 systemd-run --user --unit=lambda-battleship-sweep-dashboard.service \
   --description="Read-only W&B B200 sweep return and memory dashboard" \
   --working-directory=/tmp/opencode/battleship-b200-sweep \
-  --property=MemoryMax=805306368 --property=CPUQuota=50% --property=TasksMax=64 \
+  --property=MemoryMax=1610612736 --property=CPUQuota=50% --property=TasksMax=64 \
+  --property=Restart=on-failure --property=RestartSec=15 --property=StartLimitIntervalSec=0 \
   --property=StandardOutput=append:/tmp/opencode/battleship-sweep-dashboard/publisher.log \
   --property=StandardError=inherit \
   /home/operations/miniforge3/envs/lambda/bin/python -u \

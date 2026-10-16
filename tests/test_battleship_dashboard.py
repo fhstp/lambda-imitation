@@ -258,7 +258,7 @@ def test_watch_refreshes_initially_empty_sweep_and_later_states_and_history(tmp_
     import copy
     import sys
     import wandb
-    remote=[];clients=[];snapshots=[]
+    remote=[];clients=[];snapshots=[];workers=[]
     class Run:
         id='new-trial'
         name='new-trial'
@@ -294,13 +294,45 @@ def test_watch_refreshes_initially_empty_sweep_and_later_states_and_history(tmp_
         else:
             raise KeyboardInterrupt('End three-cycle test')
     monkeypatch.setattr(wandb,'Api',API)
+    def worker(command,check,timeout):
+        assert check is True and timeout==900 and '--watch' not in command
+        assert command[0]==sys.executable and command[1]=='-u'
+        workers.append(command)
+        monkeypatch.setattr(sys,'argv',command[2:])
+        dashboard.main() # Simulate a fresh one-shot child while preserving test fakes.
+    monkeypatch.setattr(dashboard.subprocess,'run',worker)
     monkeypatch.setattr(dashboard.time,'sleep',sleep)
     monkeypatch.setattr(sys,'argv',['dashboard','--watch','--interval','30','--output',str(tmp_path/'web'),'--state',str(tmp_path/'private')])
     with pytest.raises(KeyboardInterrupt,match='three-cycle'):
         dashboard.main()
-    assert len(clients)==3
+    assert len(clients)==3 and len(workers)==3
     assert snapshots[0]['runs']==[]
     assert snapshots[1]['runs'][0]['state']=='running'
     assert snapshots[1]['runs'][0]['returns'][-1]['mean']==.1
     assert snapshots[2]['runs'][0]['state']=='finished'
     assert [p['mean'] for p in snapshots[2]['runs'][0]['returns']]==[.1,.4]
+
+
+@pytest.mark.parametrize('failure',['exit','timeout'])
+def test_watch_survives_worker_failure_and_keeps_last_good_publication(tmp_path,monkeypatch,failure):
+    args=SimpleNamespace(state=tmp_path/'private',output=tmp_path/'web',sweep=dashboard.DEFAULT_SWEEP,
+        interval=30,artifacts_per_cycle=8,min_free_gib=2.5)
+    args.state.mkdir();args.output.mkdir()
+    dashboard.atomic_json(args.output/'data.json',dict(retained='last good'))
+    attempts=[];health=[]
+    def worker(command,check,timeout):
+        attempts.append(command)
+        if len(attempts)==1:
+            if failure=='exit':raise dashboard.subprocess.CalledProcessError(-9,command)
+            raise dashboard.subprocess.TimeoutExpired(command,timeout)
+        dashboard.atomic_json(args.output/'health.json',dict(ok=True))
+    def sleep(interval):
+        health.append(dashboard.read_json(args.output/'health.json'))
+        assert dashboard.read_json(args.output/'data.json')==dict(retained='last good')
+        if len(health)==2:raise KeyboardInterrupt('Finished recovery test')
+    monkeypatch.setattr(dashboard.subprocess,'run',worker)
+    monkeypatch.setattr(dashboard.time,'sleep',sleep)
+    with pytest.raises(KeyboardInterrupt,match='recovery'):
+        dashboard.watch(args)
+    assert len(attempts)==2 and health[0]['ok'] is False and health[1]['ok'] is True
+    assert health[0]['error']==('CalledProcessError' if failure=='exit' else 'TimeoutExpired')
