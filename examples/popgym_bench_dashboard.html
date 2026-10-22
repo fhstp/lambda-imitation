@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>POPGym Flash Bench</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --band1: rgba(42,120,214,0.16);
+  --good: #006300; --bad: #d03b3b; --warn: #b07800;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --band1: rgba(57,135,229,0.22);
+    --good: #0ca30c; --bad: #e66767; --warn: #e0a000;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --band1: rgba(57,135,229,0.22);
+  --good: #0ca30c; --bad: #e66767; --warn: #e0a000;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1400px; margin: 0 auto; padding: 24px 20px 64px; }
+h1 { font-size: 22px; margin: 0 0 4px; font-weight: 650; }
+h2 { font-size: 16px; margin: 32px 0 4px; font-weight: 650; }
+.sub, .note { color: var(--ink-2); }
+.note { font-size: 12.5px; max-width: 980px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
+.chip { background: var(--surface); box-shadow: inset 0 0 0 1px var(--ring); border-radius: 999px; padding: 2px 10px; font-size: 12px; color: var(--ink-2); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 20px 0 8px; }
+.tile { background: var(--surface); box-shadow: inset 0 0 0 1px var(--ring); border-radius: 12px; padding: 14px 16px; }
+.tile .k { color: var(--ink-2); font-size: 12.5px; }
+.tile .v { font-size: 28px; font-weight: 650; margin-top: 2px; }
+.tile .d { color: var(--muted); font-size: 12px; }
+.controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin: 18px 0 6px; position: sticky; top: env(safe-area-inset-top, 0px);
+  background: var(--page); padding: 8px 0; z-index: 5; }
+.controls label { color: var(--ink-2); font-size: 13px; display: flex; gap: 6px; align-items: center; }
+select { font: inherit; background: var(--surface); color: var(--ink); border: 1px solid var(--axis); border-radius: 8px; padding: 4px 8px; }
+.legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12.5px; color: var(--ink-2); margin: 6px 0; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 18px; height: 0; border-top: 2px solid; display: inline-block; }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.card { background: var(--surface); box-shadow: inset 0 0 0 1px var(--ring); border-radius: 12px; padding: 12px; }
+.scroll { overflow-x: auto; max-width: 100%; }
+.card svg { display: block; }
+svg text { fill: var(--muted); font-size: 11px; }
+svg .lbl { fill: var(--ink-2); }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+th, td { padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--ink-2); font-weight: 600; position: sticky; top: 0; background: var(--surface); cursor: pointer; }
+th:first-child, td:first-child { text-align: left; }
+td .sd { color: var(--muted); }
+.up { color: var(--good); } .down { color: var(--bad); }
+.state { display: inline-flex; align-items: center; gap: 6px; }
+.bar { width: 64px; height: 5px; border-radius: 3px; background: var(--grid); overflow: hidden; display: inline-block; }
+.bar i { display: block; height: 100%; background: var(--s1); }
+.failed { color: var(--bad); font-weight: 600; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.panel h3 { font-size: 13px; margin: 0 0 2px; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
+.panel { min-width: 0; }
+.panel h3 small { color: var(--muted); font-weight: 400; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel .bar { width: 40px; }
+#tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink); box-shadow: 0 4px 16px rgba(0,0,0,.18), inset 0 0 0 1px var(--ring);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; z-index: 20; max-width: 320px; font-variant-numeric: tabular-nums; }
+#tip b { font-weight: 600; }
+#tip .row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.err { color: var(--bad); white-space: pre-wrap; font-size: 11px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>POPGym · FlashSAC + λ-discrepancy benchmark</h1>
+  <div class="sub" id="subtitle">Loading…</div>
+  <div class="chips" id="chips"></div>
+  <div class="tiles" id="tiles"></div>
+
+  <div class="controls">
+    <label>Score <select id="metric">
+      <option value="best">Best during training (MMER-like)</option>
+      <option value="latest">Latest evaluation</option>
+      <option value="final">Final holdout</option>
+    </select></label>
+    <label>Family <select id="family"><option value="">All</option></select></label>
+    <label>Difficulty <select id="difficulty"><option value="">All</option><option>Easy</option><option>Medium</option><option>Hard</option></select></label>
+    <span class="note" id="updated"></span>
+  </div>
+
+  <h2>Normalized score per task</h2>
+  <div class="note">0 = random policy, 1 = best published POPGym PPO model (Morad et al. 2023, best of 13 memory models, 15M steps, MMER).
+    Values beyond the axis are pinned to its edge (hover for the exact value). Tasks without a published reference are omitted.</div>
+  <div class="legend" id="dotLegend"></div>
+  <div class="card scroll"><svg id="dots" role="img" aria-label="Normalized score dot plot"></svg></div>
+
+  <h2>All tasks</h2>
+  <div class="note">Stochastic-policy return, mean ± SD across training seeds. ▲/▼ compares our score with the best published PPO result.</div>
+  <div class="card scroll"><table id="table"></table></div>
+
+  <h2>Learning curves</h2>
+  <div class="legend" id="curveLegend"></div>
+  <div class="grid" id="curves"></div>
+
+  <h2>Comparability notes</h2>
+  <div class="note" id="notes"></div>
+</main>
+<div id="tip" hidden></div>
+<script>
+const $ = s => document.querySelector(s);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const fmt = (v, d = 3) => v == null || !isFinite(v) ? '–' : (+v).toFixed(d);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const short = id => id.replace(/^popgym-/, '').replace(/-v0$/, '');
+let DATA = null;
+const tip = $('#tip');
+function showTip(html, ev) {
+  tip.innerHTML = html; tip.hidden = false;
+  const r = tip.getBoundingClientRect();
+  let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 14;
+  if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - 14;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+const hideTip = () => { tip.hidden = true; };
+
+function ours(task, arm, metric) {
+  const a = task.arms[arm];
+  if (!a) return null;
+  if (metric === 'best') return a.best ? {mean: a.best.mean, std: a.best.std, n: a.best.n} : null;
+  if (metric === 'latest') return a.latest ? {mean: a.latest.mean, std: sd(a.latest.seeds), n: a.latest.seeds.length} : null;
+  const f = a.final && a.final.stochastic;
+  return f ? {mean: f.mean, std: f.std, n: f.n} : null;
+}
+function sd(xs) { if (!xs || xs.length < 2) return 0; const m = xs.reduce((a, b) => a + b) / xs.length; return Math.sqrt(xs.reduce((a, b) => a + (b - m) ** 2, 0) / (xs.length - 1)); }
+function weekend(task, metric, method = 'lambda') {
+  const r = task.refs['weekend-' + method];
+  if (!r) return null;
+  return metric === 'best' ? r.best_stochastic : r.final_stochastic;
+}
+function randomRef(task) {
+  for (const arm of ['primary', 'control']) { const f = task.arms[arm].final; if (f && f.random) return f.random.mean; }
+  const w = task.refs['weekend-lambda'] || task.refs['weekend-sac'];
+  return w && w.random ? w.random.mean : null;
+}
+function norm(task, v) {
+  const ppo = task.refs.popgym, rnd = randomRef(task);
+  if (v == null || !ppo || rnd == null || ppo.mean - rnd < 1e-6) return null;
+  return (v - rnd) / (ppo.mean - rnd);
+}
+function visible() {
+  const fam = $('#family').value, dif = $('#difficulty').value;
+  return DATA.tasks.filter(t => (!fam || t.family === fam) && (!dif || t.difficulty === dif));
+}
+
+function renderHeader() {
+  const c = DATA.study.config || {};
+  $('#subtitle').textContent = `${DATA.tasks.length} discrete POPGym tasks · ${c.n_seeds} vmapped seeds · ${(c.max_steps / 1e6)}M steps each · W&B ${DATA.study.wandb_entity || ''}/${DATA.study.wandb_project || '—'}`;
+  const chips = ['FlashSAC residual RMS heads + OFN', '51-atom categorical critics', `GRU${c.memory_hidden_dim} memory`,
+    `λ1=${c.lambda1}, λ2=${c.lambda2}`, `β=${c.lambda_coef} (control β=0)`, `α ${c.alpha_initial}→${c.alpha_final} over ${c.alpha_decay_steps / 1e3}k`,
+    `LRs ${c.fe_lr}`, `correlated logit-bias exploration (k≤${c.noise_max_duration}, p∝k^-${c.noise_power})`, 'complete-episode BPTT'];
+  $('#chips').innerHTML = chips.map(x => `<span class="chip">${esc(x)}</span>`).join('');
+  const count = (arm, st) => DATA.tasks.filter(t => t.arms[arm].state === st).length;
+  const n = DATA.tasks.length, metric = $('#metric').value;
+  const scored = DATA.tasks.map(t => norm(t, (ours(t, 'primary', metric) || {}).mean)).filter(v => v != null).sort((a, b) => a - b);
+  const median = scored.length ? scored[Math.floor((scored.length - 1) / 2)] : null;
+  const beat = scored.filter(v => v >= 1).length;
+  const val = DATA.validation;
+  const sched = DATA.scheduler;
+  // Remaining-time estimate: observed per-task throughput, spread over the slots.
+  const rates = []; DATA.tasks.forEach(t => ['primary', 'control'].forEach(a => { const s = t.arms[a].steps_per_second; if (s) rates.push(s); }));
+  const rate = rates.length ? rates.reduce((a, b) => a + b) / rates.length : null;
+  let remaining = 0;
+  DATA.tasks.forEach(t => ['primary', 'control'].forEach(a => { const s = t.arms[a]; if (s.state !== 'complete') remaining += ((s.target || c.max_steps) - (s.steps || 0)) / ((s.steps_per_second || rate || 1)); }));
+  const eta = rate && sched ? remaining / sched.slots / 3600 : null;
+  const tiles = [
+    ['Primary complete', `${count('primary', 'complete')}/${n}`, `${count('primary', 'running') + count('primary', 'prefill') + count('primary', 'building')} running · ${count('primary', 'failed')} failed`],
+    ['Control (β=0) complete', `${count('control', 'complete')}/${n}`, sched ? `phase: ${sched.phase} · ${sched.slots} worker slots` : 'starts after all primary tasks'],
+    ['Median normalized score', median == null ? '–' : median.toFixed(2), `${scored.length} tasks with a PPO reference · ${metricName()}`],
+    ['Tasks ≥ best PPO', scored.length ? `${beat}/${scored.length}` : '–', 'normalized score ≥ 1'],
+    ['Est. time remaining', eta == null ? '–' : eta < 1 ? `${Math.round(eta * 60)} min` : `${eta.toFixed(1)} h`, rate ? `~${rate.toFixed(1)} steps/s per task` : 'waiting for throughput'],
+    ['Launch gate', val ? (val.passed ? 'passed' : 'FAILED') : '–', val ? `${esc(val.device_kind || '')}: repeat · lane isolation · resume` : 'not run yet'],
+  ];
+  $('#tiles').innerHTML = tiles.map(([k, v, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('');
+  $('#updated').textContent = 'Updated ' + new Date(DATA.now * 1000).toLocaleTimeString() + ' · refreshes every 30 s';
+}
+const metricName = () => ({best: 'best during training', latest: 'latest evaluation', final: 'final holdout'})[$('#metric').value];
+
+function renderDots() {
+  const metric = $('#metric').value;
+  const series = [['Ours (β=10)', 'primary', css('--s1')], ['Control (β=0)', 'control', css('--s2')], ['Weekend suite SAC+λ (250k)', 'weekend', css('--s3')]];
+  $('#dotLegend').innerHTML = series.map(([l, , c]) => `<span><i class="dot" style="background:${c}"></i>${l}</span>`).join('') +
+    `<span><i class="sw" style="border-color:${css('--axis')};border-top-style:dashed"></i>random (0) · best PPO (1)</span>`;
+  const rows = visible().filter(t => t.refs.popgym);
+  const W = Math.max(640, $('#dots').parentElement.clientWidth - 24), left = 230, right = 24, rowH = 20, top = 26;
+  const H = top + rows.length * rowH + 10, lo = -0.5, hi = 1.5;
+  const x = v => left + (Math.max(lo, Math.min(hi, v)) - lo) / (hi - lo) * (W - left - right);
+  let s = '';
+  for (let g = lo; g <= hi + 1e-9; g += 0.25) {
+    const major = Math.abs(g) < 1e-9 || Math.abs(g - 1) < 1e-9;
+    s += `<line x1="${x(g)}" x2="${x(g)}" y1="${top - 6}" y2="${H - 6}" stroke="${css(major ? '--axis' : '--grid')}" stroke-width="1" ${major ? 'stroke-dasharray="4 3"' : ''}/>`;
+    s += `<text x="${x(g)}" y="${top - 12}" text-anchor="middle">${g.toFixed(2).replace(/\.?0+$/, '') || '0'}</text>`;
+  }
+  rows.forEach((t, i) => {
+    const y = top + i * rowH + rowH / 2;
+    s += `<text class="lbl" x="${left - 10}" y="${y + 4}" text-anchor="end">${esc(short(t.env_id))}</text>`;
+    series.forEach(([label, key, color]) => {
+      const v = key === 'weekend' ? weekend(t, metric) : ours(t, key, metric);
+      const n = norm(t, v && v.mean);
+      if (n == null) return;
+      const raw = v.mean, info = `<b>${esc(short(t.env_id))}</b><div class="row"><span>${label}</span><span>${fmt(n, 2)} normalized</span></div>` +
+        `<div class="row"><span>return</span><span>${fmt(raw)} ± ${fmt(v.std)} (n=${v.n})</span></div>` +
+        `<div class="row"><span>best PPO (${esc(t.refs.popgym.model)})</span><span>${fmt(t.refs.popgym.mean)}</span></div>` +
+        `<div class="row"><span>random</span><span>${fmt(randomRef(t))}</span></div>`;
+      const off = n < lo || n > hi;
+      s += `<circle cx="${x(n)}" cy="${y}" r="5" fill="${color}" stroke="${css('--surface')}" stroke-width="2" ${off ? `stroke-dasharray="2 2"` : ''} data-tip="${esc(info)}"/>`;
+    });
+    s += `<rect x="0" y="${y - rowH / 2}" width="${W}" height="${rowH}" fill="transparent" data-row="${i}"/>`;
+  });
+  const svg = $('#dots');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', W); svg.setAttribute('height', H);
+  svg.innerHTML = s;
+  svg.querySelectorAll('circle').forEach(c => { c.parentNode.appendChild(c); c.addEventListener('mousemove', e => showTip(c.dataset.tip, e)); c.addEventListener('mouseleave', hideTip); });
+}
+
+let sortKey = null, sortDir = 1;
+function renderTable() {
+  const metric = $('#metric').value;
+  const cell = v => v ? `${fmt(v.mean)} <span class="sd">± ${fmt(v.std)}</span>` : '–';
+  const cols = [
+    ['Task', t => short(t.env_id), t => esc(short(t.env_id)) + `<div class="sd">${esc((t.meta && t.meta.backend) || '')} · H=${(t.meta && t.meta.horizon) || '?'} · A=${(t.meta && t.meta.action_dim) || '?'}</div>`],
+    ['Status', t => t.arms.primary.steps / (t.arms.primary.target || 1), t => status(t.arms.primary)],
+    ['Ours (β=10)', t => (ours(t, 'primary', metric) || {}).mean, t => cell(ours(t, 'primary', metric)) + delta(t, ours(t, 'primary', metric))],
+    ['Greedy', t => greedy(t.arms.primary, metric), t => fmt(greedy(t.arms.primary, metric))],
+    ['Control (β=0)', t => (ours(t, 'control', metric) || {}).mean, t => t.arms.control.state === 'pending' ? '<span class="sd">queued</span>' : cell(ours(t, 'control', metric))],
+    ['Best PPO', t => t.refs.popgym && t.refs.popgym.mean, t => t.refs.popgym ? `${fmt(t.refs.popgym.mean)} <span class="sd" title="${esc(t.refs.popgym.model)}">${esc(models(t.refs.popgym.model))}</span>` : '–'],
+    ['POPJym', t => t.refs.popjym && t.refs.popjym.mean, t => t.refs.popjym ? `${fmt(t.refs.popjym.mean)} <span class="sd">${esc(t.refs.popjym.model)}</span>` : '–'],
+    ['Weekend λ', t => (weekend(t, metric) || {}).mean, t => cell(weekend(t, metric)) + nTag(weekend(t, metric))],
+    ['Weekend SAC', t => (weekend(t, metric, 'sac') || {}).mean, t => cell(weekend(t, metric, 'sac')) + nTag(weekend(t, metric, 'sac'))],
+    ['α-sweep λ', t => t.refs['alpha-lambda'] && t.refs['alpha-lambda'].final_stochastic.mean,
+      t => t.refs['alpha-lambda'] ? cell(t.refs['alpha-lambda'].final_stochastic) + ` <span class="sd">α=${t.refs['alpha-lambda'].alpha}</span>` : '–'],
+    ['Random', t => randomRef(t), t => fmt(randomRef(t))],
+  ];
+  let rows = visible();
+  if (sortKey != null) rows = rows.slice().sort((a, b) => ((cols[sortKey][1](a) ?? -1e9) > (cols[sortKey][1](b) ?? -1e9) ? 1 : -1) * sortDir);
+  $('#table').innerHTML = `<thead><tr>${cols.map((c, i) => `<th data-i="${i}">${c[0]}${sortKey === i ? (sortDir > 0 ? ' ↑' : ' ↓') : ''}</th>`).join('')}</tr></thead>` +
+    `<tbody>${rows.map(t => `<tr>${cols.map(c => `<td>${c[2](t)}</td>`).join('')}</tr>`).join('')}</tbody>`;
+  $('#table').querySelectorAll('th').forEach(th => th.addEventListener('click', () => {
+    const i = +th.dataset.i; sortDir = sortKey === i ? -sortDir : -1; sortKey = i; renderTable(); }));
+}
+function greedy(a, metric) {
+  if (metric === 'final') return a.final && a.final.greedy ? a.final.greedy.mean : null;
+  return a.latest ? a.latest.greedy : null;
+}
+function models(m) { const xs = m.split(' / '); return xs.length > 2 ? `${xs[0]} +${xs.length - 1} tied` : m; }
+function nTag(v) { return v && v.n < 3 ? ` <span class="sd">n=${v.n}</span>` : ''; }
+function delta(t, v) {
+  if (!v || !t.refs.popgym) return '';
+  const d = v.mean - t.refs.popgym.mean;
+  return d >= 0 ? ` <span class="up">▲ ${fmt(d, 2)}</span>` : ` <span class="down">▼ ${fmt(-d, 2)}</span>`;
+}
+function status(a) {
+  if (a.state === 'failed') return `<span class="failed" title="${esc(a.error || '')}">✕ failed</span>`;
+  if (a.state === 'complete') return '<span class="up">✓ done</span>';
+  if (a.state === 'pending') return '<span class="sd">queued</span>';
+  const p = Math.min(1, (a.steps || 0) / (a.target || 1));
+  return `<span class="state"><span class="bar"><i style="width:${(p * 100).toFixed(1)}%"></i></span>${(a.steps / 1e3).toFixed(0)}k${a.steps_per_second ? ` · ${a.steps_per_second.toFixed(1)}/s` : ''}${a.state !== 'running' ? ' · ' + a.state : ''}</span>`;
+}
+
+function renderCurves() {
+  const c1 = css('--s1'), c2 = css('--s2'), c3 = css('--s3');
+  $('#curveLegend').innerHTML = `<span><i class="sw" style="border-color:${c1}"></i>Ours β=10 (mean, band = seed min–max)</span>` +
+    `<span><i class="sw" style="border-color:${c2}"></i>Control β=0</span>` +
+    `<span><i class="sw" style="border-color:${css('--ink-2')};border-top-style:dashed"></i>Best PPO (15M steps)</span>` +
+    `<span><i class="sw" style="border-color:${c3};border-top-style:dotted"></i>Weekend SAC+λ final (250k)</span>`;
+  const host = $('#curves'); host.innerHTML = '';
+  const maxSteps = (DATA.study.config || {}).max_steps || 1e6;
+  visible().forEach(t => {
+    const p = t.arms.primary.curve, q = t.arms.control.curve;
+    const ppo = t.refs.popgym && t.refs.popgym.mean, wk = (t.refs['weekend-lambda'] || {}).final_stochastic;
+    const vals = [...p.flatMap(r => r.seeds), ...q.map(r => r.mean)];
+    if (ppo != null) vals.push(ppo);
+    if (wk) vals.push(wk.mean);
+    const div = document.createElement('div'); div.className = 'card panel';
+    div.innerHTML = `<h3>${esc(short(t.env_id))}<small>${status(t.arms.primary)}</small></h3>`;
+    host.appendChild(div);
+    if (!vals.length) { div.insertAdjacentHTML('beforeend', '<div class="sd" style="padding:40px 0;text-align:center">No evaluations yet</div>'); return; }
+    let lo = Math.min(...vals), hi = Math.max(...vals); if (hi - lo < 1e-3) { lo -= .05; hi += .05; }
+    const pad = (hi - lo) * .08; lo -= pad; hi += pad;
+    const W = 300, H = 150, L = 40, R = 8, T = 8, B = 20;
+    const x = s => L + s / maxSteps * (W - L - R), y = v => T + (hi - v) / (hi - lo) * (H - T - B);
+    let s = '';
+    const ticks = niceTicks(lo, hi, 4);
+    ticks.forEach(v => { s += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="${css('--grid')}"/><text x="${L - 4}" y="${y(v) + 3}" text-anchor="end">${+v.toFixed(2)}</text>`; });
+    [0, .5, 1].forEach(f => s += `<text x="${x(f * maxSteps)}" y="${H - 5}" text-anchor="middle">${(f * maxSteps / 1e6)}M</text>`);
+    if (ppo != null) s += `<line x1="${L}" x2="${W - R}" y1="${y(ppo)}" y2="${y(ppo)}" stroke="${css('--ink-2')}" stroke-width="1.5" stroke-dasharray="5 4"/>`;
+    if (wk) s += `<line x1="${L}" x2="${W - R}" y1="${y(wk.mean)}" y2="${y(wk.mean)}" stroke="${c3}" stroke-width="2" stroke-dasharray="1.5 3" stroke-linecap="round"/>`;
+    if (p.length) {
+      const band = p.map(r => [x(r.steps), y(Math.max(...r.seeds))]).concat(p.slice().reverse().map(r => [x(r.steps), y(Math.min(...r.seeds))]));
+      s += `<path d="M${band.map(a => a.join(',')).join('L')}Z" fill="${css('--band1')}"/>`;
+      s += `<path d="M${p.map(r => x(r.steps) + ',' + y(r.mean)).join('L')}" fill="none" stroke="${c1}" stroke-width="2" stroke-linejoin="round"/>`;
+    }
+    if (q.length) s += `<path d="M${q.map(r => x(r.steps) + ',' + y(r.mean)).join('L')}" fill="none" stroke="${c2}" stroke-width="2" stroke-linejoin="round"/>`;
+    s += `<line class="cross" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="${css('--axis')}" visibility="hidden"/>`;
+    s += `<rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/>`;
+    div.insertAdjacentHTML('beforeend', `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(short(t.env_id))} learning curve">${s}</svg>`);
+    const svg = div.querySelector('svg'), cross = svg.querySelector('.cross');
+    svg.addEventListener('mousemove', e => {
+      const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+      const loc = pt.matrixTransform(svg.getScreenCTM().inverse());
+      const step = (loc.x - L) / (W - L - R) * maxSteps;
+      const near = arr => arr.length ? arr.reduce((a, b) => Math.abs(b.steps - step) < Math.abs(a.steps - step) ? b : a) : null;
+      const a = near(p), b = near(q), ref = a || b;
+      if (!ref) return;
+      cross.setAttribute('x1', x(ref.steps)); cross.setAttribute('x2', x(ref.steps)); cross.setAttribute('visibility', 'visible');
+      let html = `<b>${esc(short(t.env_id))} · ${(ref.steps / 1e3).toFixed(0)}k steps</b>`;
+      if (a) html += `<div class="row"><span><i class="dot" style="background:${c1}"></i> ours β=10</span><span>${fmt(a.mean)} [${fmt(Math.min(...a.seeds))}, ${fmt(Math.max(...a.seeds))}]</span></div>` +
+        `<div class="row"><span>greedy</span><span>${fmt(a.greedy)}</span></div>`;
+      if (b) html += `<div class="row"><span><i class="dot" style="background:${c2}"></i> control β=0</span><span>${fmt(b.mean)}</span></div>`;
+      if (ppo != null) html += `<div class="row"><span>best PPO</span><span>${fmt(ppo)}</span></div>`;
+      if (wk) html += `<div class="row"><span>weekend λ</span><span>${fmt(wk.mean)}</span></div>`;
+      showTip(html, e);
+    });
+    svg.addEventListener('mouseleave', () => { cross.setAttribute('visibility', 'hidden'); hideTip(); });
+  });
+}
+function niceTicks(lo, hi, n) {
+  const span = hi - lo, step0 = span / n, mag = 10 ** Math.floor(Math.log10(step0));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= step0);
+  const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-12; v += step) out.push(v); return out;
+}
+
+function renderNotes() {
+  const items = [];
+  Object.values(DATA.literature_notes).forEach(n => items.push(`<b>${esc(n.label)}</b> — ${esc(n.citation)}. ${esc(n.protocol)}`));
+  Object.values(DATA.internal_notes).forEach(n => items.push(`<b>${esc(n.label)}</b> — ${esc(n.protocol)}`));
+  items.push('<b>This run</b> — "best during training" is, per seed, the maximum over evaluations (every 20k steps, 50 stochastic episodes) of the mean return, then averaged over seeds: an analogue of MMER, not identical to PPO training-episode MMER. The final holdout uses 200 fresh episodes per seed. Normalization uses this run\'s own random-policy holdout once available, the weekend suite\'s random returns before that.');
+  items.push('Task versions differ: POPJym-ported tasks (Battleship has a 1-bit observation there) and our new JAX ports of Autoencode, CountRecall, MineSweeper and VelocityOnlyCartPole follow NumPy POPGym 1.0.7 step by step; Labyrinth runs the original Gymnasium environments. Literature numbers come from the original NumPy POPGym and 15M training steps.');
+  $('#notes').innerHTML = '<ul>' + items.map(i => `<li>${i}</li>`).join('') + '</ul>';
+}
+
+function render() { renderHeader(); renderDots(); renderTable(); renderCurves(); renderNotes(); }
+async function load() {
+  try {
+    const r = await fetch('data.json', {cache: 'no-store'});
+    DATA = await r.json();
+    const fams = [...new Set(DATA.tasks.map(t => t.family))];
+    const sel = $('#family');
+    if (sel.options.length === 1) fams.forEach(f => sel.add(new Option(f, f)));
+    render();
+  } catch (e) { $('#subtitle').textContent = 'Could not load data.json: ' + e; }
+}
+['#metric', '#family', '#difficulty'].forEach(s => $(s).addEventListener('change', () => DATA && render()));
+addEventListener('resize', () => DATA && renderDots());
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => DATA && render());
+load(); setInterval(load, 30000);
+</script>
+</body>
+</html>

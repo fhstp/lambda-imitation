@@ -4,7 +4,7 @@ set -euo pipefail
 python=${PYTHON:-python3.11}
 "$python" -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements-b200.txt -e '.[sweep,popgym-jax,dev]'
+.venv/bin/python -m pip install -r requirements-b200.txt -e '.[sweep,popgym-jax,popgym,dev]' cython
 .venv/bin/python - <<'PY'
 import jax
 print('JAX',jax.__version__)

@@ -1,0 +1,2756 @@
+{
+ "schema_version": 1,
+ "generated": "2026-10-22",
+ "literature": {
+  "schema_version": 1,
+  "scope": "Best reported mean within each cited table, not an exhaustive state-of-the-art leaderboard. Ties use published rounded means. No scores imputed for missing tasks.",
+  "metric": "MMER: maximum over training epochs of mean episodic return, then mean and SD across training seeds. Original episodic-return scale, not min-max standardized chart scores.",
+  "aliases": "StatelessCartPole -> PositionOnlyCartPole; NoisyStatelessCartPole -> NoisyPositionOnlyCartPole. Historical task correspondence only, not proof of identical versions/dynamics. VelocityOnlyCartpole is not an alias.",
+  "sources": {
+   "popgym": {
+    "label": "POPGym \u00b7 PPO",
+    "citation": "Morad et al., ICLR 2023, Appendix B, Table 3",
+    "url": "https://arxiv.org/html/2303.01859v1#A2.T3",
+    "variant": "Original POPGym, historical commits e397e5e / 33b0995 (DNC)",
+    "protocol": "RLlib PPO; 15M training steps (DNC 10M); 3 trials; best-during-training MMER; reported SD. Best among 13 models per task.",
+    "seeds": 3,
+    "tasks": {
+     "popgym-AutoencodeEasy-v0": {
+      "paper_env": "AutoencodeEasy",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "GRU",
+        "mean": -0.283,
+        "sd": 0.029
+       }
+      ]
+     },
+     "popgym-AutoencodeMedium-v0": {
+      "paper_env": "AutoencodeMedium",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "IndRNN",
+        "mean": -0.42,
+        "sd": 0.011
+       }
+      ]
+     },
+     "popgym-AutoencodeHard-v0": {
+      "paper_env": "AutoencodeHard",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "IndRNN",
+        "mean": -0.448,
+        "sd": 0.01
+       }
+      ]
+     },
+     "popgym-BattleshipEasy-v0": {
+      "paper_env": "BattleshipEasy",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "PosMLP",
+        "mean": -0.226,
+        "sd": 0.077
+       }
+      ]
+     },
+     "popgym-BattleshipMedium-v0": {
+      "paper_env": "BattleshipMedium",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "IndRNN",
+        "mean": -0.337,
+        "sd": 0.005
+       }
+      ]
+     },
+     "popgym-BattleshipHard-v0": {
+      "paper_env": "BattleshipHard",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "IndRNN",
+        "mean": -0.369,
+        "sd": 0.009
+       }
+      ]
+     },
+     "popgym-ConcentrationEasy-v0": {
+      "paper_env": "ConcentrationEasy",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "TCN",
+        "mean": 0.253,
+        "sd": 0.004
+       }
+      ]
+     },
+     "popgym-ConcentrationMedium-v0": {
+      "paper_env": "ConcentrationMedium",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "TCN",
+        "mean": -0.157,
+        "sd": 0.005
+       }
+      ]
+     },
+     "popgym-ConcentrationHard-v0": {
+      "paper_env": "ConcentrationHard",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "LMU",
+        "mean": -0.828,
+        "sd": 0.002
+       }
+      ]
+     },
+     "popgym-CountRecallEasy-v0": {
+      "paper_env": "CountRecallEasy",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "LSTM",
+        "mean": 0.509,
+        "sd": 0.062
+       }
+      ]
+     },
+     "popgym-CountRecallMedium-v0": {
+      "paper_env": "CountRecallMedium",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "PosMLP",
+        "mean": -0.519,
+        "sd": 0.003
+       }
+      ]
+     },
+     "popgym-CountRecallHard-v0": {
+      "paper_env": "CountRecallHard",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "PosMLP",
+        "mean": -0.47,
+        "sd": 0.003
+       },
+       {
+        "model": "TCN",
+        "mean": -0.47,
+        "sd": 0.002
+       }
+      ]
+     },
+     "popgym-HigherLowerEasy-v0": {
+      "paper_env": "HigherLowerEasy",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "GRU",
+        "mean": 0.529,
+        "sd": 0.002
+       }
+      ]
+     },
+     "popgym-HigherLowerMedium-v0": {
+      "paper_env": "HigherLowerMedium",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "IndRNN",
+        "mean": 0.513,
+        "sd": 0.001
+       }
+      ]
+     },
+     "popgym-HigherLowerHard-v0": {
+      "paper_env": "HigherLowerHard",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "IndRNN",
+        "mean": 0.509,
+        "sd": 0.001
+       }
+      ]
+     },
+     "popgym-LabyrinthEscapeEasy-v0": {
+      "paper_env": "LabyrinthEscapeEasy",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "MLP",
+        "mean": 0.961,
+        "sd": 0.0
+       }
+      ]
+     },
+     "popgym-LabyrinthEscapeMedium-v0": {
+      "paper_env": "LabyrinthEscapeMedium",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "GRU",
+        "mean": 0.23,
+        "sd": 0.642
+       }
+      ]
+     },
+     "popgym-LabyrinthEscapeHard-v0": {
+      "paper_env": "LabyrinthEscapeHard",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "MLP",
+        "mean": -0.245,
+        "sd": 0.948
+       }
+      ]
+     },
+     "popgym-LabyrinthExploreEasy-v0": {
+      "paper_env": "LabyrinthExploreEasy",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "MLP",
+        "mean": 0.968,
+        "sd": 0.0
+       }
+      ]
+     },
+     "popgym-LabyrinthExploreMedium-v0": {
+      "paper_env": "LabyrinthExploreMedium",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "MLP",
+        "mean": 0.924,
+        "sd": 0.001
+       }
+      ]
+     },
+     "popgym-LabyrinthExploreHard-v0": {
+      "paper_env": "LabyrinthExploreHard",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "MLP",
+        "mean": 0.858,
+        "sd": 0.002
+       }
+      ]
+     },
+     "popgym-MineSweeperEasy-v0": {
+      "paper_env": "MineSweeperEasy",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "GRU",
+        "mean": 0.693,
+        "sd": 0.009
+       }
+      ]
+     },
+     "popgym-MineSweeperMedium-v0": {
+      "paper_env": "MineSweeperMedium",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "TCN",
+        "mean": 0.018,
+        "sd": 0.03
+       }
+      ]
+     },
+     "popgym-MineSweeperHard-v0": {
+      "paper_env": "MineSweeperHard",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "TCN",
+        "mean": -0.191,
+        "sd": 0.018
+       }
+      ]
+     },
+     "popgym-MultiarmedBanditEasy-v0": {
+      "paper_env": "MultiarmedBanditEasy",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "Elman",
+        "mean": 0.631,
+        "sd": 0.014
+       }
+      ]
+     },
+     "popgym-MultiarmedBanditMedium-v0": {
+      "paper_env": "MultiarmedBanditMedium",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "TCN",
+        "mean": 0.598,
+        "sd": 0.022
+       }
+      ]
+     },
+     "popgym-MultiarmedBanditHard-v0": {
+      "paper_env": "MultiarmedBanditHard",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "TCN",
+        "mean": 0.574,
+        "sd": 0.049
+       }
+      ]
+     },
+     "popgym-NoisyPositionOnlyCartPoleEasy-v0": {
+      "paper_env": "NoisyStatelessCartPoleEasy",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "GRU",
+        "mean": 0.995,
+        "sd": 0.0
+       }
+      ]
+     },
+     "popgym-NoisyPositionOnlyCartPoleMedium-v0": {
+      "paper_env": "NoisyStatelessCartPoleMedium",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "IndRNN",
+        "mean": 0.659,
+        "sd": 0.006
+       }
+      ]
+     },
+     "popgym-NoisyPositionOnlyCartPoleHard-v0": {
+      "paper_env": "NoisyStatelessCartPoleHard",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "IndRNN",
+        "mean": 0.404,
+        "sd": 0.005
+       }
+      ]
+     },
+     "popgym-RepeatFirstEasy-v0": {
+      "paper_env": "RepeatFirstEasy",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "Elman",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "FART",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "GRU",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "IndRNN",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "LMU",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "LSTM",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "TCN",
+        "mean": 1.0,
+        "sd": 0.0
+       }
+      ]
+     },
+     "popgym-RepeatFirstMedium-v0": {
+      "paper_env": "RepeatFirstMedium",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "GRU",
+        "mean": 1.0,
+        "sd": 0.0
+       }
+      ]
+     },
+     "popgym-RepeatFirstHard-v0": {
+      "paper_env": "RepeatFirstHard",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "IndRNN",
+        "mean": 0.969,
+        "sd": 0.026
+       }
+      ]
+     },
+     "popgym-RepeatPreviousEasy-v0": {
+      "paper_env": "RepeatPreviousEasy",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "Elman",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "Fr.Stack",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "GRU",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "LMU",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "LSTM",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "TCN",
+        "mean": 1.0,
+        "sd": 0.0
+       }
+      ]
+     },
+     "popgym-RepeatPreviousMedium-v0": {
+      "paper_env": "RepeatPreviousMedium",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "LMU",
+        "mean": 0.789,
+        "sd": 0.288
+       }
+      ]
+     },
+     "popgym-RepeatPreviousHard-v0": {
+      "paper_env": "RepeatPreviousHard",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "LMU",
+        "mean": 0.191,
+        "sd": 0.041
+       }
+      ]
+     },
+     "popgym-PositionOnlyCartPoleEasy-v0": {
+      "paper_env": "StatelessCartPoleEasy",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "Elman",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "FART",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "FWP",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "Fr.Stack",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "GRU",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "IndRNN",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "LSTM",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "TCN",
+        "mean": 1.0,
+        "sd": 0.0
+       }
+      ]
+     },
+     "popgym-PositionOnlyCartPoleMedium-v0": {
+      "paper_env": "StatelessCartPoleMedium",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "Elman",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "FART",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "Fr.Stack",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "GRU",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "IndRNN",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "LSTM",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "TCN",
+        "mean": 1.0,
+        "sd": 0.0
+       }
+      ]
+     },
+     "popgym-PositionOnlyCartPoleHard-v0": {
+      "paper_env": "StatelessCartPoleHard",
+      "models_compared": 13,
+      "best": [
+       {
+        "model": "Elman",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "GRU",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "IndRNN",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "LSTM",
+        "mean": 1.0,
+        "sd": 0.0
+       }
+      ]
+     }
+    }
+   },
+   "popjym": {
+    "label": "JAX \u00b7 PPO",
+    "citation": "Lu et al., NeurIPS 2023, Appendix C, Table 5 (JAX rows only)",
+    "url": "https://arxiv.org/html/2303.03982v3#A3.T5",
+    "variant": "Paper's JAX POPGym reimplementation; not verified identical to our pinned/audited POPJym ports",
+    "protocol": "JAX PPO; paper uses original benchmark timesteps (15M); 8 seeds; best-during-training MMER; reported SD. Best among S5, GRU and MLP JAX rows only; excludes copied Morad rows and continuous Pendulum tasks.",
+    "seeds": 8,
+    "tasks": {
+     "popgym-PositionOnlyCartPoleHard-v0": {
+      "paper_env": "Stateless CartPole Hard",
+      "models_compared": 3,
+      "best": [
+       {
+        "model": "S5",
+        "mean": 1.0,
+        "sd": 0.0
+       },
+       {
+        "model": "GRU",
+        "mean": 1.0,
+        "sd": 0.0
+       }
+      ]
+     },
+     "popgym-NoisyPositionOnlyCartPoleHard-v0": {
+      "paper_env": "Noisy Stateless CartPole Hard",
+      "models_compared": 3,
+      "best": [
+       {
+        "model": "S5",
+        "mean": 0.28,
+        "sd": 0.0
+       }
+      ]
+     },
+     "popgym-RepeatPreviousHard-v0": {
+      "paper_env": "Repeat Previous Hard",
+      "models_compared": 3,
+      "best": [
+       {
+        "model": "S5",
+        "mean": 0.91,
+        "sd": 0.01
+       }
+      ]
+     }
+    }
+   }
+  }
+ },
+ "internal": {
+  "weekend-lambda": {
+   "label": "Weekend suite \u00b7 SAC+\u03bb",
+   "protocol": "Our earlier suite (Oct): 250k steps + prefill, GRU512, MLP512 heads, \u03b1=.1, \u03bb2=.85, \u03b2=.1 (\u03bb only), FE LR 1e-5, windowed replay (burn-in 10/seq 40). Final = 100 holdout episodes; best = max over 25k evaluations (20 episodes). Many tasks have only 1 completed seed (queue stopped).",
+   "tasks": {
+    "popgym-AutoencodeEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.5,
+      "std": 0.012906124411971164,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.4301538461538461,
+      "std": 0.01471775886592466,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.4826923076923077,
+      "std": 0.026330006281222756,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.5056923076923077,
+      "std": 0.01979443170760956,
+      "n": 5
+     }
+    },
+    "popgym-AutoencodeHard-v0": {
+     "final_stochastic": {
+      "mean": -0.5025897435897436,
+      "std": 0.008241306458923925,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.49453846153846154,
+      "std": 0.005954020625107674,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.49135897435897435,
+      "std": 0.007014824164147844,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.5004102564102564,
+      "std": 0.005842413333278501,
+      "n": 5
+     }
+    },
+    "popgym-AutoencodeMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.4978846153846154,
+      "std": 0.005093431783903489,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.48073076923076924,
+      "std": 0.008974198716517764,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.4831923076923077,
+      "std": 0.00802478593789972,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.5007692307692307,
+      "std": 0.015945891311060095,
+      "n": 5
+     }
+    },
+    "popgym-BattleshipEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.6066923201829195,
+      "std": 0.32611866523880434,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.9226667066812515,
+      "std": 0.20909323131192628,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.4237948764115572,
+      "std": 0.01969390526230022,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.44861538483202457,
+      "std": 0.004621079470999716,
+      "n": 5
+     }
+    },
+    "popgym-BattleshipHard-v0": {
+     "final_stochastic": {
+      "mean": -0.44459091125428674,
+      "std": 0.09387786583115491,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.8441818361282348,
+      "std": 0.1272883147866971,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.3804999951273203,
+      "std": 0.023086032454255768,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.4032575730532408,
+      "std": 0.001797547071877729,
+      "n": 5
+     }
+    },
+    "popgym-BattleshipMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.4320076135694981,
+      "std": 0.0038698508493344615,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.8679924825429917,
+      "std": 0.10545987259957414,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.4125000423789024,
+      "std": 0.010557753656386067,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.4062500433027744,
+      "std": 0.0006696093201224744,
+      "n": 5
+     }
+    },
+    "popgym-ConcentrationEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.193884608797729,
+      "std": 0.0029734714050217194,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.7771923248767852,
+      "std": 0.09542908074361534,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.18396153200790286,
+      "std": 0.008281910640336222,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.18846153093129397,
+      "std": 0.001427811965578378,
+      "n": 5
+     }
+    },
+    "popgym-ConcentrationHard-v0": {
+     "final_stochastic": {
+      "mean": -0.9906538518667221,
+      "std": 0.011385476085262521,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.9935769275426864,
+      "std": 0.005767382168067558,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.8203846383094787,
+      "std": 0.013010115638014628,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.8434230992794037,
+      "std": 0.001018958411373712,
+      "n": 5
+     }
+    },
+    "popgym-ConcentrationMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.4929519272744656,
+      "std": 0.4213126457663229,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.9507692558765412,
+      "std": 0.03110323467282685,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.17278845742344856,
+      "std": 0.011613836381185507,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.19000961197912694,
+      "std": 0.0017043253381064292,
+      "n": 5
+     }
+    },
+    "popgym-CountRecallEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.9220392156862744,
+      "std": 0.006540913146531242,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.9093333333333333,
+      "std": 0.03476111700838884,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.9145882352941176,
+      "std": 0.007540229157511665,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.9251764705882353,
+      "std": 0.0049790024307778055,
+      "n": 5
+     }
+    },
+    "popgym-CountRecallHard-v0": {
+     "final_stochastic": {
+      "mean": -0.8837101449275362,
+      "std": 0.0038378290517402207,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.8672077294685989,
+      "std": 0.017129075096375186,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.8720772946859903,
+      "std": 0.003779247771132035,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.8834589371980676,
+      "std": 0.0018999699677407637,
+      "n": 5
+     }
+    },
+    "popgym-CountRecallMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.9231844660194174,
+      "std": 0.005501694269414063,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.9165048543689319,
+      "std": 0.018466009208495122,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.9127378640776697,
+      "std": 0.007046162907987064,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.9246601941747571,
+      "std": 0.0045765140774340135,
+      "n": 5
+     }
+    },
+    "popgym-HigherLowerEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.08323077472671866,
+      "std": 0.0047348330615126985,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": 0.489538503408432,
+      "std": 0.004525568775746046,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": 0.08323077472671866,
+      "std": 0.0047348330615126985,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.012538462810218334,
+      "std": 0.0011409536361243987,
+      "n": 5
+     }
+    },
+    "popgym-HigherLowerHard-v0": {
+     "final_stochastic": {
+      "mean": 0.019500000675208868,
+      "std": 0.0018212350851713696,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": 0.49373080897331234,
+      "std": 0.004592716182700503,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": 0.0550641074962914,
+      "std": 0.007327767606389531,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.0046025647427886725,
+      "std": 0.0002580078809358878,
+      "n": 5
+     }
+    },
+    "popgym-HigherLowerMedium-v0": {
+     "final_stochastic": {
+      "mean": 0.044423081658780575,
+      "std": 0.0022021122828598683,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": 0.5038845968842507,
+      "std": 0.008023686066557864,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": 0.044423081658780575,
+      "std": 0.0022021122828598683,
+      "n": 5
+     },
+     "random": {
+      "mean": 0.011153845984488726,
+      "std": 0.0008130545841355762,
+      "n": 5
+     }
+    },
+    "popgym-LabyrinthEscapeEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.99505078125,
+      "std": 0.008883129426239414,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.995048828125,
+      "std": 0.008887496746507963,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.67474609375,
+      "std": 0.03330340154188836,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.50103125,
+      "std": 0.03815350926808979,
+      "n": 5
+     }
+    },
+    "popgym-LabyrinthEscapeHard-v0": {
+     "final_stochastic": {
+      "mean": -0.9990234375,
+      "std": 0.0,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.9990234375,
+      "std": 0.0,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.8786328125,
+      "std": 0.040138004774295306,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.96463671875,
+      "std": 0.011707903916345592,
+      "n": 5
+     }
+    },
+    "popgym-LabyrinthEscapeMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.98755078125,
+      "std": 0.01048965280327369,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.991328125,
+      "std": 0.010541821434684163,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.782021484375,
+      "std": 0.12270521122188613,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.835142578125,
+      "std": 0.038772778491803876,
+      "n": 5
+     }
+    },
+    "popgym-LabyrinthExploreEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.5470279815051021,
+      "std": 0.3093690504344971,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.5567156010841837,
+      "std": 0.3674620237173116,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.29196002072704086,
+      "std": 0.036177899926831535,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.35381361607142864,
+      "std": 0.01454245567327206,
+      "n": 5
+     }
+    },
+    "popgym-LabyrinthExploreHard-v0": {
+     "final_stochastic": {
+      "mean": -0.7787047505822983,
+      "std": 0.10258260304064971,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.7393159210015527,
+      "std": 0.16873017525291492,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.7142594502135093,
+      "std": 0.010720633180304579,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.7432979304153728,
+      "std": 0.012021851400188946,
+      "n": 5
+     }
+    },
+    "popgym-LabyrinthExploreMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.807841293492268,
+      "std": 0.20025542387162223,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.7788141108247423,
+      "std": 0.2748796968487548,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.5861873791881442,
+      "std": 0.028359815783668692,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.6148985583118557,
+      "std": 0.00981336148401185,
+      "n": 5
+     }
+    },
+    "popgym-MineSweeperEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.006607142857142844,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.23267857142857143,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.20684523809523805,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.23851190476190476,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-MineSweeperHard-v0": {
+     "final_stochastic": {
+      "mean": -0.44078703703703703,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.41605769230769235,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.39369658119658113,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.4249679487179487,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-MineSweeperMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.3972857142857142,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.31282142857142853,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.3450000000000001,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.3958214285714286,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-MultiarmedBanditEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.01799999753944576,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.3770999599248171,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.03999999705702066,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.008599999845027923,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-MultiarmedBanditHard-v0": {
+     "final_stochastic": {
+      "mean": 0.006733333906158805,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.05900000492110848,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.02516666753217578,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.005000000642612576,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-MultiarmedBanditMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.00035000018775463107,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.16119998830370605,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.027499998454004526,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.006300000231713057,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-NoisyPositionOnlyCartPoleEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.14424999140203,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.6683499127626419,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.18099998608231543,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.12004999428987503,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-NoisyPositionOnlyCartPoleHard-v0": {
+     "final_stochastic": {
+      "mean": 0.12709999565035104,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.25534997791051867,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.15749998837709428,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.12004999428987503,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-NoisyPositionOnlyCartPoleMedium-v0": {
+     "final_stochastic": {
+      "mean": 0.12489999528974295,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.38024995625019076,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.15849998854100705,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.12004999428987503,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-PositionOnlyCartPoleEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.15984999135136604,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.9999998807907104,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.17899998910725118,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.12004999428987503,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-PositionOnlyCartPoleHard-v0": {
+     "final_stochastic": {
+      "mean": 0.04168333442881703,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.9858001178503036,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.04233333384618163,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.04001666727475822,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-PositionOnlyCartPoleMedium-v0": {
+     "final_stochastic": {
+      "mean": 0.06544999729841948,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.9836498826742173,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.06687499657273292,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.06002499714493752,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-RepeatFirstEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.3917647284269333,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 1.0,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.3254902113229036,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.5129412007331848,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-RepeatFirstHard-v0": {
+     "final_stochastic": {
+      "mean": -0.49910953849554063,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.5400000643730164,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.498916994035244,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.5023105019330978,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-RepeatFirstMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.49874699115753174,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.4063614620268345,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.496867473423481,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.5039518025517463,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-RepeatPreviousEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.31625000819563864,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.9999999403953552,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.31625000819563864,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.4958333311975002,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-RepeatPreviousHard-v0": {
+     "final_stochastic": {
+      "mean": -0.49804346144199374,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.48934780836105346,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.49804346144199374,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.5080434593558312,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-RepeatPreviousMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.4833333632349968,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.49833336859941485,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.4833333632349968,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.49500003188848496,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-VelocityOnlyCartpoleEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.16665000000000002,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 1.0,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.18325,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.1168,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-VelocityOnlyCartpoleHard-v0": {
+     "final_stochastic": {
+      "mean": 0.04103333333333334,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.9986,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.04103333333333334,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.038933333333333334,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-VelocityOnlyCartpoleMedium-v0": {
+     "final_stochastic": {
+      "mean": 0.064125,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 1.0,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.064125,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.0584,
+      "std": 0.0,
+      "n": 1
+     }
+    }
+   }
+  },
+  "weekend-sac": {
+   "label": "Weekend suite \u00b7 SAC",
+   "protocol": "Our earlier suite (Oct): 250k steps + prefill, GRU512, MLP512 heads, \u03b1=.1, \u03bb2=.85, \u03b2=.1 (\u03bb only), FE LR 1e-5, windowed replay (burn-in 10/seq 40). Final = 100 holdout episodes; best = max over 25k evaluations (20 episodes). Many tasks have only 1 completed seed (queue stopped).",
+   "tasks": {
+    "popgym-AutoencodeEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.5000769230769231,
+      "std": 0.013774923619028153,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.44661538461538464,
+      "std": 0.014363724031299737,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.4847692307692308,
+      "std": 0.02446861291024645,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.5056923076923077,
+      "std": 0.01979443170760956,
+      "n": 5
+     }
+    },
+    "popgym-AutoencodeHard-v0": {
+     "final_stochastic": {
+      "mean": -0.5021794871794871,
+      "std": 0.009174508032212715,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.4957435897435898,
+      "std": 0.004923310624794852,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.49243589743589744,
+      "std": 0.006014036835043068,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.5004102564102564,
+      "std": 0.005842413333278501,
+      "n": 5
+     }
+    },
+    "popgym-AutoencodeMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.49665384615384617,
+      "std": 0.006665341337690768,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.4942692307692308,
+      "std": 0.00493373245893323,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.48300000000000004,
+      "std": 0.006284078689069281,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.5007692307692307,
+      "std": 0.015945891311060095,
+      "n": 5
+     }
+    },
+    "popgym-BattleshipEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.538666676044464,
+      "std": 0.08264020061297828,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.6100512980222702,
+      "std": 0.032542091773918966,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.4164102560281754,
+      "std": 0.006686362499851851,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.44861538483202457,
+      "std": 0.004621079470999716,
+      "n": 5
+     }
+    },
+    "popgym-BattleshipHard-v0": {
+     "final_stochastic": {
+      "mean": -0.4377727297395468,
+      "std": 0.08369957160162947,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.5156363680213689,
+      "std": 0.05556026022946125,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.36621211759746075,
+      "std": 0.010681550744603616,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.4032575730532408,
+      "std": 0.001797547071877729,
+      "n": 5
+     }
+    },
+    "popgym-BattleshipMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.5803409550040961,
+      "std": 0.2155369032875542,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.652083388030529,
+      "std": 0.2679469395539191,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.4024621604382992,
+      "std": 0.011104206094816138,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.4062500433027744,
+      "std": 0.0006696093201224744,
+      "n": 5
+     }
+    },
+    "popgym-ConcentrationEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.7575961662530899,
+      "std": 0.030254331658119596,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.7687500151395797,
+      "std": 0.029235120119745446,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.1574038400873542,
+      "std": 0.014998922826473698,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.18846153093129397,
+      "std": 0.001427811965578378,
+      "n": 5
+     }
+    },
+    "popgym-ConcentrationHard-v0": {
+     "final_stochastic": {
+      "mean": -0.9927884647846222,
+      "std": 0.0057080066182410944,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.9932500029802322,
+      "std": 0.005298240939564889,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.821442329287529,
+      "std": 0.014223780879994197,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.8434230992794037,
+      "std": 0.001018958411373712,
+      "n": 5
+     }
+    },
+    "popgym-ConcentrationMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.9159327075481415,
+      "std": 0.04003423713831792,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.9201057829856872,
+      "std": 0.038154861685975754,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.1715865322947502,
+      "std": 0.007661068130183415,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.19000961197912694,
+      "std": 0.0017043253381064292,
+      "n": 5
+     }
+    },
+    "popgym-CountRecallEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.9210980392156862,
+      "std": 0.0063802366902012955,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.9032941176470588,
+      "std": 0.014378312516387836,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.9130196078431373,
+      "std": 0.0030045460877455915,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.9251764705882353,
+      "std": 0.0049790024307778055,
+      "n": 5
+     }
+    },
+    "popgym-CountRecallHard-v0": {
+     "final_stochastic": {
+      "mean": -0.8799999999999999,
+      "std": 0.0030576313813424167,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.8835555555555553,
+      "std": 0.003692035109089604,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.8707246376811594,
+      "std": 0.0037513562624767924,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.8834589371980676,
+      "std": 0.0018999699677407637,
+      "n": 5
+     }
+    },
+    "popgym-CountRecallMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.9222912621359222,
+      "std": 0.002667342108193299,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.9257864077669901,
+      "std": 0.0034446186006837107,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.9141747572815532,
+      "std": 0.006163328251690808,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.9246601941747571,
+      "std": 0.0045765140774340135,
+      "n": 5
+     }
+    },
+    "popgym-HigherLowerEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.08576923608407379,
+      "std": 0.005486670980246892,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": 0.36838464469835164,
+      "std": 0.01941241260408701,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": 0.08576923608407379,
+      "std": 0.005486670980246892,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.012538462810218334,
+      "std": 0.0011409536361243987,
+      "n": 5
+     }
+    },
+    "popgym-HigherLowerHard-v0": {
+     "final_stochastic": {
+      "mean": 0.019884616796858608,
+      "std": 0.009715335877918927,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": 0.03583333517052233,
+      "std": 0.011905832763369522,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": 0.06314103000797332,
+      "std": 0.007156127032651038,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.0046025647427886725,
+      "std": 0.0002580078809358878,
+      "n": 5
+     }
+    },
+    "popgym-HigherLowerMedium-v0": {
+     "final_stochastic": {
+      "mean": 0.04519231053441763,
+      "std": 0.0075800099127369125,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": 0.057115388059988614,
+      "std": 0.014753743251492717,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": 0.049423079298809174,
+      "std": 0.006337770409794706,
+      "n": 5
+     },
+     "random": {
+      "mean": 0.011153845984488726,
+      "std": 0.0008130545841355762,
+      "n": 5
+     }
+    },
+    "popgym-LabyrinthEscapeEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.9990234375,
+      "std": 0.0,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.9990234375,
+      "std": 0.0,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.67474609375,
+      "std": 0.03330340154188836,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.50103125,
+      "std": 0.03815350926808979,
+      "n": 5
+     }
+    },
+    "popgym-LabyrinthEscapeHard-v0": {
+     "final_stochastic": {
+      "mean": -0.9990234375,
+      "std": 0.0,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.9990234375,
+      "std": 0.0,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.88509765625,
+      "std": 0.0420235081459497,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.96463671875,
+      "std": 0.011707903916345592,
+      "n": 5
+     }
+    },
+    "popgym-LabyrinthEscapeMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.98735546875,
+      "std": 0.017345720333867852,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.9874453125,
+      "std": 0.01739617557150911,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.830185546875,
+      "std": 0.08082844902960298,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.835142578125,
+      "std": 0.038772778491803876,
+      "n": 5
+     }
+    },
+    "popgym-LabyrinthExploreEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.3213287228954082,
+      "std": 0.022315725719309922,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.7102441007653061,
+      "std": 0.0546137175788291,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.258348971619898,
+      "std": 0.04878425043433639,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.35381361607142864,
+      "std": 0.01454245567327206,
+      "n": 5
+     }
+    },
+    "popgym-LabyrinthExploreHard-v0": {
+     "final_stochastic": {
+      "mean": -0.7428522903726709,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.9327524505046586,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.7111543453998448,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.7233016304347827,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-LabyrinthExploreMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.5982632288981958,
+      "std": 0.015354136577293613,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.8792129510309279,
+      "std": 0.011793190684865349,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.5649699983891752,
+      "std": 0.011560414622129504,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.6148985583118557,
+      "std": 0.00981336148401185,
+      "n": 5
+     }
+    },
+    "popgym-MineSweeperEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.06559523809523808,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.19380952380952376,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.11904761904761903,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.23851190476190476,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-MineSweeperHard-v0": {
+     "final_stochastic": {
+      "mean": -0.4450676638176638,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.4096331908831909,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.3819088319088319,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.4249679487179487,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-MineSweeperMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.40397619047619043,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.33996428571428566,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.3686309523809524,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.3958214285714286,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-MultiarmedBanditEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.008299998966977,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.015499998517334461,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.038499999325722456,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.008599999845027923,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-MultiarmedBanditHard-v0": {
+     "final_stochastic": {
+      "mean": 0.0023000005912035704,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.0018999999947845935,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.025333334039896727,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.005000000642612576,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-MultiarmedBanditMedium-v0": {
+     "final_stochastic": {
+      "mean": 0.002749999472871423,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.0036500009894371035,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.026249996665865184,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.006300000231713057,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-NoisyPositionOnlyCartPoleEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.1412499912828207,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.815849891602993,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.17149998843669892,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.12004999428987503,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-NoisyPositionOnlyCartPoleHard-v0": {
+     "final_stochastic": {
+      "mean": 0.12174999572336674,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.2831499710679054,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.14824999049305915,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.12004999428987503,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-NoisyPositionOnlyCartPoleMedium-v0": {
+     "final_stochastic": {
+      "mean": 0.133199993558228,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.24929997734725476,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.3184999644756317,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.12004999428987503,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-PositionOnlyCartPoleEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.16619999013841152,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.9999998807907104,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.20074998401105404,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.12004999428987503,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-PositionOnlyCartPoleHard-v0": {
+     "final_stochastic": {
+      "mean": 0.0422500011138618,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.9630667817592621,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.043333334010094406,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.04001666727475822,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-PositionOnlyCartPoleMedium-v0": {
+     "final_stochastic": {
+      "mean": 0.06554999710991978,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.9970748805999756,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.06687499657273292,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.06002499714493752,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-RepeatFirstEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.4843137493729591,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.36666668351739645,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.409803940076381,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.5129412007331848,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-RepeatFirstHard-v0": {
+     "final_stochastic": {
+      "mean": -0.49901326864957807,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.5038748821616172,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.4968712732195854,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.5023105019330978,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-RepeatFirstMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.49898795008659363,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.49783132553100584,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.49898795008659363,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.5039518025517463,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-RepeatPreviousEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.3854166764765978,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.18875000154599547,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.38333334103226663,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.4958333311975002,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-RepeatPreviousHard-v0": {
+     "final_stochastic": {
+      "mean": -0.5032608482241631,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.5104347667098046,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.4706521570682526,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.5080434593558312,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-RepeatPreviousMedium-v0": {
+     "final_stochastic": {
+      "mean": -0.49833336532115935,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": -0.5000000348687172,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": -0.4736111477017403,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": -0.49500003188848496,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-VelocityOnlyCartpoleEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.16585,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 1.0,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.18325,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.1168,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-VelocityOnlyCartpoleHard-v0": {
+     "final_stochastic": {
+      "mean": 0.03725000000000001,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 0.9975666666666666,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.03916666666666667,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.038933333333333334,
+      "std": 0.0,
+      "n": 1
+     }
+    },
+    "popgym-VelocityOnlyCartpoleMedium-v0": {
+     "final_stochastic": {
+      "mean": 0.061775000000000004,
+      "std": 0.0,
+      "n": 1
+     },
+     "final_greedy": {
+      "mean": 1.0,
+      "std": 0.0,
+      "n": 1
+     },
+     "best_stochastic": {
+      "mean": 0.061775000000000004,
+      "std": 0.0,
+      "n": 1
+     },
+     "random": {
+      "mean": 0.0584,
+      "std": 0.0,
+      "n": 1
+     }
+    }
+   }
+  },
+  "alpha-lambda": {
+   "label": "\u03b1 follow-up \u00b7 SAC+\u03bb (best \u03b1)",
+   "protocol": "Our JAX \u03b1 sweep (Oct): 250k steps, 5 seeds, \u03b1 \u2208 {.1,.01,.001}, otherwise weekend settings; best \u03b1 per task chosen by final stochastic return (optimistic selection).",
+   "tasks": {
+    "popgym-BattleshipEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.631294884711504,
+      "std": 0.3279342412608184,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -1.0434872289896011,
+      "std": 0.11092486793214558,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.4369230817258358,
+      "std": 0.01555461743172532,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.44861538483202457,
+      "std": 0.004621079470999716,
+      "n": 5
+     },
+     "alpha": 0.1
+    },
+    "popgym-HigherLowerHard-v0": {
+     "final_stochastic": {
+      "mean": 0.4823718329668045,
+      "std": 0.004240471384118747,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": 0.48975644952058794,
+      "std": 0.004673864001303253,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": 0.5067308196425437,
+      "std": 0.006051671362280427,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.0046025647427886725,
+      "std": 0.0002580078809358878,
+      "n": 5
+     },
+     "alpha": 0.001
+    },
+    "popgym-PositionOnlyCartPoleEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.897579890049994,
+      "std": 0.0762070244397611,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": 0.9871298822164536,
+      "std": 0.02877819168236381,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": 0.9909998804330826,
+      "std": 0.012325025857289954,
+      "n": 5
+     },
+     "random": {
+      "mean": 0.1199399944394827,
+      "std": 0.0005781435152646001,
+      "n": 5
+     },
+     "alpha": 0.01
+    },
+    "popgym-RepeatPreviousEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.7329999780356884,
+      "std": 0.28818973641923756,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": 0.8857499580681324,
+      "std": 0.23242331147159775,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": 0.9199999678134918,
+      "std": 0.01624465925430471,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.49724999704957007,
+      "std": 0.0012004044070166211,
+      "n": 5
+     },
+     "alpha": 0.01
+    },
+    "popgym-RepeatPreviousHard-v0": {
+     "final_stochastic": {
+      "mean": -0.5003912883996964,
+      "std": 0.0056131598940407715,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.5010869410037995,
+      "std": 0.006055820878212099,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.4695651999115944,
+      "std": 0.017877050421528852,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.5075651983618736,
+      "std": 0.0009015844288492195,
+      "n": 5
+     },
+     "alpha": 0.001
+    }
+   }
+  },
+  "alpha-sac": {
+   "label": "\u03b1 follow-up \u00b7 SAC (best \u03b1)",
+   "protocol": "Our JAX \u03b1 sweep (Oct): 250k steps, 5 seeds, \u03b1 \u2208 {.1,.01,.001}, otherwise weekend settings; best \u03b1 per task chosen by final stochastic return (optimistic selection).",
+   "tasks": {
+    "popgym-BattleshipEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.518974367827177,
+      "std": 0.06978506160696266,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.6087948877215386,
+      "std": 0.05149408572226093,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.418461539298296,
+      "std": 0.017238707605221327,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.44861538483202457,
+      "std": 0.004621079470999716,
+      "n": 5
+     },
+     "alpha": 0.1
+    },
+    "popgym-HigherLowerHard-v0": {
+     "final_stochastic": {
+      "mean": 0.47903849905729295,
+      "std": 0.007244158773593027,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": 0.48047439700365063,
+      "std": 0.00606669271632796,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": 0.49647440552711486,
+      "std": 0.005251910499370541,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.0046025647427886725,
+      "std": 0.0002580078809358878,
+      "n": 5
+     },
+     "alpha": 0.001
+    },
+    "popgym-PositionOnlyCartPoleEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.9608398845791817,
+      "std": 0.030164781280186983,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": 0.9995798804759979,
+      "std": 0.0009391492542685017,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": 0.9986998808383941,
+      "std": 0.0029068882641257064,
+      "n": 5
+     },
+     "random": {
+      "mean": 0.1199399944394827,
+      "std": 0.0005781435152646001,
+      "n": 5
+     },
+     "alpha": 0.01
+    },
+    "popgym-RepeatPreviousEasy-v0": {
+     "final_stochastic": {
+      "mean": 0.8416666345596313,
+      "std": 0.09599804257484096,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": 0.8490833002924919,
+      "std": 0.09126825860496307,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": 0.8422499685287476,
+      "std": 0.09677283695961714,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.49724999704957007,
+      "std": 0.0012004044070166211,
+      "n": 5
+     },
+     "alpha": 0.001
+    },
+    "popgym-RepeatPreviousHard-v0": {
+     "final_stochastic": {
+      "mean": -0.49813041883707043,
+      "std": 0.009193106571134967,
+      "n": 5
+     },
+     "final_greedy": {
+      "mean": -0.49913041919469836,
+      "std": 0.005943575942998733,
+      "n": 5
+     },
+     "best_stochastic": {
+      "mean": -0.474999981969595,
+      "std": 0.011807370027561225,
+      "n": 5
+     },
+     "random": {
+      "mean": -0.5075651983618736,
+      "std": 0.0009015844288492195,
+      "n": 5
+     },
+     "alpha": 0.01
+    }
+   }
+  },
+  "battleship-sweep": {
+   "label": "B200 Bayes sweep \u00b7 best config",
+   "protocol": "FlashSAC-style all-categorical, 5M steps, 3 seeds; top return-ranked configuration, mean of last-5 stochastic evaluations (3M\u20135M). From the ekvudzlb sweep summary.",
+   "tasks": {
+    "popgym-BattleshipEasy-v0": {
+     "final_stochastic": {
+      "mean": -0.43729,
+      "std": null,
+      "n": 3
+     }
+    }
+   }
+  }
+ }
+}

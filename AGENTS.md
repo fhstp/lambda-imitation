@@ -1,5 +1,18 @@
 # AGENTS.md
 
+## Full POPGym B200 benchmark (branch feat/popgym-b200-bench)
+
+NEW study, one entry point: `python examples/popgym_bench.py --output DIR` (see
+docs/POPGYM_B200_BENCH.md). All 42 discrete tasks; 24 audited POPJym ports,
+NEW JAX ports Autoencode/CountRecall/MineSweeper/VelocityOnlyCartPole (NumPy
+POPGym 1.0.7 step parity tests), Labyrinth via host Gymnasium. flash-combined
+defaults + GRU512 + lambda2=.99 + correlated logit-bias exploration, 3 vmapped
+seeds, 1M steps. Primary beta=10 for ALL tasks first; beta=0 control only after
+every primary finished (user priority, limited lease). Supervisor runs an exact
+repeat/lane/resume gate first, one worker per GPU (2/GPU measured slower),
+serves dashboard on 127.0.0.1:8765. Restart resumes from checkpoints; new
+--output for any settings change. Comparisons with literature are context only.
+
 ## Portable B200 sweep branch
 
 This branch adds a NEW study,not a migration of any live development-host jobs.
