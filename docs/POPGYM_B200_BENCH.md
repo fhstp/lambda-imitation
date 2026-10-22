@@ -85,6 +85,21 @@ hashes, versions), `latest.pkl`, `wandb-errors.log`. Also
 `OUTPUT/scheduler.json`, `OUTPUT/validation.json`, and `OUTPUT/logs/` (one log
 per worker).
 
+## Dashboard from W&B (any other machine)
+
+The B200 host is hard to reach, so the same page can be rebuilt from W&B alone:
+
+```bash
+python examples/popgym_bench_wandb.py --web-dir /path/served/popgym-bench --watch 120
+```
+
+It writes a static `index.html` + `data.json` into the web directory every 2
+minutes. Workers log per-seed returns, an explicit `run_state`, and a
+`supervisor` run carrying the launch gate and scheduler state, so the page matches
+the on-host dashboard. On the development host it runs as
+`lambda-popgym-bench-dashboard.service` (user unit), published at
+http://10.203.222.228:8000/flash-combined/popgym-bench/.
+
 ## Comparing with other work (dashboard)
 
 References are in `examples/popgym_bench_references.json`:

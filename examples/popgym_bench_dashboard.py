@@ -37,7 +37,7 @@ def arm_summary(folder):
     status = read_json(folder / 'status.json', {}) or {}
     config = read_json(folder / 'config.json', {}) or {}
     history = read_json(folder / 'history.json', []) or []
-    curve, best_by_seed, final = [], None, None
+    curve, final = [], None
     for row in history:
         sto = row['eval'].get('stochastic', {}).get('return_mean')
         if not sto:
@@ -48,18 +48,11 @@ def arm_summary(folder):
             continue
         greedy = row['eval'].get('greedy', {}).get('return_mean', {})
         curve.append(dict(steps=row['steps'], mean=sto['mean'], seeds=sto['seeds'], greedy=greedy.get('mean')))
-        seeds = sto['seeds']
-        best_by_seed = seeds if best_by_seed is None else [max(a, b) for a, b in zip(best_by_seed, seeds)]
-    best = None
-    if best_by_seed:
-        n = len(best_by_seed)
-        mean = sum(best_by_seed) / n
-        best = dict(mean=mean, n=n, std=(sum((x - mean) ** 2 for x in best_by_seed) / (n - 1)) ** .5 if n > 1 else 0.)
     meta = config.get('meta', {})
     return dict(state=status.get('state', 'pending'), steps=status.get('steps', 0), target=status.get('target_steps'),
                 steps_per_second=status.get('steps_per_second'), updated=status.get('time'),
-                error=(status.get('error') or '')[-600:] or None, curve=curve, best=best, final=final,
-                latest=curve[-1] if curve else None, meta=meta)
+                error=(status.get('error') or '')[-600:] or None, curve=curve, best=best_of(curve), final=final,
+                latest=curve[-1] if curve else None, meta=meta, url=None)
 
 
 def references_for(env_id, refs):
@@ -78,25 +71,49 @@ def references_for(env_id, refs):
     return out
 
 
-def build_data(output):
-    output = Path(output)
-    study = read_json(output / 'study.json', {}) or {}
+def empty_arm():
+    return dict(state='pending', steps=0, target=None, steps_per_second=None, updated=None, error=None,
+                curve=[], best=None, final=None, latest=None, meta={}, url=None)
+
+
+def best_of(curve):
+    """Per seed, max over evaluations of the mean return; then across seeds."""
+    best_by_seed = None
+    for row in curve:
+        seeds = row['seeds']
+        best_by_seed = seeds if best_by_seed is None else [max(a, b) for a, b in zip(best_by_seed, seeds)]
+    if not best_by_seed:
+        return None
+    n = len(best_by_seed)
+    mean = sum(best_by_seed) / n
+    return dict(mean=mean, n=n, std=(sum((x - mean) ** 2 for x in best_by_seed) / (n - 1)) ** .5 if n > 1 else 0.)
+
+
+def assemble(study, envs, arms_by_env, scheduler=None, validation=None):
+    """Page data from per-task arm summaries (local files or W&B)."""
     refs = read_json(REFERENCES)
-    envs = study.get('envs') or sorted({p.name for arm in ARMS for p in (output / arm).glob('popgym-*')})
     tasks = []
     for env_id in envs:
         family, difficulty = split_env_id(env_id)
-        arms = {arm: arm_summary(output / arm / env_id) for arm in ARMS}
+        arms = {arm: arms_by_env.get(env_id, {}).get(arm) or empty_arm() for arm in ARMS}
         meta = arms['primary']['meta'] or arms['control']['meta']
         tasks.append(dict(env_id=env_id, family=family, difficulty=difficulty, meta=meta, arms=arms,
                           refs=references_for(env_id, refs)))
     return dict(now=time.time(), study=dict(config=study.get('config'), created=study.get('created'),
                 wandb_project=study.get('wandb_project'), wandb_entity=study.get('wandb_entity')),
-                scheduler=read_json(output / 'scheduler.json'), validation=read_json(output / 'validation.json'),
+                scheduler=scheduler, validation=validation,
                 literature_notes={k: dict(label=v['label'], citation=v['citation'], protocol=v['protocol'], url=v.get('url'))
                                   for k, v in refs['literature']['sources'].items()},
                 internal_notes={k: dict(label=v['label'], protocol=v['protocol']) for k, v in refs['internal'].items()},
                 tasks=tasks)
+
+
+def build_data(output):
+    output = Path(output)
+    study = read_json(output / 'study.json', {}) or {}
+    envs = study.get('envs') or sorted({p.name for arm in ARMS for p in (output / arm).glob('popgym-*')})
+    arms = {env_id: {arm: arm_summary(output / arm / env_id) for arm in ARMS} for env_id in envs}
+    return assemble(study, envs, arms, read_json(output / 'scheduler.json'), read_json(output / 'validation.json'))
 
 
 def serve(output, host='0.0.0.0', port=8765):

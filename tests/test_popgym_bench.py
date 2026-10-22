@@ -161,3 +161,23 @@ def test_supervisor_end_to_end_runs_primary_before_control(tmp_path):
     lines = result.stdout.splitlines()
     starts = [l for l in lines if ' start ' in l]
     assert all('primary' in l for l in starts[:2]) and all('control' in l for l in starts[2:])
+
+
+@pytest.mark.parametrize('new_format', [True, False])
+def test_wandb_exporter_rows(new_format):
+    import popgym_bench_wandb as exporter
+    config = dict(seeds=[42, 43], n_seeds=2, seed_base=42, max_steps=40, env_id='popgym-RepeatPreviousEasy-v0', arm='primary', horizon=51)
+    rows = [{'steps': 20, 'eval/stochastic/return_mean/mean': .1, 'seed/42/eval/stochastic/return_mean': 0., 'seed/43/eval/stochastic/return_mean': .2,
+             'eval/greedy/return_mean/mean': .3},
+            {'steps': 40, 'eval/stochastic/return_mean/mean': .0, 'seed/42/eval/stochastic/return_mean': .1, 'seed/43/eval/stochastic/return_mean': -.1},
+            {'steps': 40, 'final/stochastic/return_mean/mean': .05, 'final/stochastic/return_mean/std': .01,
+             'final/random/return_mean/mean': -.5, 'final/random/return_mean/std': .01}]
+    if new_format:
+        rows[2].update({'seed/42/final/stochastic/return_mean': .04, 'seed/43/final/stochastic/return_mean': .06})
+    summary = dict(steps=40, run_state='complete') if new_format else dict(steps=40)
+    arm = exporter.arm_from_rows(rows, config, summary, 'finished', 'https://wandb.ai/x', None)
+    assert arm['state'] == 'complete' and [r['steps'] for r in arm['curve']] == [20, 40]
+    assert abs(arm['best']['mean'] - .15) < 1e-9 and arm['latest']['mean'] == 0.
+    assert arm['final']['random']['mean'] == -.5 and arm['final']['stochastic']['seeds'] == ([.04, .06] if new_format else [])
+    assert exporter.arm_from_rows(rows[:2], config, dict(steps=40), 'finished', None, None)['state'] == 'stopped'
+    assert exporter.arm_from_rows(rows[:2], config, dict(steps=40), 'crashed', None, None)['state'] == 'failed'

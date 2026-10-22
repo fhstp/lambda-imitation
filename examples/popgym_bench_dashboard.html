@@ -60,6 +60,7 @@ th, td { padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--gri
 th { color: var(--ink-2); font-weight: 600; position: sticky; top: 0; background: var(--surface); cursor: pointer; }
 th:first-child, td:first-child { text-align: left; }
 td .sd { color: var(--muted); }
+td a { color: inherit; text-decoration-color: var(--axis); }
 .up { color: var(--good); } .down { color: var(--bad); }
 .state { display: inline-flex; align-items: center; gap: 6px; }
 .bar { width: 64px; height: 5px; border-radius: 3px; background: var(--grid); overflow: hidden; display: inline-block; }
@@ -179,14 +180,15 @@ function renderHeader() {
   const rate = rates.length ? rates.reduce((a, b) => a + b) / rates.length : null;
   let remaining = 0;
   DATA.tasks.forEach(t => ['primary', 'control'].forEach(a => { const s = t.arms[a]; if (s.state !== 'complete') remaining += ((s.target || c.max_steps) - (s.steps || 0)) / ((s.steps_per_second || rate || 1)); }));
-  const eta = rate && sched ? remaining / sched.slots / 3600 : null;
+  const slots = sched ? sched.slots : Math.max(1, count('primary', 'running') + count('control', 'running'));
+  const eta = rate ? remaining / slots / 3600 : null;
   const tiles = [
     ['Primary complete', `${count('primary', 'complete')}/${n}`, `${count('primary', 'running') + count('primary', 'prefill') + count('primary', 'building')} running · ${count('primary', 'failed')} failed`],
     ['Control (β=0) complete', `${count('control', 'complete')}/${n}`, sched ? `phase: ${sched.phase} · ${sched.slots} worker slots` : 'starts after all primary tasks'],
     ['Median normalized score', median == null ? '–' : median.toFixed(2), `${scored.length} tasks with a PPO reference · ${metricName()}`],
     ['Tasks ≥ best PPO', scored.length ? `${beat}/${scored.length}` : '–', 'normalized score ≥ 1'],
-    ['Est. time remaining', eta == null ? '–' : eta < 1 ? `${Math.round(eta * 60)} min` : `${eta.toFixed(1)} h`, rate ? `~${rate.toFixed(1)} steps/s per task` : 'waiting for throughput'],
-    ['Launch gate', val ? (val.passed ? 'passed' : 'FAILED') : '–', val ? `${esc(val.device_kind || '')}: repeat · lane isolation · resume` : 'not run yet'],
+    ['Est. time remaining', eta == null ? '–' : eta < 1 ? `${Math.round(eta * 60)} min` : `${eta.toFixed(1)} h`, rate ? `~${rate.toFixed(1)} steps/s per task · ${slots} parallel` : 'waiting for throughput'],
+    ['Launch gate', val ? (val.passed ? 'passed' : 'FAILED') : '–', val ? `${esc(val.device_kind || '')}: repeat · lane isolation · resume` : 'not reported'],
   ];
   $('#tiles').innerHTML = tiles.map(([k, v, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('');
   $('#updated').textContent = 'Updated ' + new Date(DATA.now * 1000).toLocaleTimeString() + ' · refreshes every 30 s';
@@ -235,7 +237,7 @@ function renderTable() {
   const metric = $('#metric').value;
   const cell = v => v ? `${fmt(v.mean)} <span class="sd">± ${fmt(v.std)}</span>` : '–';
   const cols = [
-    ['Task', t => short(t.env_id), t => esc(short(t.env_id)) + `<div class="sd">${esc((t.meta && t.meta.backend) || '')} · H=${(t.meta && t.meta.horizon) || '?'} · A=${(t.meta && t.meta.action_dim) || '?'}</div>`],
+    ['Task', t => short(t.env_id), t => (t.arms.primary.url ? `<a href="${esc(t.arms.primary.url)}" target="_blank" rel="noopener">${esc(short(t.env_id))} ↗</a>` : esc(short(t.env_id))) + `<div class="sd">${esc((t.meta && t.meta.backend) || '')} · H=${(t.meta && t.meta.horizon) || '?'} · A=${(t.meta && t.meta.action_dim) || '?'}</div>`],
     ['Status', t => t.arms.primary.steps / (t.arms.primary.target || 1), t => status(t.arms.primary)],
     ['Ours (β=10)', t => (ours(t, 'primary', metric) || {}).mean, t => cell(ours(t, 'primary', metric)) + delta(t, ours(t, 'primary', metric))],
     ['Greedy', t => greedy(t.arms.primary, metric), t => fmt(greedy(t.arms.primary, metric))],
@@ -270,6 +272,7 @@ function status(a) {
   if (a.state === 'failed') return `<span class="failed" title="${esc(a.error || '')}">✕ failed</span>`;
   if (a.state === 'complete') return '<span class="up">✓ done</span>';
   if (a.state === 'pending') return '<span class="sd">queued</span>';
+  if (a.state === 'stopped') return `<span class="sd">stopped at ${(a.steps / 1e3).toFixed(0)}k</span>`;
   const p = Math.min(1, (a.steps || 0) / (a.target || 1));
   return `<span class="state"><span class="bar"><i style="width:${(p * 100).toFixed(1)}%"></i></span>${(a.steps / 1e3).toFixed(0)}k${a.steps_per_second ? ` · ${a.steps_per_second.toFixed(1)}/s` : ''}${a.state !== 'running' ? ' · ' + a.state : ''}</span>`;
 }

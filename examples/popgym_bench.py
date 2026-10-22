@@ -665,10 +665,25 @@ def train_task(output, arm, env_id, wandb_cfg, small=False):
             row['eval'][mode] = {k: seed_stats([m[k] for m in per_seed]) for k in per_seed[0]}
         return row
 
+    def log_eval(row, prefix='eval'):
+        payload = {'steps': row['steps'], 'run_state': 'running'}
+        if 'steps_per_second' in row:
+            payload['throughput/steps_per_second'] = row['steps_per_second']
+        for mode, metrics_ in row['eval'].items():
+            for k, s in metrics_.items():
+                payload[f'{prefix}/{mode}/{k}/mean'] = s['mean']; payload[f'{prefix}/{mode}/{k}/std'] = s['std']
+            # Per-seed returns: the remote dashboard needs seed bands/best-during-training.
+            for seed, value in zip(seeds, metrics_['return_mean']['seeds']):
+                payload[f'seed/{seed}/{prefix}/{mode}/return_mean'] = value
+        for k, s in row.get('train', {}).items():
+            payload[f'train/{k}/mean'] = s['mean']
+        log(payload)
+
     started, start_step = time.monotonic(), step
     try:
         if not history:
             history.append(evaluate(False))
+            log_eval(history[-1])
             atomic_json(folder / 'history.json', history)
             checkpoint_now()
         next_eval = (step // c['eval_every'] + 1) * c['eval_every']
@@ -689,30 +704,26 @@ def train_task(output, arm, env_id, wandb_cfg, small=False):
             row['steps_per_second'] = (step - start_step) / max(time.monotonic() - started, 1e-6)
             history.append(row)
             params_finite(states)
-            payload = {'steps': step, 'throughput/steps_per_second': row['steps_per_second']}
-            for mode, metrics_ in row['eval'].items():
-                for k, s in metrics_.items():
-                    payload[f'eval/{mode}/{k}/mean'] = s['mean']; payload[f'eval/{mode}/{k}/std'] = s['std']
-            for k, s in row['train'].items():
-                payload[f'train/{k}/mean'] = s['mean']
-            for seed, value in zip(seeds, row['eval']['stochastic']['return_mean']['seeds']):
-                payload[f'seed/{seed}/eval/stochastic/return_mean'] = value
-            log(payload)
+            log_eval(row)
             atomic_json(folder / 'history.json', history)
             if step % c['checkpoint_every'] == 0 or step == c['max_steps']:
                 checkpoint_now()
         final = evaluate(True)
         history.append(final)
         atomic_json(folder / 'history.json', history)
-        log({'steps': step, **{f'final/{m}/{k}/mean': s['mean'] for m, d in final['eval'].items() for k, s in d.items()},
-             **{f'final/{m}/{k}/std': s['std'] for m, d in final['eval'].items() for k, s in d.items()}})
+        log_eval(final, 'final')
         if run is not None:
             wandb_safe(lambda: run.summary.update({'final_stochastic_return': final['eval']['stochastic']['return_mean']['mean'],
-                                                   'final_greedy_return': final['eval']['greedy']['return_mean']['mean']}), folder)
+                                                   'final_greedy_return': final['eval']['greedy']['return_mean']['mean'],
+                                                   'run_state': 'complete'}), folder)
         atomic_json(folder / 'status.json', dict(state='complete', steps=step, target_steps=c['max_steps'], time=time.time()))
     except BaseException:
-        atomic_json(folder / 'status.json', dict(state='failed', steps=step, target_steps=c['max_steps'], time=time.time(),
-                                                 error=traceback.format_exc()[-4000:]))
+        error = traceback.format_exc()[-4000:]
+        atomic_json(folder / 'status.json', dict(state='failed', steps=step, target_steps=c['max_steps'], time=time.time(), error=error))
+        if run is not None:
+            wandb_safe(lambda: run.summary.update({'run_state': 'failed', 'error': error[-1500:]}), folder)
+            wandb_safe(lambda: run.finish(exit_code=1), folder)
+            run = None
         raise
     finally:
         if run is not None:
@@ -831,6 +842,8 @@ def supervise(args):
         if code:
             raise SystemExit(f'Validation gate FAILED (see {output / "validation.log"}); nothing launched')
         print('Validation passed.', flush=True)
+    supervisor_run = start_supervisor_run(args, output, record)
+    published = 0.
     running, attempts = {}, {}
     logs = output / 'logs'
     logs.mkdir(exist_ok=True)
@@ -864,6 +877,10 @@ def supervise(args):
             phase='primary' if primary_busy else 'control', queued=[list(k) for k in queue],
             running=[dict(arm=k[0], env_id=k[1], gpu=slot) for k, (_, slot) in running.items()],
             attempts=[dict(arm=k[0], env_id=k[1], attempts=v) for k, v in attempts.items()]))
+        if supervisor_run is not None and time.time() - published > 60:
+            published = time.time()
+            wandb_safe(lambda: supervisor_run.summary.update({'scheduler': (output / 'scheduler.json').read_text(),
+                                                              'heartbeat': published}), output)
         if not queue and not running:
             break
         busy = [slot for _, slot in running.values()]
@@ -886,10 +903,30 @@ def supervise(args):
             running[key] = (subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, cwd=str(HERE.parent)), gpu)
         time.sleep(args.poll_seconds)
     print('All tasks finished.', flush=True)
+    if supervisor_run is not None:
+        wandb_safe(lambda: supervisor_run.summary.update({'scheduler': (output / 'scheduler.json').read_text(), 'all_finished': True}), output)
+        wandb_safe(lambda: supervisor_run.finish(), output)
     if args.dashboard_port and not args.exit_when_done:
         print('Dashboard keeps serving; Ctrl-C to stop.', flush=True)
         while True:
             time.sleep(3600)
+
+
+def start_supervisor_run(args, output, record):
+    """Tiny W&B run carrying study config, launch gate and scheduler state,
+    so a dashboard on another machine can show them (popgym_bench_wandb.py)."""
+    if not args.wandb_project:
+        return None
+    import wandb
+    proof = output / 'validation.json'
+    validation = json.loads(proof.read_text()) if proof.exists() else None
+    run = wandb_safe(lambda: wandb.init(project=args.wandb_project, entity=args.wandb_entity, job_type='supervisor',
+        group='supervisor', name='supervisor', resume='allow', dir=str(output),
+        id=hashlib.sha256(f'{STUDY}/{output}/supervisor'.encode()).hexdigest()[:16],
+        config=dict(study=record['config'], envs=record['envs']), settings=wandb.Settings(console='off')), output)
+    if run is not None and validation is not None:
+        wandb_safe(lambda: run.summary.update({'validation': json.dumps({k: v for k, v in validation.items() if k != 'source_manifest'})}), output)
+    return run
 
 
 def start_dashboard(output, host, port):
