@@ -99,7 +99,7 @@ def build_data(output):
                 tasks=tasks)
 
 
-def serve(output, host='127.0.0.1', port=8765):
+def serve(output, host='0.0.0.0', port=8765):
     cache = dict(at=0., body=b'{}')
     lock = threading.Lock()
 

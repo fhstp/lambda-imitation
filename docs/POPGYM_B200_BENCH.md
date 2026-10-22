@@ -43,9 +43,9 @@ python examples/popgym_bench.py --output /SCRATCH/popgym-bench
 
 The supervisor does the following:
 
-1. Writes `study.json`, then starts the dashboard at `127.0.0.1:8765`. Open it
-   from your machine with `ssh -L 8765:localhost:8765 <b200-host>` and then
-   http://localhost:8765. Use `--dashboard-host 0.0.0.0` only on a trusted network.
+1. Writes `study.json`, then starts the dashboard on `0.0.0.0:8765`. Open
+   http://<b200-vpn-address>:8765 (the host is only reachable via the VPN).
+   Use `--dashboard-host 127.0.0.1` to restrict it to the machine itself.
 2. Runs the launch gate on GPU 0 (`validation.json`): full-size same-input
    repeatability, seed-lane isolation and host round-trip resume, exact bytes,
    on Battleship Easy and Autoencode Easy (~5 min). On failure nothing is launched.

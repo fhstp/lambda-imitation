@@ -896,7 +896,7 @@ def start_dashboard(output, host, port):
     import popgym_bench_dashboard as dashboard
     thread = threading.Thread(target=dashboard.serve, args=(output, host, port), daemon=True)
     thread.start()
-    print(f'Dashboard: http://{host}:{port}/  (from your machine: ssh -L {port}:localhost:{port} <b200-host>)', flush=True)
+    print(f'Dashboard: http://{host}:{port}/  (all interfaces: open http://<b200-vpn-address>:{port}/)', flush=True)
 
 
 def main():
@@ -914,7 +914,7 @@ def main():
     p.add_argument('--wandb-project', default=os.environ.get('WANDB_PROJECT', STUDY))
     p.add_argument('--wandb-entity', default=os.environ.get('WANDB_ENTITY', 'fhstp-data-intelligence-research-group'))
     p.add_argument('--no-wandb', action='store_true')
-    p.add_argument('--dashboard-host', default='127.0.0.1')
+    p.add_argument('--dashboard-host', default='0.0.0.0', help='0.0.0.0 = reachable via the host VPN address')
     p.add_argument('--dashboard-port', type=int, default=8765, help='0 disables the dashboard')
     p.add_argument('--exit-when-done', action='store_true')
     w = sub.add_parser('worker')
@@ -927,7 +927,7 @@ def main():
     v.add_argument('--output', type=Path, required=True)
     d = sub.add_parser('dashboard')
     d.add_argument('--output', type=Path, required=True)
-    d.add_argument('--host', default='127.0.0.1')
+    d.add_argument('--host', default='0.0.0.0')
     d.add_argument('--port', type=int, default=8765)
     args = p.parse_args()
     if args.command == 'worker':
