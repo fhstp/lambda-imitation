@@ -39,7 +39,14 @@ def timestamp(value):
 def arm_from_rows(rows, config, summary, state, url, heartbeat):
     seeds = config.get('seeds') or list(range(config.get('seed_base', 42), config.get('seed_base', 42) + config.get('n_seeds', 0)))
     curve, final = [], None
-    for r in sorted((r for r in rows if r.get('steps') is not None), key=lambda r: r['steps']):
+    # A resumed worker re-logs steps after its last checkpoint: for each step and
+    # kind of row keep only the most recently logged one (rows arrive in _step order).
+    latest = {}
+    for r in rows:
+        if r.get('steps') is not None:
+            kind = 'final' if r.get('final/stochastic/return_mean/mean') is not None else 'eval'
+            latest[(r['steps'], kind)] = r
+    for _, r in sorted(latest.items()):
         if r.get('eval/stochastic/return_mean/mean') is not None:
             values = [r.get(f'seed/{s}/eval/stochastic/return_mean') for s in seeds]
             if any(v is None for v in values):

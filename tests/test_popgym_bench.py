@@ -179,5 +179,7 @@ def test_wandb_exporter_rows(new_format):
     assert arm['state'] == 'complete' and [r['steps'] for r in arm['curve']] == [20, 40]
     assert abs(arm['best']['mean'] - .15) < 1e-9 and arm['latest']['mean'] == 0.
     assert arm['final']['random']['mean'] == -.5 and arm['final']['stochastic']['seeds'] == ([.04, .06] if new_format else [])
+    resumed = exporter.arm_from_rows([{**rows[0], 'eval/stochastic/return_mean/mean': -9.}] + rows, config, summary, 'finished', None, None)
+    assert [r['mean'] for r in resumed['curve']] == [.1, 0.]  # re-logged step: latest row wins
     assert exporter.arm_from_rows(rows[:2], config, dict(steps=40), 'finished', None, None)['state'] == 'stopped'
     assert exporter.arm_from_rows(rows[:2], config, dict(steps=40), 'crashed', None, None)['state'] == 'failed'
