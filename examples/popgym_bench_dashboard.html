@@ -45,6 +45,10 @@ h2 { font-size: 16px; margin: 32px 0 4px; font-weight: 650; }
 .controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin: 18px 0 6px; position: sticky; top: env(safe-area-inset-top, 0px);
   background: var(--page); padding: 8px 0; z-index: 5; }
 .controls label { color: var(--ink-2); font-size: 13px; display: flex; gap: 6px; align-items: center; }
+.seg { display: inline-flex; background: var(--surface); box-shadow: inset 0 0 0 1px var(--axis); border-radius: 8px; padding: 2px; }
+.seg button { font: inherit; font-size: 13px; border: 0; background: transparent; color: var(--ink-2); padding: 3px 12px; border-radius: 6px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.seg button:focus-visible { outline: 2px solid var(--s1); outline-offset: 1px; }
 select { font: inherit; background: var(--surface); color: var(--ink); border: 1px solid var(--axis); border-radius: 8px; padding: 4px 8px; }
 .legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12.5px; color: var(--ink-2); margin: 6px 0; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
@@ -86,6 +90,7 @@ td a { color: inherit; text-decoration-color: var(--axis); }
   <div class="tiles" id="tiles"></div>
 
   <div class="controls">
+    <span class="seg" role="group" aria-label="Overview scale"><button type="button" data-view="norm" aria-pressed="true">Normalized</button><button type="button" data-view="raw" aria-pressed="false">Returns</button></span>
     <label>Score <select id="metric">
       <option value="best">Best during training (MMER-like)</option>
       <option value="latest">Latest evaluation</option>
@@ -96,9 +101,8 @@ td a { color: inherit; text-decoration-color: var(--axis); }
     <span class="note" id="updated"></span>
   </div>
 
-  <h2>Normalized score per task</h2>
-  <div class="note">0 = random policy, 1 = best published POPGym PPO model (Morad et al. 2023, best of 13 memory models, 15M steps, MMER).
-    Values beyond the axis are pinned to its edge (hover for the exact value). Tasks without a published reference are omitted.</div>
+  <h2 id="dotTitle">Normalized score per task</h2>
+  <div class="note" id="dotNote"></div>
   <div class="legend" id="dotLegend"></div>
   <div class="card scroll"><svg id="dots" role="img" aria-label="Normalized score dot plot"></svg></div>
 
@@ -121,6 +125,8 @@ const fmt = (v, d = 3) => v == null || !isFinite(v) ? '–' : (+v).toFixed(d);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const short = id => id.replace(/^popgym-/, '').replace(/-v0$/, '');
 let DATA = null;
+let VIEW = 'norm';
+try { VIEW = localStorage.getItem('popgym-bench-view') === 'raw' ? 'raw' : 'norm'; } catch (e) { /* storage unavailable */ }
 const tip = $('#tip');
 function showTip(html, ev) {
   tip.innerHTML = html; tip.hidden = false;
@@ -196,40 +202,55 @@ function renderHeader() {
 const metricName = () => ({best: 'best during training', latest: 'latest evaluation', final: 'final holdout'})[$('#metric').value];
 
 function renderDots() {
-  const metric = $('#metric').value;
+  const metric = $('#metric').value, raw = VIEW === 'raw';
   const series = [['Ours (β=10)', 'primary', css('--s1')], ['Control (β=0)', 'control', css('--s2')], ['Weekend suite SAC+λ (250k)', 'weekend', css('--s3')]];
-  $('#dotLegend').innerHTML = series.map(([l, , c]) => `<span><i class="dot" style="background:${c}"></i>${l}</span>`).join('') +
-    `<span><i class="sw" style="border-color:${css('--axis')};border-top-style:dashed"></i>random (0) · best PPO (1)</span>`;
-  const rows = visible().filter(t => t.refs.popgym);
+  const ink2 = css('--ink-2'), surface = css('--surface');
+  $('#dotTitle').textContent = raw ? 'Return per task' : 'Normalized score per task';
+  $('#dotNote').textContent = raw
+    ? 'Mean episodic return on the common POPGym scale (−1 to 1), with this run\'s random-policy holdout (weekend suite before that) and the best published POPGym PPO model (Morad et al. 2023, 15M steps, MMER) as reference marks. The bar spans random → best PPO: a short bar means the published reference barely beats random.'
+    : '0 = random policy, 1 = best published POPGym PPO model (Morad et al. 2023, best of 13 memory models, 15M steps, MMER). Values beyond the axis are pinned to its edge (hover for the exact value). Tasks without a published reference are omitted.';
+  $('#dotLegend').innerHTML = series.map(([l, , c]) => `<span><i class="dot" style="background:${c}"></i>${l}</span>`).join('') + (raw
+    ? `<span><i class="dot" style="background:${surface};box-shadow:inset 0 0 0 2px ${ink2}"></i>random</span>` +
+      `<span><i class="dot" style="background:${ink2};border-radius:1px;transform:rotate(45deg) scale(.85)"></i>best PPO</span>` +
+      `<span><i class="sw" style="border-color:${css('--axis')};border-top-width:6px;opacity:.7"></i>random → best PPO</span>`
+    : `<span><i class="sw" style="border-color:${css('--axis')};border-top-style:dashed"></i>random (0) · best PPO (1)</span>`);
+  const rows = raw ? visible() : visible().filter(t => t.refs.popgym);
   const W = Math.max(640, $('#dots').parentElement.clientWidth - 24), left = 230, right = 24, rowH = 20, top = 26;
-  const H = top + rows.length * rowH + 10, lo = -0.5, hi = 1.5;
+  const H = top + rows.length * rowH + 10, lo = raw ? -1 : -0.5, hi = raw ? 1 : 1.5;
   const x = v => left + (Math.max(lo, Math.min(hi, v)) - lo) / (hi - lo) * (W - left - right);
   let s = '';
   for (let g = lo; g <= hi + 1e-9; g += 0.25) {
-    const major = Math.abs(g) < 1e-9 || Math.abs(g - 1) < 1e-9;
-    s += `<line x1="${x(g)}" x2="${x(g)}" y1="${top - 6}" y2="${H - 6}" stroke="${css(major ? '--axis' : '--grid')}" stroke-width="1" ${major ? 'stroke-dasharray="4 3"' : ''}/>`;
+    const major = Math.abs(g) < 1e-9 || (!raw && Math.abs(g - 1) < 1e-9);
+    s += `<line x1="${x(g)}" x2="${x(g)}" y1="${top - 6}" y2="${H - 6}" stroke="${css(major ? '--axis' : '--grid')}" stroke-width="1" ${major && !raw ? 'stroke-dasharray="4 3"' : ''}/>`;
     s += `<text x="${x(g)}" y="${top - 12}" text-anchor="middle">${g.toFixed(2).replace(/\.?0+$/, '') || '0'}</text>`;
   }
+  const marks = [];
   rows.forEach((t, i) => {
-    const y = top + i * rowH + rowH / 2;
+    const y = top + i * rowH + rowH / 2, rnd = randomRef(t), ppo = t.refs.popgym;
     s += `<text class="lbl" x="${left - 10}" y="${y + 4}" text-anchor="end">${esc(short(t.env_id))}</text>`;
+    const refRows = `${ppo ? `<div class="row"><span>best PPO (${esc(ppo.model)})</span><span>${fmt(ppo.mean)}</span></div>` : ''}` +
+      `<div class="row"><span>random</span><span>${fmt(rnd)}</span></div>`;
+    if (raw) {
+      if (ppo && rnd != null) s += `<line x1="${x(rnd)}" x2="${x(ppo.mean)}" y1="${y}" y2="${y}" stroke="${css('--axis')}" stroke-width="6" stroke-linecap="round" opacity=".7"/>`;
+      const head = `<b>${esc(short(t.env_id))}</b>`;
+      if (rnd != null) marks.push(`<circle cx="${x(rnd)}" cy="${y}" r="4.5" fill="${surface}" stroke="${ink2}" stroke-width="2" data-tip="${esc(head + refRows)}"/>`);
+      if (ppo) marks.push(`<rect x="${x(ppo.mean) - 4.5}" y="${y - 4.5}" width="9" height="9" rx="1" fill="${ink2}" stroke="${surface}" stroke-width="1.5" transform="rotate(45 ${x(ppo.mean)} ${y})" data-tip="${esc(head + refRows)}"/>`);
+    }
     series.forEach(([label, key, color]) => {
       const v = key === 'weekend' ? weekend(t, metric) : ours(t, key, metric);
-      const n = norm(t, v && v.mean);
-      if (n == null) return;
-      const raw = v.mean, info = `<b>${esc(short(t.env_id))}</b><div class="row"><span>${label}</span><span>${fmt(n, 2)} normalized</span></div>` +
-        `<div class="row"><span>return</span><span>${fmt(raw)} ± ${fmt(v.std)} (n=${v.n})</span></div>` +
-        `<div class="row"><span>best PPO (${esc(t.refs.popgym.model)})</span><span>${fmt(t.refs.popgym.mean)}</span></div>` +
-        `<div class="row"><span>random</span><span>${fmt(randomRef(t))}</span></div>`;
-      const off = n < lo || n > hi;
-      s += `<circle cx="${x(n)}" cy="${y}" r="5" fill="${color}" stroke="${css('--surface')}" stroke-width="2" ${off ? `stroke-dasharray="2 2"` : ''} data-tip="${esc(info)}"/>`;
+      if (!v) return;
+      const n = norm(t, v.mean), pos = raw ? v.mean : n;
+      if (pos == null) return;
+      const info = `<b>${esc(short(t.env_id))}</b><div class="row"><span>${label}</span><span>${fmt(v.mean)} ± ${fmt(v.std)} (n=${v.n})</span></div>` +
+        `<div class="row"><span>normalized</span><span>${fmt(n, 2)}</span></div>` + refRows;
+      const off = pos < lo || pos > hi;
+      marks.push(`<circle cx="${x(pos)}" cy="${y}" r="5" fill="${color}" stroke="${surface}" stroke-width="2" ${off ? 'stroke-dasharray="2 2"' : ''} data-tip="${esc(info)}"/>`);
     });
-    s += `<rect x="0" y="${y - rowH / 2}" width="${W}" height="${rowH}" fill="transparent" data-row="${i}"/>`;
   });
   const svg = $('#dots');
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', W); svg.setAttribute('height', H);
-  svg.innerHTML = s;
-  svg.querySelectorAll('circle').forEach(c => { c.parentNode.appendChild(c); c.addEventListener('mousemove', e => showTip(c.dataset.tip, e)); c.addEventListener('mouseleave', hideTip); });
+  svg.innerHTML = s + marks.join('');
+  svg.querySelectorAll('[data-tip]').forEach(c => { c.addEventListener('mousemove', e => showTip(c.dataset.tip, e)); c.addEventListener('mouseleave', hideTip); });
 }
 
 let sortKey = null, sortDir = 1;
@@ -360,6 +381,14 @@ async function load() {
     render();
   } catch (e) { $('#subtitle').textContent = 'Could not load data.json: ' + e; }
 }
+function setView(v) {
+  VIEW = v;
+  document.querySelectorAll('.seg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === v)));
+  try { localStorage.setItem('popgym-bench-view', v); } catch (e) { /* storage unavailable */ }
+  if (DATA) renderDots();
+}
+document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+setView(VIEW);
 ['#metric', '#family', '#difficulty'].forEach(s => $(s).addEventListener('change', () => DATA && render()));
 addEventListener('resize', () => DATA && renderDots());
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => DATA && render());
