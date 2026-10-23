@@ -261,3 +261,45 @@ def test_parse_slurm_time():
     assert bench.parse_slurm_time('1-02:03:04') == 26 + 3 / 60 + 4 / 3600
     assert bench.parse_slurm_time('23:30:00') == 23.5 and abs(bench.parse_slurm_time('05:00') - 5 / 60) < 1e-12
     assert bench.parse_slurm_time('UNLIMITED') is None and bench.parse_slurm_time('') is None
+
+
+def _trained(config, steps=32, env_id='popgym-RepeatPreviousEasy-v0'):
+    c = bench.resolve_config({**TINY, **config})
+    port = make_port(env_id)
+    states, runner, seeds = bench.build(c, port, small=True)
+    rollout = runner.initial_rollout(seeds)
+    states, rollout, _ = runner.prefill(states, rollout, c['prefill_steps'])
+    return runner.train(states, rollout, steps)
+
+
+def test_soft_target_with_zero_alpha_matches_original_objective():
+    tiny_alpha = dict(alpha_initial=1e-30, alpha_final=1e-30)
+    a, b = _trained(tiny_alpha), _trained({**tiny_alpha, 'soft_main_target': True})
+    for x, y in zip(jax.tree.leaves(a[0].critic), jax.tree.leaves(b[0].critic)):
+        np.testing.assert_allclose(np.asarray(x), np.asarray(y), rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(float(a[2]['target_q'][0]), float(b[2]['target_q'][0]), rtol=1e-5, atol=1e-6)
+    assert float(b[2]['soft_bonus'][0]) < 1e-20
+
+
+def test_soft_target_adds_entropy_bonus():
+    big = dict(alpha_initial=.05, alpha_final=.05)
+    hard, soft = _trained(big, 16), _trained({**big, 'soft_main_target': True}, 16)
+    bonus = float(soft[2]['soft_bonus'][0])
+    assert 0 < bonus <= .05 * np.log(4) + 1e-6  # alpha * H(pi), H <= log A
+    assert float(soft[2]['target_q'][0]) > float(hard[2]['target_q'][0])
+
+
+def test_autotune_alpha_moves_towards_target_entropy():
+    out = _trained(dict(autotune_alpha=True, alpha_initial=.5, alpha_lr=1e-2, target_entropy_fraction=.3), 64)
+    alpha = np.asarray(out[0].alpha)
+    # A near-uniform young policy has entropy above 0.3*log A, so alpha must fall.
+    assert (alpha < .5).all() and np.allclose(np.log(alpha), np.asarray(out[0].log_alpha))
+    assert np.allclose(np.asarray(out[2]['target_entropy']), .3 * np.log(4))
+
+
+def test_alpha_scale_and_old_config_compatibility():
+    c = bench.resolve_config({'alpha_scale': 'inverse_horizon'})
+    assert abs(float(bench.alpha_at(0, c, 100)) - .01) < 1e-7 and abs(float(bench.alpha_at(10 ** 7, c, 100)) - 1e-4) < 1e-9
+    old = {k: v for k, v in bench.DEFAULTS.items() if k not in ('alpha_scale', 'soft_main_target', 'autotune_alpha',
+                                                                  'target_entropy_fraction', 'alpha_lr')}
+    assert bench.resolve_config(old) == bench.resolve_config({})

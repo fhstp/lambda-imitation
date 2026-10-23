@@ -45,7 +45,12 @@ DEFAULTS = dict(
     memory_hidden_dim=512, projection_dim=128, actor_width=128, critic_width=256, online_buffer_size=100_000,
     prefill_steps=12_800, batch_transitions=8320, min_batch_episodes=8, collect_steps=16, chunk_steps=2048,
     eval_every=20_000, checkpoint_every=100_000, eval_episodes=50, final_episodes=200,
-    noise_strength=1., noise_power=2., noise_max_duration=16)
+    noise_strength=1., noise_power=2., noise_max_duration=16,
+    # Entropy handling (all off = the original study):
+    alpha_scale='none',          # 'inverse_horizon': every alpha value above divided by the task horizon H
+    soft_main_target=False,      # main critic target adds +alpha*H(pi(.|s')) (SAC soft value); lambda heads stay reward-only
+    autotune_alpha=False,        # SAC temperature learning towards target_entropy_fraction*log(A); schedule = initial value only
+    target_entropy_fraction=.3, alpha_lr=1e-4)
 ARMS = {'primary': {}, 'control': {'lambda_coef': 0.}}
 NOISE_RNG_TAG = 1464689751
 VALIDATION_TASKS = ('popgym-BattleshipEasy-v0', 'popgym-AutoencodeEasy-v0')
@@ -61,6 +66,10 @@ def resolve_config(values):
         raise ValueError('max_steps/eval_every/chunk_steps must be multiples of collect_steps (and eval_every)')
     if not 0 <= c['lambda1'] < c['lambda2'] <= 1 or not 0 < c['gamma'] < 1:
         raise ValueError('Invalid discount/lambdas')
+    if c['alpha_scale'] not in ('none', 'inverse_horizon'):
+        raise ValueError('alpha_scale must be none or inverse_horizon')
+    if not 0 < c['target_entropy_fraction'] <= 1:
+        raise ValueError('target_entropy_fraction must be in (0, 1]')
     return c
 
 
@@ -71,16 +80,21 @@ def task_settings(c, horizon):
     return dict(batch_episodes=max(c['min_batch_episodes'], c['batch_transitions'] // (horizon + 1)))
 
 
-def alpha_at(step, c):
+def alpha_scale(c, horizon):
+    return 1. / horizon if c.get('alpha_scale', 'none') == 'inverse_horizon' else 1.
+
+
+def alpha_at(step, c, horizon=1):
     import jax.numpy as jnp
     t = jnp.clip(jnp.asarray(step) / c['alpha_decay_steps'], 0., 1.)
-    return jnp.exp((1 - t) * jnp.log(jnp.float32(c['alpha_initial'])) + t * jnp.log(jnp.float32(c['alpha_final'])))
+    a = jnp.exp((1 - t) * jnp.log(jnp.float32(c['alpha_initial'])) + t * jnp.log(jnp.float32(c['alpha_final'])))
+    return a * jnp.float32(alpha_scale(c, horizon))
 
 
 def agent_config(c, port, seed, small=False):
     s = task_settings(c, port.horizon)
     return dict(batch_size=s['batch_episodes'], online_buffer_size=c['online_buffer_size'], fe_lr=c['fe_lr'],
-        actor_lr=c['actor_lr'], critic_lr=c['critic_lr'], alpha=c['alpha_initial'], gamma=c['gamma'], tau=c['tau'],
+        actor_lr=c['actor_lr'], critic_lr=c['critic_lr'], alpha=c['alpha_initial'] * alpha_scale(c, port.horizon), gamma=c['gamma'], tau=c['tau'],
         burn_in_length=0, sequence_length=port.horizon, lambda_truncation=1, lambda1=c['lambda1'], lambda2=c['lambda2'],
         lambda_coef=c['lambda_coef'], projection_dim=c['projection_dim'], memory_type='gru',
         memory_hidden_dim=c['memory_hidden_dim'], head_dim=8 if small else 512, critic_layer_norm=False, use_sac=False,
@@ -104,17 +118,37 @@ def build(c, port, small=False):
         states.append(state)
     batch = task_settings(c, port.horizon)['batch_episodes']
     two_hot = lambda values: deterministic_projection(jnp.ones((values.size, 1)), values.reshape(-1, 1))
-    objective = clone(flash.categorical_objective, {'project_distribution': deterministic_projection, 'two_hot': two_hot})
     sampler = flash.base.make_sampler(batch, port.horizon)
-    loss, components, context = objective(fns, debug, sampler, 'all-categorical')
+    if c.get('soft_main_target'):
+        loss, components, context = soft_categorical_objective(fns, debug, sampler)
+    else:  # the original study: unchanged production objective
+        objective = clone(flash.categorical_objective, {'project_distribution': deterministic_projection, 'two_hot': two_hot})
+        loss, components, context = objective(fns, debug, sampler, 'all-categorical')
     update_original = replace_captures(fns.update, {'loss_combined': loss})
+    H = port.horizon
 
-    @jax.jit
-    def update(state, key):
-        a = alpha_at(state.update_step, c)
-        state, metrics = update_original(state._replace(alpha=a, log_alpha=jnp.log(a)), key)
-        a = alpha_at(state.update_step, c)
-        return state._replace(alpha=a, log_alpha=jnp.log(a)), metrics
+    if c.get('autotune_alpha'):
+        import optax
+        adam = optax.adam(c['alpha_lr'])
+        target_entropy = c['target_entropy_fraction'] * float(jnp.log(port.action_dim))
+
+        @jax.jit
+        def update(state, key):
+            # SAC temperature loss alpha*(H(pi) - target) on the batch entropy;
+            # the schedule only provides the initial value (agent_config).
+            state, metrics = update_original(state, key)
+            grad = jnp.exp(state.log_alpha) * (metrics['entropy'] - target_entropy)
+            step, opt = adam.update(grad, state.alpha_optimizer_state)
+            log_alpha = optax.apply_updates(state.log_alpha, step)
+            metrics = {**metrics, 'alpha': jnp.exp(log_alpha), 'target_entropy': jnp.float32(target_entropy)}
+            return state._replace(log_alpha=log_alpha, alpha=jnp.exp(log_alpha), alpha_optimizer_state=opt), metrics
+    else:
+        @jax.jit
+        def update(state, key):
+            a = alpha_at(state.update_step, c, H)
+            state, metrics = update_original(state._replace(alpha=a, log_alpha=jnp.log(a)), key)
+            a = alpha_at(state.update_step, c, H)
+            return state._replace(alpha=a, log_alpha=jnp.log(a)), metrics
 
     fns = fns._replace(update=update)
     _, bfns = create_buffer({k: v.shape[1:] for k, v in states[0].online_buffer.info.items()}, c['online_buffer_size'], 1, [], [])
@@ -122,6 +156,93 @@ def build(c, port, small=False):
     stacked = jax.tree.map(lambda *xs: jnp.stack(xs), *states)
     cls = HostRunner if getattr(port, 'is_host', False) else BenchRunner
     return stacked, cls(c, port, fns, debug, bfns, carry_dim), seeds
+
+
+def soft_categorical_objective(fns, debug, sampler):
+    """popgym_flash_prototypes.categorical_objective('all-categorical') with the
+    deterministic projection, except the MAIN critic target: SAC soft value.
+
+    The next-state mixture (min-twin-mean per action, target-policy weighted)
+    is shifted by r + gamma*(1-d)*(z + alpha*H(pi(.|s'))). Exact in expectation
+    (the critic uses means); per-action shifts -alpha*log pi(a') would need a
+    projection per action (~12 GB/update at 144 actions). Lambda heads keep
+    reward-only scalar Retrace two-hot targets. Actor loss as before."""
+    import jax
+    import jax.numpy as jnp
+    from flax import nnx
+    from lambda_imitation.iqlearn import retrace_targets
+    from popgym_gradient_balance import captures
+    import popgym_flash_prototypes as flash
+    from battleship_sweep import deterministic_projection
+    support, SUPPORT, target_mixture = flash.support, flash.SUPPORT, flash.target_mixture
+    two_hot = lambda values: deterministic_projection(jnp.ones((values.size, 1)), values.reshape(-1, 1))
+    h = captures(captures(fns.update)['loss_combined']); hp = h['params']
+    main = captures(h['loss_critic']); low = captures(h['loss_vtrace_lambda_sequence'])
+    actor = captures(debug.get_entropy)['run_actor']
+    graphs = (main['critic_graph'], h['lambda1_critic_graph'], h['lambda2_critic_graph'])
+    flat = lambda x: x.reshape(-1, *x.shape[2:])
+    def distributions(state, graph, x):
+        return jnp.stack([nnx.merge(getattr(graph, branch), getattr(state, branch)).log_probs(x) for branch in ('q1', 'q2')], -1)
+    def taken_log_probs(state, graph, x, actions):
+        logp = distributions(state, graph, x)
+        indices = jnp.round(actions.reshape(-1)).astype(jnp.int32)
+        return logp[jnp.arange(len(indices)), indices]
+
+    def components(fe, actor_state, critic, l1, l2, fe_target, actor_target, critic_target, l1_target, l2_target, alpha, raw, keys):
+        valid = raw['episode_valid'].T[:-1].astype(jnp.float32)
+        denominator = jnp.maximum(valid.sum(), 1.)
+        mean = lambda v: (v.reshape(valid.shape) * valid).sum() / denominator
+        x, y = debug.calculate_latent(fe, fe_target, raw['observations'], raw['actions'], raw['terminated'],
+                                      jnp.zeros((hp.online_batch_size, h['feature_extractor'].initialize_carry(1).shape[-1])))
+        act, reward, done, behaviour = [raw[k].swapaxes(0, 1) for k in ('actions', 'rewards', 'terminated', 'behaviour_weight')]
+        actor_x = flat(jax.lax.stop_gradient(x[:-1]))
+        probs = jax.nn.softmax(actor(actor_state, actor_x)); logp = jax.nn.log_softmax(actor(actor_state, actor_x))
+        entropy = -jnp.sum(probs * logp, -1)
+        q = captures(main['get_q_both'])['run_critic'](jax.lax.stop_gradient(critic), graphs[0], actor_x).min(-1)
+        v = jnp.sum(probs * q, -1) + alpha * entropy
+        actor_loss = -mean(v)
+        next_logs = distributions(critic_target, graphs[0], flat(y[1:]))
+        next_logits = actor(actor_target, flat(y[1:]))
+        policy = jax.nn.softmax(next_logits)
+        next_entropy = -jnp.sum(policy * jax.nn.log_softmax(next_logits), -1)
+        mixture = target_mixture(next_logs, policy)
+        bonus = alpha * next_entropy
+        shifted = reward[:-1].reshape(-1, 1) + hp.gamma * (1. - done[:-1].reshape(-1, 1)) * (support()[None] + bonus[:, None])
+        label = jax.lax.stop_gradient(deterministic_projection(mixture, shifted))
+        predicted_logs = taken_log_probs(critic, graphs[0], flat(x[:-1]), flat(act[:-1]))
+        critic_loss = mean(-jnp.sum(predicted_logs * label[..., None], -2).mean(-1))
+        metrics = {'q': mean(jnp.sum(probs * q, -1)), 'entropy': mean(entropy), 'v': mean(v),
+            'critic_loss': critic_loss, 'target_q': mean(jnp.sum(label * support(), -1)), 'alpha': alpha,
+            'soft_bonus': mean(bonus), 'episode_mean_length': raw['episode_length'].mean(), 'valid_fraction': valid.mean(),
+            'main_target_clipped_mass': mean(jnp.sum(mixture * ((shifted < SUPPORT[0]) | (shifted > SUPPORT[1])), -1)),
+            'main_target_edge_mass': mean(label[:, 0] + label[:, -1])}
+        losses = [actor_loss, critic_loss]
+        for name, lam, online, target, graph, key in zip(('lambda1', 'lambda2'), (hp.lambda1, hp.lambda2),
+                (l1, l2), (l1_target, l2_target), graphs[1:], keys[3:]):
+            Tp, B = x.shape[:2]
+            value = low['get_v'](actor_target, target, graph, jnp.float32(0), flat(y), key, False, False).reshape(Tp, B)
+            ratios = low['get_importance_ratios'](actor_target, flat(y), flat(act), flat(behaviour)).reshape(Tp, B)
+            taken = low['get_q'](target, graph, flat(y), flat(act)).reshape(Tp, B)
+            returns = jax.lax.stop_gradient(retrace_targets(taken, value, reward, done, ratios, hp.gamma, lam, hp.c_bar))[:-1]
+            label_l = jax.lax.stop_gradient(two_hot(returns.reshape(-1)))
+            predicted = taken_log_probs(online, graph, flat(x[:-1]), flat(act[:-1]))
+            loss = mean(-jnp.sum(predicted * label_l[..., None], -2).mean(-1))
+            metrics[name + '_target_clipped_fraction'] = mean((returns < SUPPORT[0]) | (returns > SUPPORT[1]))
+            metrics[name + '_target_edge_mass'] = mean(label_l[:, 0] + label_l[:, -1])
+            losses.append(loss); metrics[name + '_loss'] = loss; metrics[name + '_target'] = mean(returns)
+        ld1 = low['get_q'](jax.lax.stop_gradient(l1), graphs[1], flat(x[:-1]), flat(act[:-1]))
+        ld2 = low['get_q'](jax.lax.stop_gradient(l2), graphs[2], flat(x[:-1]), flat(act[:-1]))
+        discrepancy = mean((ld1 - ld2) ** 2)
+        losses.append(hp.lambda_coef * discrepancy); metrics['ld_loss'] = discrepancy
+        return sum(losses), metrics, jnp.stack(losses)
+
+    def combined(fe, actor_state, critic, l1, l2, sf1, sf2, fe_target, actor_target, critic_target, l1_target, l2_target,
+                 sf1_target, sf2_target, alpha, buffer, key):
+        keys = jax.random.split(key, 5); sample, _ = sampler(buffer, keys[0])
+        loss, metrics, _ = components(fe, actor_state, critic, l1, l2, fe_target, actor_target, critic_target,
+                                      l1_target, l2_target, alpha, sample.this_info, keys)
+        return loss, metrics
+    return combined, components, h
 
 
 # ---------------------------------------------------------------- exploration
@@ -679,7 +800,8 @@ def train_task(output, arm, env_id, wandb_cfg, small=False, deadline=None, uploa
     if checkpoint.exists():
         with checkpoint.open('rb') as f:
             saved = cloudpickle.load(f)
-        if saved['config'] != c or saved['meta'] != meta:
+        # resolve_config fills options added later with their (original-study) defaults
+        if resolve_config({k: v for k, v in saved['config'].items() if k in DEFAULTS}) != c or saved['meta'] != meta:
             raise ValueError('Checkpoint configuration differs; use a new output directory')
         if saved['source_manifest'] != manifest:
             # Resuming with changed sources is recorded, not silently hidden.
