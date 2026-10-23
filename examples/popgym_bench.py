@@ -594,11 +594,26 @@ def wandb_safe(fn, folder):
         return None
 
 
-def train_task(output, arm, env_id, wandb_cfg, small=False):
+EXIT_YIELDED, EXIT_PAUSED = 3, 4
+
+
+class Yield(Exception):
+    """Another attempt owns (or finished) this task; leave without uploading."""
+
+
+def train_task(output, arm, env_id, wandb_cfg, small=False, deadline=None, upload_every=200_000, stop_margin=1200.):
+    """One task (all seeds). Returns EXIT_YIELDED/EXIT_PAUSED/0.
+
+    deadline (epoch seconds) or SIGTERM: checkpoint, upload, mark paused, exit.
+    With W&B, the worker claims the task (popgym_bench_coord) and resumes
+    from the newest checkpoint, local or W&B artifact."""
+    import signal
+    import socket
     import cloudpickle
     import jax
     import jax.numpy as jnp
     import numpy as np
+    import popgym_bench_coord as coord
     from popgym_bench_envs import make_port, backend_for
     values = json.loads((Path(output) / 'study.json').read_text())['config'] if (Path(output) / 'study.json').exists() else {}
     c = resolve_config({**values, **ARMS[arm]})
@@ -610,6 +625,56 @@ def train_task(output, arm, env_id, wandb_cfg, small=False):
                 action_dim=port.action_dim, obs_shape=list(port.obs_shape), **settings)
     manifest = source_manifest()
     checkpoint = folder / 'latest.pkl'
+    stop = dict(requested=False)
+    signal.signal(signal.SIGTERM, lambda *_: stop.update(requested=True))
+    host = dict(host=socket.gethostname(), slurm_job=os.environ.get('SLURM_JOB_ID'))
+
+    # Claim first (before minutes of compilation/prefill), so others see us early.
+    run_id = hashlib.sha256(f'{STUDY}/{Path(output).resolve()}/{arm}/{env_id}'.encode()).hexdigest()[:16]
+    run, api = None, None
+    if wandb_cfg.get('project'):
+        import wandb
+        api = wandb.Api(timeout=60)
+        run = wandb_safe(lambda: wandb.init(project=wandb_cfg['project'], entity=wandb_cfg.get('entity'), id=run_id,
+            resume='allow', group=env_id, job_type=arm, name=f'{env_id.removeprefix("popgym-").removesuffix("-v0")}-{arm}',
+            tags=[arm, meta['backend'], env_id], config={**c, **meta, **host, 'seeds': list(range(c['seed_base'], c['seed_base'] + c['n_seeds']))},
+            dir=str(folder), settings=wandb.Settings(console='off')), folder)
+        if run is not None:
+            run.define_metric('steps')
+            run.define_metric('*', step_metric='steps')
+            # A resumed run id may still say 'yielded'/'paused' from before.
+            wandb_safe(lambda: run.summary.update({'run_state': 'starting'}), folder)
+    log = (lambda payload: wandb_safe(lambda: run.log(payload), folder)) if run is not None else (lambda payload: None)
+    entity, project = wandb_cfg.get('entity'), wandb_cfg.get('project')
+
+    def check_claim():
+        if run is None:
+            return
+        tasks = wandb_safe(lambda: coord.board(coord.fetch_records(api, entity, project)), folder)
+        if tasks is None:
+            return  # W&B unreachable: keep training rather than abandon work
+        task = tasks.get((arm, env_id))
+        if task and task['complete']:
+            raise Yield('task already complete')
+        holder = coord.owner(task)
+        if holder is not None and holder != run.id:
+            raise Yield(f'task owned by attempt {holder}')
+
+    try:
+        check_claim()
+        # Newest checkpoint wins: local file or W&B artifact (another host/job).
+        local_steps = None
+        if checkpoint.exists():
+            with checkpoint.open('rb') as f:
+                local_steps = cloudpickle.load(f)['steps']
+        if api is not None:
+            artifact, remote_steps = wandb_safe(lambda: coord.latest_checkpoint(api, entity, project, arm, env_id), folder) or (None, 0)
+            if artifact is not None and (local_steps is None or remote_steps > local_steps):
+                artifact.download(root=str(folder / 'download'))
+                os.replace(folder / 'download' / 'latest.pkl', checkpoint)
+                print(f'Resuming {arm}/{env_id} from W&B checkpoint at {remote_steps} steps', flush=True)
+    except Yield as reason:
+        return yield_task(run, api, folder, str(reason))
     saved = None
     if checkpoint.exists():
         with checkpoint.open('rb') as f:
@@ -621,7 +686,7 @@ def train_task(output, arm, env_id, wandb_cfg, small=False):
             with (folder / 'resume-source-changes.jsonl').open('a') as f:
                 f.write(json.dumps(dict(time=time.time(), old=saved['source_manifest'], new=manifest)) + '\n')
     atomic_json(folder / 'config.json', dict(config=c, meta=meta, source_manifest=manifest, versions=runtime_versions(),
-                                             devices=[str(d) for d in jax.devices()]))
+                                             devices=[str(d) for d in jax.devices()], **host))
     atomic_json(folder / 'status.json', dict(state='building', steps=saved['steps'] if saved else 0, target_steps=c['max_steps'], time=time.time()))
     states, runner, seeds = build(c, port, small)
     if saved:
@@ -635,22 +700,19 @@ def train_task(output, arm, env_id, wandb_cfg, small=False):
         runner.check_rollout(rollout, at_boundary=True)
         params_finite(states)
         step, history, interactions = 0, [], [int(x) for x in np.asarray(counts)]
+    uploaded = dict(steps=saved['steps'] if saved else -1)
 
     def checkpoint_now():
         save_checkpoint(checkpoint, dict(state=jax.device_get(states), rollout=host_rollout(rollout), config=c, meta=meta,
             steps=step, history=history, interactions=interactions, source_manifest=manifest, wandb_id=run_id))
-    run_id = hashlib.sha256(f'{STUDY}/{Path(output).resolve()}/{arm}/{env_id}'.encode()).hexdigest()[:16]
-    run = None
-    if wandb_cfg.get('project'):
-        import wandb
-        run = wandb_safe(lambda: wandb.init(project=wandb_cfg['project'], entity=wandb_cfg.get('entity'), id=run_id,
-            resume='allow', group=env_id, job_type=arm, name=f'{env_id.removeprefix("popgym-").removesuffix("-v0")}-{arm}',
-            tags=[arm, meta['backend'], env_id], config={**c, **meta, 'seeds': seeds}, dir=str(folder),
-            settings=wandb.Settings(console='off')), folder)
-        if run is not None:
-            run.define_metric('steps')
-            run.define_metric('*', step_metric='steps')
-    log = (lambda payload: wandb_safe(lambda: run.log(payload), folder)) if run is not None else (lambda payload: None)
+
+    def upload():
+        if run is None or uploaded['steps'] == step:
+            return
+        done = wandb_safe(lambda: coord.upload_checkpoint(run, api, entity, project, checkpoint, arm, env_id, step), folder)
+        if done is not None:
+            uploaded['steps'] = done
+            wandb_safe(lambda: run.summary.update({'checkpoint_steps': done}), folder)
 
     def evaluate(final):
         n = c['final_episodes'] if final else c['eval_episodes']
@@ -679,8 +741,18 @@ def train_task(output, arm, env_id, wandb_cfg, small=False):
             payload[f'train/{k}/mean'] = s['mean']
         log(payload)
 
-    started, start_step = time.monotonic(), step
+    def pause(reason):
+        checkpoint_now()
+        upload()
+        atomic_json(folder / 'status.json', dict(state='paused', steps=step, target_steps=c['max_steps'], time=time.time(), reason=reason))
+        if run is not None:
+            wandb_safe(lambda: run.summary.update({'run_state': 'paused', 'steps': step, 'pause_reason': reason}), folder)
+        print(f'Paused {arm}/{env_id} at {step} steps ({reason})', flush=True)
+        return EXIT_PAUSED
+
+    started, start_step, chunk_seconds = time.monotonic(), step, 0.
     try:
+        check_claim()  # definitive: everyone started at the same time is visible by now
         if not history:
             history.append(evaluate(False))
             log_eval(history[-1])
@@ -688,9 +760,15 @@ def train_task(output, arm, env_id, wandb_cfg, small=False):
             checkpoint_now()
         next_eval = (step // c['eval_every'] + 1) * c['eval_every']
         while step < c['max_steps']:
+            if stop['requested']:
+                return pause('SIGTERM')
+            if deadline is not None and time.time() + stop_margin + 3 * chunk_seconds > deadline:
+                return pause('time limit')
             n = min(c['chunk_steps'], next_eval - step)
+            tick = time.monotonic()
             states, rollout, metrics = runner.train(states, rollout, n)
             metrics = jax.device_get(metrics)
+            chunk_seconds = max(chunk_seconds, time.monotonic() - tick) if chunk_seconds else time.monotonic() - tick
             finite(metrics)
             runner.check_rollout(rollout)
             step += n
@@ -708,6 +786,9 @@ def train_task(output, arm, env_id, wandb_cfg, small=False):
             atomic_json(folder / 'history.json', history)
             if step % c['checkpoint_every'] == 0 or step == c['max_steps']:
                 checkpoint_now()
+                if upload_every and step % upload_every == 0 and step < c['max_steps']:
+                    upload()
+            check_claim()
         final = evaluate(True)
         history.append(final)
         atomic_json(folder / 'history.json', history)
@@ -717,6 +798,9 @@ def train_task(output, arm, env_id, wandb_cfg, small=False):
                                                    'final_greedy_return': final['eval']['greedy']['return_mean']['mean'],
                                                    'run_state': 'complete'}), folder)
         atomic_json(folder / 'status.json', dict(state='complete', steps=step, target_steps=c['max_steps'], time=time.time()))
+        return 0
+    except Yield as reason:
+        return yield_task(run, api, folder, str(reason))
     except BaseException:
         error = traceback.format_exc()[-4000:]
         atomic_json(folder / 'status.json', dict(state='failed', steps=step, target_steps=c['max_steps'], time=time.time(), error=error))
@@ -728,6 +812,17 @@ def train_task(output, arm, env_id, wandb_cfg, small=False):
     finally:
         if run is not None:
             wandb_safe(lambda: run.finish(), folder)
+
+
+def yield_task(run, api, folder, reason):
+    """Leave a task to its owner. The run is marked, not deleted: W&B never
+    re-accepts a deleted run id, and ids are deterministic per output path."""
+    atomic_json(folder / 'status.json', dict(state='yielded', time=time.time(), reason=reason))
+    print(f'Yielding: {reason}', flush=True)
+    if run is not None:
+        wandb_safe(lambda: run.summary.update({'run_state': 'yielded', 'yield_reason': reason}), folder)
+        wandb_safe(lambda: run.finish(), folder)
+    return EXIT_YIELDED
 
 
 # --------------------------------------------------------------- supervisor
@@ -804,50 +899,133 @@ def read_status(folder):
         return {}
 
 
+class Adopted:
+    """A worker of this output started by an earlier supervisor (still alive)."""
+
+    def __init__(self, pid):
+        self.pid, self.returncode = pid, None
+
+    def poll(self):
+        try:
+            os.kill(self.pid, 0)
+            return None
+        except ProcessLookupError:
+            self.returncode = -1
+            return self.returncode
+
+    def send_signal(self, sig):
+        try:
+            os.kill(self.pid, sig)
+        except ProcessLookupError:
+            pass
+
+
+def find_workers(output):
+    """Live `popgym_bench.py worker --output OUTPUT` processes, via /proc."""
+    found = {}
+    for proc in Path('/proc').glob('[0-9]*'):
+        try:
+            argv = (proc / 'cmdline').read_bytes().split(b'\0')
+        except OSError:
+            continue
+        argv = [a.decode(errors='replace') for a in argv if a]
+        if 'worker' not in argv or not any(a.endswith('popgym_bench.py') for a in argv):
+            continue
+        get = lambda flag: argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else None
+        if get('--output') and Path(get('--output')).resolve() == Path(output).resolve() and int(proc.name) != os.getpid():
+            gpu = None
+            try:
+                env = (proc / 'environ').read_bytes().split(b'\0')
+                gpu = next((e.split(b'=', 1)[1].decode() for e in env if e.startswith(b'CUDA_VISIBLE_DEVICES=')), None)
+            except OSError:
+                pass
+            found[(get('--arm'), get('--env'))] = (Adopted(int(proc.name)), gpu)
+    return found
+
+
+def study_from_wandb(entity, project):
+    """The study config/task list recorded by the first supervisor in W&B."""
+    import wandb
+    runs = [r for r in wandb.Api(timeout=60).runs(f'{entity}/{project}') if r.job_type == 'supervisor' and r.config.get('study')]
+    if not runs:
+        raise RuntimeError(f'No supervisor run with a study config in {entity}/{project}; start the study once with a config first')
+    first = min(runs, key=lambda r: r.created_at)
+    return dict(first.config['study']), list(first.config['envs'])
+
+
 def supervise(args):
+    import signal
     # Workers get the original environment; the supervisor itself must never
     # initialize (and preallocate) a GPU while reading task metadata.
     worker_env = dict(os.environ)
     os.environ['JAX_PLATFORMS'] = 'cpu'
+    import popgym_bench_coord as coord
     from popgym_bench_envs import all_env_ids
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     study = output / 'study.json'
-    config = resolve_config(json.loads(args.config.read_text()) if args.config else {})
+    if args.study_from_wandb and not study.exists():
+        config, envs = study_from_wandb(args.wandb_entity, args.wandb_project)
+        config = resolve_config(config)
+        envs = args.envs or envs
+    else:
+        config = resolve_config(json.loads(args.config.read_text()) if args.config else {})
+        envs = args.envs or all_env_ids()
     record = dict(study=STUDY, config=config, arms=ARMS, wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
-                  envs=args.envs or all_env_ids(), created=time.time())
+                  envs=envs, created=time.time())
     if study.exists():
         old = json.loads(study.read_text())
-        if old['config'] != config or old['envs'] != record['envs']:
+        if resolve_config(old['config']) != config and not args.study_from_wandb or (args.envs and old['envs'] != record['envs']):
             raise ValueError(f'{study} has a different configuration/task list; use a new --output')
         record = old
     else:
         atomic_json(study, record)
     order = task_order(record['envs'])
+    if args.order == 'cheap-first':
+        order = order[::-1]
     gpus = args.gpus or detect_gpus()
     if not gpus:
         raise RuntimeError('No GPUs detected; pass --gpus')
     slots = [g for g in gpus for _ in range(args.workers_per_gpu)]
-    print(f'{len(order)} tasks x {len(ARMS)} arms on GPUs {gpus} ({args.workers_per_gpu} workers each)', flush=True)
+    deadline = time.time() + args.time_limit * 3600 if args.time_limit else None
+    print(f'{len(order)} tasks x {len(ARMS)} arms on GPUs {gpus} ({args.workers_per_gpu} workers each)'
+          + (f', at most {args.max_tasks} tasks' if args.max_tasks else '')
+          + (f', stop by {time.strftime("%Y-%m-%d %H:%M", time.localtime(deadline))}' if deadline else ''), flush=True)
     if args.dashboard_port:
         start_dashboard(output, args.dashboard_host, args.dashboard_port)
+    running = find_workers(output) if args.adopt else {}
+    for (arm, env_id), (_, gpu) in running.items():
+        print(f'[{time.strftime("%H:%M:%S")}] adopted running {arm}/{env_id} on GPU {gpu}', flush=True)
     proof = output / 'validation.json'
     current = source_manifest()
     if not args.skip_validation and not (proof.exists() and json.loads(proof.read_text()).get('source_manifest') == current):
-        print(f'Validation gate on GPU {gpus[0]}: {", ".join(VALIDATION_TASKS)}', flush=True)
+        gate_gpu = next((g for g in gpus if g not in [gpu for _, gpu in running.values()]), gpus[0])
+        print(f'Validation gate on GPU {gate_gpu}: {", ".join(VALIDATION_TASKS)}', flush=True)
         cmd = [sys.executable, str(Path(__file__).resolve()), 'validate', '--output', str(output)]
-        env = {**worker_env, 'CUDA_VISIBLE_DEVICES': gpus[0], 'XLA_PYTHON_CLIENT_PREALLOCATE': 'false'}
+        env = {**worker_env, 'CUDA_VISIBLE_DEVICES': gate_gpu, 'XLA_PYTHON_CLIENT_PREALLOCATE': 'false'}
         with open(output / 'validation.log', 'a') as log:
             code = subprocess.call(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, cwd=str(HERE.parent))
         if code:
             raise SystemExit(f'Validation gate FAILED (see {output / "validation.log"}); nothing launched')
         print('Validation passed.', flush=True)
-    supervisor_run = start_supervisor_run(args, output, record)
-    published = 0.
-    running, attempts = {}, {}
+    supervisor_run = start_supervisor_run(args, output, record, len(slots))
+    api = None
+    if args.wandb_project:
+        import wandb
+        api = wandb.Api(timeout=60)
+    published, board_at, tasks_board = 0., 0., {}
+    attempts, finished, launched = {}, set(), 0
+    stopping = dict(flag=False)
+
+    def on_term(*_):
+        if not stopping['flag']:
+            print(f'[{time.strftime("%H:%M:%S")}] SIGTERM: asking workers to checkpoint and pause', flush=True)
+        stopping['flag'] = True
+        for proc, _ in running.values():
+            proc.send_signal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, on_term)
     logs = output / 'logs'
     logs.mkdir(exist_ok=True)
-    stop = False
     while True:
         for key, (proc, slot) in list(running.items()):
             if proc.poll() is not None:
@@ -855,14 +1033,27 @@ def supervise(args):
                 arm, env_id = key
                 state = read_status(task_folder(output, arm, env_id)).get('state')
                 print(f'[{time.strftime("%H:%M:%S")}] {arm}/{env_id} exited {proc.returncode} ({state})', flush=True)
+                if proc.returncode == EXIT_YIELDED or state == 'yielded':
+                    launched -= 1  # did not use up one of this job's task slots
+                    finished.add(key)
+                elif proc.returncode == EXIT_PAUSED or state in ('paused', 'complete'):
+                    finished.add(key)
+        if api is not None and time.time() - board_at > 60:
+            board = wandb_safe(lambda: coord.board(coord.fetch_records(api, args.wandb_entity, args.wandb_project)), output)
+            if board is not None:
+                tasks_board, board_at = board, time.time()
+        local_ids = {hashlib.sha256(f'{STUDY}/{output}/{arm}/{env_id}'.encode()).hexdigest()[:16] for arm, env_id in running}
+
         def pending(arm):
             result = []
             for env_id in order:
                 key = (arm, env_id)
-                if key in running:
+                if key in running or key in finished:
                     continue
-                state = read_status(task_folder(output, arm, env_id)).get('state')
-                if state == 'complete':
+                if read_status(task_folder(output, arm, env_id)).get('state') == 'complete':
+                    continue
+                # Done or claimed on another host/job (W&B board, refreshed every minute).
+                if not coord.available(tasks_board, key, local_ids):
                     continue
                 # One automatic resume from the last checkpoint after a crash
                 # (e.g. transient I/O); repeated failures stay failed.
@@ -873,6 +1064,15 @@ def supervise(args):
         primary = pending('primary')
         primary_busy = primary or any(k[0] == 'primary' for k in running)
         queue = primary if primary_busy else pending('control') if not args.skip_control else []
+        if args.max_tasks and queue:
+            # Nodes started together would all pick the same cheapest tasks and
+            # then yield to each other; spread them over the head of the queue.
+            import random
+            head = queue[:3 * len(slots)]
+            random.Random(f'{socket_name()}-{os.environ.get("SLURM_JOB_ID")}-{os.getpid()}').shuffle(head)
+            queue = head + queue[3 * len(slots):]
+        if stopping['flag'] or (args.max_tasks and launched >= args.max_tasks) or (deadline and time.time() > deadline - min(3600, args.time_limit * 900)):
+            queue = []  # no new tasks: stopping, quota used, or too little time left (1 h, or 1/4 of short limits)
         atomic_json(output / 'scheduler.json', dict(time=time.time(), gpus=gpus, slots=len(slots),
             phase='primary' if primary_busy else 'control', queued=[list(k) for k in queue],
             running=[dict(arm=k[0], env_id=k[1], gpu=slot) for k, (_, slot) in running.items()],
@@ -883,26 +1083,30 @@ def supervise(args):
                                                               'heartbeat': published}), output)
         if not queue and not running:
             break
-        busy = [slot for _, slot in running.values()]
-        free = [g for g in slots]
-        for g in busy:
-            free.remove(g)
+        free = list(slots)
+        for _, slot in running.values():
+            if slot in free:
+                free.remove(slot)
         for key in queue:
-            if not free or stop:
+            if not free or (args.max_tasks and launched >= args.max_tasks):
                 break
             gpu = free.pop(0)
             arm, env_id = key
             attempts[key] = attempts.get(key, 0) + 1
+            launched += 1
             log = (logs / f'{arm}-{env_id}.log').open('a')
             env = {**worker_env, 'CUDA_VISIBLE_DEVICES': gpu, 'XLA_PYTHON_CLIENT_PREALLOCATE': 'false',
                    'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'PYTHONDONTWRITEBYTECODE': '1'}
-            cmd = [sys.executable, str(Path(__file__).resolve()), 'worker', '--output', str(output), '--arm', arm, '--env', env_id]
+            cmd = [sys.executable, str(Path(__file__).resolve()), 'worker', '--output', str(output), '--arm', arm, '--env', env_id,
+                   '--upload-every', str(args.upload_every), '--stop-margin', str(args.stop_margin)]
+            if deadline:
+                cmd += ['--deadline', str(deadline)]
             if args.wandb_project:
                 cmd += ['--wandb-project', args.wandb_project] + (['--wandb-entity', args.wandb_entity] if args.wandb_entity else [])
             print(f'[{time.strftime("%H:%M:%S")}] start {arm}/{env_id} on GPU {gpu} (attempt {attempts[key]})', flush=True)
             running[key] = (subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, cwd=str(HERE.parent)), gpu)
         time.sleep(args.poll_seconds)
-    print('All tasks finished.', flush=True)
+    print('All tasks finished.' if not (args.max_tasks or deadline or stopping['flag']) else 'Nothing left for this job; exiting.', flush=True)
     if supervisor_run is not None:
         wandb_safe(lambda: supervisor_run.summary.update({'scheduler': (output / 'scheduler.json').read_text(), 'all_finished': True}), output)
         wandb_safe(lambda: supervisor_run.finish(), output)
@@ -912,7 +1116,38 @@ def supervise(args):
             time.sleep(3600)
 
 
-def start_supervisor_run(args, output, record):
+def upload_checkpoints(args):
+    """Push every unfinished task's local checkpoint to W&B (e.g. before a host
+    goes away), so any other host can resume it. Running workers are untouched."""
+    import cloudpickle
+    import wandb
+    import popgym_bench_coord as coord
+    output = Path(args.output).resolve()
+    api = wandb.Api(timeout=60)
+    run = wandb.init(project=args.wandb_project, entity=args.wandb_entity, job_type='checkpoint-upload',
+                     name=f'checkpoint-upload-{socket_name()}', dir=str(output), settings=wandb.Settings(console='off'))
+    for folder in sorted(output.glob('*/popgym-*')):
+        arm, env_id = folder.parent.name, folder.name
+        path = folder / 'latest.pkl'
+        if arm not in ARMS or not path.exists() or read_status(folder).get('state') == 'complete':
+            continue
+        with path.open('rb') as f:
+            steps = cloudpickle.load(f)['steps']
+        _, remote = coord.latest_checkpoint(api, args.wandb_entity, args.wandb_project, arm, env_id)
+        if remote >= steps:
+            print(f'{arm}/{env_id}: W&B already has {remote} >= {steps} steps', flush=True)
+            continue
+        coord.upload_checkpoint(run, api, args.wandb_entity, args.wandb_project, path, arm, env_id, steps)
+        print(f'{arm}/{env_id}: uploaded checkpoint at {steps} steps', flush=True)
+    run.finish()
+
+
+def socket_name():
+    import socket
+    return socket.gethostname()
+
+
+def start_supervisor_run(args, output, record, slots):
     """Tiny W&B run carrying study config, launch gate and scheduler state,
     so a dashboard on another machine can show them (popgym_bench_wandb.py)."""
     if not args.wandb_project:
@@ -920,10 +1155,12 @@ def start_supervisor_run(args, output, record):
     import wandb
     proof = output / 'validation.json'
     validation = json.loads(proof.read_text()) if proof.exists() else None
+    job = os.environ.get('SLURM_JOB_ID')
     run = wandb_safe(lambda: wandb.init(project=args.wandb_project, entity=args.wandb_entity, job_type='supervisor',
-        group='supervisor', name='supervisor', resume='allow', dir=str(output),
+        group='supervisor', name='supervisor' if not job else f'node-{socket_name()}-{job}', resume='allow', dir=str(output),
         id=hashlib.sha256(f'{STUDY}/{output}/supervisor'.encode()).hexdigest()[:16],
-        config=dict(study=record['config'], envs=record['envs']), settings=wandb.Settings(console='off')), output)
+        config=dict(study=record['config'], envs=record['envs'], host=socket_name(), slurm_job=job, slots=slots),
+        settings=wandb.Settings(console='off')), output)
     if run is not None and validation is not None:
         wandb_safe(lambda: run.summary.update({'validation': json.dumps({k: v for k, v in validation.items() if k != 'source_manifest'})}), output)
     return run
@@ -936,10 +1173,8 @@ def start_dashboard(output, host, port):
     print(f'Dashboard: http://{host}:{port}/  (all interfaces: open http://<b200-vpn-address>:{port}/)', flush=True)
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = p.add_subparsers(dest='command')
-    p.add_argument('--output', type=Path, default=Path(os.environ.get('POPGYM_BENCH_OUTPUT', 'runs/popgym-bench')))
+def add_supervisor_args(p, node=False):
+    p.add_argument('--output', type=Path, default=Path(os.environ.get('POPGYM_BENCH_OUTPUT', default_node_output() if node else 'runs/popgym-bench')))
     p.add_argument('--config', type=Path, help='JSON overrides of DEFAULTS (new study only)')
     p.add_argument('--envs', nargs='+', help='subset of task IDs (default: all 42)')
     p.add_argument('--gpus', nargs='+')
@@ -952,31 +1187,92 @@ def main():
     p.add_argument('--wandb-entity', default=os.environ.get('WANDB_ENTITY', 'fhstp-data-intelligence-research-group'))
     p.add_argument('--no-wandb', action='store_true')
     p.add_argument('--dashboard-host', default='0.0.0.0', help='0.0.0.0 = reachable via the host VPN address')
-    p.add_argument('--dashboard-port', type=int, default=8765, help='0 disables the dashboard')
-    p.add_argument('--exit-when-done', action='store_true')
+    p.add_argument('--dashboard-port', type=int, default=0 if node else 8765, help='0 disables the dashboard')
+    p.add_argument('--exit-when-done', action='store_true', default=node)
+    p.add_argument('--max-tasks', type=int, default=None, help='launch at most N tasks in this invocation (node default: one per GPU)')
+    p.add_argument('--time-limit', type=float, default=None, help='hours; workers checkpoint, upload and pause before it runs out')
+    p.add_argument('--order', choices=('lpt', 'cheap-first'), default='cheap-first' if node else 'lpt')
+    p.add_argument('--no-adopt', dest='adopt', action='store_false', help='do not adopt live workers of this --output')
+    p.add_argument('--study-from-wandb', action='store_true', default=node, help='take config/task list from the W&B study')
+    p.add_argument('--upload-every', type=int, default=200_000, help='steps between W&B checkpoint uploads (0: only on pause)')
+    p.add_argument('--stop-margin', type=float, default=1200., help='seconds before the time limit to checkpoint/upload/pause')
+
+
+def slurm_hours_left():
+    """Remaining wall time of this SLURM job in hours (None outside SLURM)."""
+    job = os.environ.get('SLURM_JOB_ID')
+    if not job:
+        return None
+    try:
+        left = subprocess.check_output(['squeue', '-h', '-j', job, '-o', '%L'], text=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return parse_slurm_time(left)
+
+
+def parse_slurm_time(text):
+    """'1-02:03:04', '02:03:04', '03:04' -> hours; 'UNLIMITED'/'' -> None."""
+    if not text or not text[0].isdigit():
+        return None
+    days, _, rest = text.rpartition('-')
+    parts = [int(x) for x in rest.split(':')]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    return int(days or 0) * 24 + parts[0] + parts[1] / 60 + parts[2] / 3600
+
+
+def default_node_output():
+    import socket
+    base = os.environ.get('TMPDIR') or '/tmp'
+    return str(Path(base) / f'popgym-bench-{socket.gethostname()}-{os.environ.get("SLURM_JOB_ID", os.getpid())}')
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest='command')
+    add_supervisor_args(p)
+    n = sub.add_parser('node', help='cluster node: claim up to one task per GPU via W&B, train, exit')
+    add_supervisor_args(n, node=True)
     w = sub.add_parser('worker')
     w.add_argument('--output', type=Path, required=True)
     w.add_argument('--arm', choices=tuple(ARMS), required=True)
     w.add_argument('--env', required=True)
     w.add_argument('--wandb-project')
     w.add_argument('--wandb-entity')
+    w.add_argument('--deadline', type=float)
+    w.add_argument('--upload-every', type=int, default=200_000)
+    w.add_argument('--stop-margin', type=float, default=1200.)
     v = sub.add_parser('validate')
     v.add_argument('--output', type=Path, required=True)
+    u = sub.add_parser('upload-checkpoints', help='push unfinished local checkpoints to W&B')
+    u.add_argument('--output', type=Path, required=True)
+    u.add_argument('--wandb-project', default=os.environ.get('WANDB_PROJECT', STUDY))
+    u.add_argument('--wandb-entity', default=os.environ.get('WANDB_ENTITY', 'fhstp-data-intelligence-research-group'))
     d = sub.add_parser('dashboard')
     d.add_argument('--output', type=Path, required=True)
     d.add_argument('--host', default='0.0.0.0')
     d.add_argument('--port', type=int, default=8765)
     args = p.parse_args()
     if args.command == 'worker':
-        train_task(args.output, args.arm, args.env, dict(project=args.wandb_project, entity=args.wandb_entity))
+        sys.exit(train_task(args.output, args.arm, args.env, dict(project=args.wandb_project, entity=args.wandb_entity),
+                            deadline=args.deadline, upload_every=args.upload_every, stop_margin=args.stop_margin))
     elif args.command == 'validate':
         validate(args.output, VALIDATION_TASKS)
+    elif args.command == 'upload-checkpoints':
+        upload_checkpoints(args)
     elif args.command == 'dashboard':
         import popgym_bench_dashboard as dashboard
         dashboard.serve(args.output, args.host, args.port)
     else:
         if args.no_wandb:
             args.wandb_project = None
+        if args.command == 'node':
+            if not args.wandb_project:
+                raise SystemExit('node mode coordinates through W&B')
+            if args.time_limit is None:
+                args.time_limit = slurm_hours_left()
+            if args.max_tasks is None:
+                args.max_tasks = len(args.gpus or detect_gpus())
         supervise(args)
 
 

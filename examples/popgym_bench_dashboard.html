@@ -190,11 +190,11 @@ function renderHeader() {
   const eta = rate ? remaining / slots / 3600 : null;
   const tiles = [
     ['Primary complete', `${count('primary', 'complete')}/${n}`, `${count('primary', 'running') + count('primary', 'prefill') + count('primary', 'building')} running · ${count('primary', 'failed')} failed`],
-    ['Control (β=0) complete', `${count('control', 'complete')}/${n}`, sched ? `phase: ${sched.phase} · ${sched.slots} worker slots` : 'starts after all primary tasks'],
+    ['Control (β=0) complete', `${count('control', 'complete')}/${n}`, sched ? `phase: ${sched.phase} · ${sched.slots} GPUs${sched.hosts > 1 ? ` on ${sched.hosts} hosts` : ''}` : 'starts after all primary tasks'],
     ['Median normalized score', median == null ? '–' : median.toFixed(2), `${scored.length} tasks with a PPO reference · ${metricName()}`],
     ['Tasks ≥ best PPO', scored.length ? `${beat}/${scored.length}` : '–', 'normalized score ≥ 1'],
     ['Est. time remaining', eta == null ? '–' : eta < 1 ? `${Math.round(eta * 60)} min` : `${eta.toFixed(1)} h`, rate ? `~${rate.toFixed(1)} steps/s per task · ${slots} parallel` : 'waiting for throughput'],
-    ['Launch gate', val ? (val.passed ? 'passed' : 'FAILED') : '–', val ? `${esc(val.device_kind || '')}: repeat · lane isolation · resume` : 'not reported'],
+    ['Launch gate', val ? (val.passed ? 'passed' : 'FAILED') : '–', val ? `${esc(val.device_kind || '')}${val.hosts > 1 ? ` · ${val.hosts} hosts` : ''}: repeat · lane isolation · resume` : 'not reported'],
   ];
   $('#tiles').innerHTML = tiles.map(([k, v, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('');
   $('#updated').textContent = 'Updated ' + new Date(DATA.now * 1000).toLocaleTimeString() + ' · refreshes every 30 s';
@@ -293,6 +293,7 @@ function status(a) {
   if (a.state === 'failed') return `<span class="failed" title="${esc(a.error || '')}">✕ failed</span>`;
   if (a.state === 'complete') return '<span class="up">✓ done</span>';
   if (a.state === 'pending') return '<span class="sd">queued</span>';
+  if (a.state === 'paused') return `<span class="sd">⏸ paused at ${(a.steps / 1e3).toFixed(0)}k · resumes on next job</span>`;
   if (a.state === 'stopped') return `<span class="sd">stopped at ${(a.steps / 1e3).toFixed(0)}k</span>`;
   const p = Math.min(1, (a.steps || 0) / (a.target || 1));
   return `<span class="state"><span class="bar"><i style="width:${(p * 100).toFixed(1)}%"></i></span>${(a.steps / 1e3).toFixed(0)}k${a.steps_per_second ? ` · ${a.steps_per_second.toFixed(1)}/s` : ''}${a.state !== 'running' ? ' · ' + a.state : ''}</span>`;

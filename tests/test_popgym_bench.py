@@ -183,3 +183,81 @@ def test_wandb_exporter_rows(new_format):
     assert [r['mean'] for r in resumed['curve']] == [.1, 0.]  # re-logged step: latest row wins
     assert exporter.arm_from_rows(rows[:2], config, dict(steps=40), 'finished', None, None)['state'] == 'stopped'
     assert exporter.arm_from_rows(rows[:2], config, dict(steps=40), 'crashed', None, None)['state'] == 'failed'
+
+
+class FakeRun:
+    def __init__(self, id, arm='primary', env='popgym-RepeatPreviousEasy-v0', state='running', created=0., heartbeat=None,
+                 summary=None, job_type=None, config=None):
+        import time as _t
+        self.id, self.state, self.created_at = id, state, created
+        self.heartbeat_at = _t.time() if heartbeat is None else heartbeat
+        self.job_type = job_type or arm
+        self.config = config if config is not None else dict(arm=arm, env_id=env, seeds=[42, 43], max_steps=40)
+        self.summary = summary or {}
+        self.url = f'https://wandb.ai/x/{id}'
+
+
+def test_claim_board_owner_and_availability():
+    import time as _t
+    import popgym_bench_coord as coord
+    key = ('primary', 'popgym-RepeatPreviousEasy-v0')
+    runs = [FakeRun('late', created=20.), FakeRun('early', created=10.), FakeRun('dead', created=1., heartbeat=_t.time() - 3600),
+            FakeRun('gone', created=0., summary=dict(run_state='yielded')), FakeRun('sup', job_type='supervisor', config={})]
+    tasks = coord.board([coord.record(r) for r in runs])
+    assert list(tasks) == [key] and coord.owner(tasks[key]) == 'early'
+    assert not coord.available(tasks, key) and coord.available(tasks, key, local_ids={'early', 'late'})
+    assert coord.available(tasks, ('control', 'popgym-RepeatPreviousEasy-v0'))
+    done = coord.board([coord.record(FakeRun('x', state='finished', summary=dict(run_state='complete', steps=40)))])
+    assert done[key]['complete'] and not coord.available(done, key, local_ids={'x'})
+    paused = coord.board([coord.record(FakeRun('p', state='finished', summary=dict(run_state='paused', steps=20)))])
+    assert coord.available(paused, key) and paused[key]['steps'] == 20
+
+
+def test_merge_attempts_drops_discarded_work_and_keeps_best_state():
+    import popgym_bench_coord as coord
+    import popgym_bench_wandb as exporter
+    def row(steps, value):
+        return {'steps': steps, 'eval/stochastic/return_mean/mean': value, 'seed/42/eval/stochastic/return_mean': value,
+                'seed/43/eval/stochastic/return_mean': value}
+    old = FakeRun('old', state='crashed', created=1., summary=dict(steps=60))
+    new = FakeRun('new', created=2., summary=dict(steps=40, run_state='running'))
+    old_rows = [row(0, 0.), row(20, .1), row(40, .9), row(60, .9)]  # 40/60: lost after a crash at 60
+    new_rows = [row(40, .2)]                                       # resumed from the 20k checkpoint
+    arm = exporter.merge_attempts([(old, coord.record(old), old_rows), (new, coord.record(new), new_rows)])
+    assert [(r['steps'], r['mean']) for r in arm['curve']] == [(0, 0.), (20, .1), (40, .2)]
+    assert abs(arm['best']['mean'] - .2) < 1e-9 and arm['state'] == 'running' and arm['url'].endswith('/new')
+    assert arm['attempts'] == 2
+
+
+def test_find_workers_adopts_live_worker(tmp_path):
+    out = tmp_path / 'out'
+    fake = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', str(EXAMPLES / 'popgym_bench.py'), 'worker',
+                             '--output', str(out), '--arm', 'primary', '--env', 'popgym-RepeatPreviousEasy-v0'],
+                            env={**os.environ, 'CUDA_VISIBLE_DEVICES': '5'})
+    try:
+        found = bench.find_workers(out)
+        assert list(found) == [('primary', 'popgym-RepeatPreviousEasy-v0')]
+        proc, gpu = found[('primary', 'popgym-RepeatPreviousEasy-v0')]
+        assert gpu == '5' and proc.pid == fake.pid and proc.poll() is None
+    finally:
+        fake.kill(); fake.wait()
+    assert proc.poll() is not None
+
+
+def test_deadline_pauses_then_resumes_to_completion(tmp_path):
+    tiny_study(tmp_path)
+    env_id = 'popgym-RepeatPreviousEasy-v0'
+    import time as _t
+    code = bench.train_task(tmp_path, 'primary', env_id, {}, small=True, deadline=_t.time() + 5, stop_margin=60)
+    assert code == bench.EXIT_PAUSED
+    status = json.loads((tmp_path / 'primary' / env_id / 'status.json').read_text())
+    assert status['state'] == 'paused' and status['steps'] == 0
+    assert bench.train_task(tmp_path, 'primary', env_id, {}, small=True) == 0
+    history = json.loads((tmp_path / 'primary' / env_id / 'history.json').read_text())
+    assert [r['steps'] for r in history] == [0, 32, 64, 64] and history[-1]['final']
+
+
+def test_parse_slurm_time():
+    assert bench.parse_slurm_time('1-02:03:04') == 26 + 3 / 60 + 4 / 3600
+    assert bench.parse_slurm_time('23:30:00') == 23.5 and abs(bench.parse_slurm_time('05:00') - 5 / 60) < 1e-12
+    assert bench.parse_slurm_time('UNLIMITED') is None and bench.parse_slurm_time('') is None

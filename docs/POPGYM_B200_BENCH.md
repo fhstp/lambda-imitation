@@ -85,6 +85,75 @@ hashes, versions), `latest.pkl`, `wandb-errors.log`. Also
 `OUTPUT/scheduler.json`, `OUTPUT/validation.json`, and `OUTPUT/logs/` (one log
 per worker).
 
+## Running on more machines: clusters, nodes, other hosts (W&B only)
+
+Any number of hosts can work on the same study at once. They coordinate
+**only through W&B** (no shared filesystem), so the same command works across
+clusters:
+
+- A task is *complete* when one attempt reported `run_state=complete`. It is
+  *claimed* while an attempt's W&B run is alive (heartbeat within 15 min).
+  The earliest-created live attempt owns it, and later duplicates yield right
+  after setup or at their next evaluation. W&B has no atomic lock, so jobs
+  started together can collide briefly. The loser exits within minutes and
+  its slot takes another task.
+- Checkpoints (full agent, replay, optimizer, RNG, rollout) go to W&B as
+  artifact `checkpoint-<arm>-<task>`, every 200k steps and whenever a worker
+  pauses. Only the latest version is kept. Any host resumes from the newest
+  checkpoint, local or W&B. Resuming on a different GPU type is not bitwise
+  identical to an uninterrupted run.
+- Primary tasks come first everywhere. A host only takes control tasks when no
+  primary task is unclaimed.
+
+**Cluster node (SLURM, 4 GPUs):** setup is the same venv/requirements as above
+(same JAX/Flax versions, because checkpoints are pickles). Compute nodes need
+W&B credentials (`wandb login` on a shared home, or `WANDB_API_KEY`).
+Submit from the repository root:
+
+```bash
+sbatch scripts/popgym_bench_slurm.sh                                   # 24 h queue
+sbatch --partition=<fast> --time=05:55:00 scripts/popgym_bench_slurm.sh # 6 h queue
+```
+
+Each job:
+
+1. runs the launch gate on its own GPU type;
+2. claims up to 4 tasks (cheapest first, spread so that simultaneous jobs
+   rarely collide), one per GPU;
+3. trains them, and exits when all are complete or paused.
+
+It reads its remaining wall time from SLURM. Workers checkpoint, upload and
+pause 20 min before the end, or on SLURM's SIGTERM 25 min before. It starts
+no new task in the last hour. A task needs ~1M/(steps/s) seconds, measured on
+the dashboard, so long tasks simply continue in the next job. Submit more jobs
+whenever you like: an idle job (nothing left to claim) exits immediately. The
+node's output goes to `$TMPDIR` or `/tmp` and can be discarded after the job.
+Outside SLURM, use `python examples/popgym_bench.py node --time-limit HOURS`.
+
+**Adding hosts to a running study / updating a supervisor:** a supervisor adopts
+live workers of its `--output`. To update the B200 supervisor without losing
+progress:
+
+```bash
+kill <supervisor pid>      # only the supervisor (not Ctrl-C: that also kills the workers)
+git fetch origin && git checkout --detach origin/feat/popgym-b200-bench
+python examples/popgym_bench.py --output /raid/scratch/popgym-bench-v2
+```
+
+It prints `adopted running …` for each worker, then starts further tasks only
+when W&B shows them unclaimed.
+
+**Before a host goes away** (e.g. lease end): `kill <supervisor pid>` (new-code
+workers checkpoint, upload and pause on the SIGTERM it forwards), then
+
+```bash
+python examples/popgym_bench.py upload-checkpoints --output /raid/scratch/popgym-bench-v2
+```
+
+This uploads every unfinished task's local checkpoint, so the cluster resumes
+it. Workers started before the update don't upload by themselves, so they lose
+the steps since their last 100k checkpoint.
+
 ## Dashboard from W&B (any other machine)
 
 The B200 host is hard to reach, so the same page can be rebuilt from W&B alone:
