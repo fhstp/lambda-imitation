@@ -105,6 +105,14 @@ clusters:
 - Primary tasks come first everywhere. A host only takes control tasks when no
   primary task is unclaimed.
 
+**Small home quota:** clone the repo and create the venv on project or scratch
+storage, e.g. `VENV=/scratch/$USER/popgym-venv bash scripts/setup_b200.sh`
+(pip runs without a cache), and submit with `POPGYM_VENV=/scratch/$USER/popgym-venv`.
+Jobs write checkpoints, logs and the W&B cache/staging only to node-local
+`$POPGYM_SCRATCH` (else `$TMPDIR`, else `/tmp`) and delete them at the end,
+since everything needed is in W&B. Only the small `popgym-bench-<jobid>.out`
+lands in the submit directory.
+
 **Cluster node (SLURM, 4 GPUs):** setup is the same venv/requirements as above
 (same JAX/Flax versions, because checkpoints are pickles). Compute nodes need
 W&B credentials (`wandb login` on a shared home, or `WANDB_API_KEY`).
