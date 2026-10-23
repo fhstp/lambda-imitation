@@ -71,8 +71,11 @@ td a { color: inherit; text-decoration-color: var(--axis); }
 .bar i { display: block; height: 100%; background: var(--s1); }
 .failed { color: var(--bad); font-weight: 600; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.grid.small { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
 .panel h3 { font-size: 13px; margin: 0 0 2px; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
 .panel { min-width: 0; }
+.panel h3 .ttl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel h3 small { flex-shrink: 1; }
 .panel h3 small { color: var(--muted); font-weight: 400; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .panel .bar { width: 40px; }
 #tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink); box-shadow: 0 4px 16px rgba(0,0,0,.18), inset 0 0 0 1px var(--ring);
@@ -91,6 +94,7 @@ td a { color: inherit; text-decoration-color: var(--axis); }
 
   <div class="controls">
     <span class="seg" role="group" aria-label="Overview scale"><button type="button" data-view="norm" aria-pressed="true">Normalized</button><button type="button" data-view="raw" aria-pressed="false">Returns</button></span>
+    <span class="seg" role="group" aria-label="Evaluation policy"><button type="button" data-policy="stochastic" aria-pressed="true">Stochastic</button><button type="button" data-policy="greedy" aria-pressed="false">Greedy</button></span>
     <label>Score <select id="metric">
       <option value="best">Best during training (MMER-like)</option>
       <option value="latest">Latest evaluation</option>
@@ -107,12 +111,17 @@ td a { color: inherit; text-decoration-color: var(--axis); }
   <div class="card scroll"><svg id="dots" role="img" aria-label="Normalized score dot plot"></svg></div>
 
   <h2>All tasks</h2>
-  <div class="note">Stochastic-policy return, mean ± SD across training seeds. ▲/▼ compares our score with the best published PPO result.</div>
+  <div class="note" id="tableNote"></div>
   <div class="card scroll"><table id="table"></table></div>
 
-  <h2>Learning curves</h2>
+  <h2 id="curveTitle">Learning curves</h2>
   <div class="legend" id="curveLegend"></div>
   <div class="grid" id="curves"></div>
+
+  <h2>Policy entropy</h2>
+  <div class="note">Actor entropy on replayed histories (training batches), as a fraction of the uniform maximum log A. 1 = uniform policy. A stochastic policy near 1 acts randomly however good its greedy choice is; hover for α.</div>
+  <div class="legend" id="entropyLegend"></div>
+  <div class="grid small" id="entropy"></div>
 
   <h2>Comparability notes</h2>
   <div class="note" id="notes"></div>
@@ -125,8 +134,9 @@ const fmt = (v, d = 3) => v == null || !isFinite(v) ? '–' : (+v).toFixed(d);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const short = id => id.replace(/^popgym-/, '').replace(/-v0$/, '');
 let DATA = null;
-let VIEW = 'norm';
+let VIEW = 'norm', POLICY = 'stochastic';
 try { VIEW = localStorage.getItem('popgym-bench-view') === 'raw' ? 'raw' : 'norm'; } catch (e) { /* storage unavailable */ }
+try { POLICY = localStorage.getItem('popgym-bench-policy') === 'greedy' ? 'greedy' : 'stochastic'; } catch (e) { /* storage unavailable */ }
 const tip = $('#tip');
 function showTip(html, ev) {
   tip.innerHTML = html; tip.hidden = false;
@@ -138,18 +148,33 @@ function showTip(html, ev) {
 }
 const hideTip = () => { tip.hidden = true; };
 
-function ours(task, arm, metric) {
+// Evaluation rows of the chosen policy: {steps, mean, seeds}.
+function series(arm, policy = POLICY) {
+  if (!arm) return [];
+  if (policy === 'stochastic') return arm.curve;
+  return arm.curve.filter(r => r.greedy != null).map(r => ({steps: r.steps, mean: r.greedy, seeds: r.greedy_seeds || [r.greedy]}));
+}
+function bestOf(rows) {
+  if (!rows.length) return null;
+  const n = Math.min(...rows.map(r => r.seeds.length));
+  const best = [...Array(n).keys()].map(i => Math.max(...rows.map(r => r.seeds[i])));
+  return {mean: best.reduce((a, b) => a + b) / n, std: sd(best), n};
+}
+function ours(task, arm, metric, policy = POLICY) {
   const a = task.arms[arm];
   if (!a) return null;
-  if (metric === 'best') return a.best ? {mean: a.best.mean, std: a.best.std, n: a.best.n} : null;
-  if (metric === 'latest') return a.latest ? {mean: a.latest.mean, std: sd(a.latest.seeds), n: a.latest.seeds.length} : null;
-  const f = a.final && a.final.stochastic;
+  const rows = series(a, policy);
+  if (metric === 'best') return bestOf(rows);
+  if (metric === 'latest') { const r = rows[rows.length - 1]; return r ? {mean: r.mean, std: sd(r.seeds), n: r.seeds.length} : null; }
+  const f = a.final && a.final[policy];
   return f ? {mean: f.mean, std: f.std, n: f.n} : null;
 }
+const policyName = (p = POLICY) => p === 'greedy' ? 'greedy (argmax actor)' : 'stochastic (sampled actor)';
 function sd(xs) { if (!xs || xs.length < 2) return 0; const m = xs.reduce((a, b) => a + b) / xs.length; return Math.sqrt(xs.reduce((a, b) => a + (b - m) ** 2, 0) / (xs.length - 1)); }
 function weekend(task, metric, method = 'lambda') {
   const r = task.refs['weekend-' + method];
   if (!r) return null;
+  if (POLICY === 'greedy') return r.final_greedy;  // weekend suite: no greedy best-during-training recorded
   return metric === 'best' ? r.best_stochastic : r.final_stochastic;
 }
 function randomRef(task) {
@@ -179,6 +204,8 @@ function renderHeader() {
   const scored = DATA.tasks.map(t => norm(t, (ours(t, 'primary', metric) || {}).mean)).filter(v => v != null).sort((a, b) => a - b);
   const median = scored.length ? scored[Math.floor((scored.length - 1) / 2)] : null;
   const beat = scored.filter(v => v >= 1).length;
+  const ents = DATA.tasks.map(t => latestEntropy(t.arms.primary, t)).filter(v => v != null).sort((a, b) => a - b);
+  const entMedian = ents.length ? ents[Math.floor((ents.length - 1) / 2)] : null;
   const val = DATA.validation;
   const sched = DATA.scheduler;
   // Remaining-time estimate: observed per-task throughput, spread over the slots.
@@ -191,8 +218,9 @@ function renderHeader() {
   const tiles = [
     ['Primary complete', `${count('primary', 'complete')}/${n}`, `${count('primary', 'running') + count('primary', 'prefill') + count('primary', 'building')} running · ${count('primary', 'failed')} failed`],
     ['Control (β=0) complete', `${count('control', 'complete')}/${n}`, sched ? `phase: ${sched.phase} · ${sched.slots} GPUs${sched.hosts > 1 ? ` on ${sched.hosts} hosts` : ''}` : 'starts after all primary tasks'],
-    ['Median normalized score', median == null ? '–' : median.toFixed(2), `${scored.length} tasks with a PPO reference · ${metricName()}`],
-    ['Tasks ≥ best PPO', scored.length ? `${beat}/${scored.length}` : '–', 'normalized score ≥ 1'],
+    ['Median normalized score', median == null ? '–' : median.toFixed(2), `${scored.length} tasks with a PPO reference · ${POLICY} · ${metricName()}`],
+    ['Tasks ≥ best PPO', scored.length ? `${beat}/${scored.length}` : '–', `normalized score ≥ 1 · ${POLICY} policy`],
+    ['Median policy entropy', entMedian == null ? '–' : entMedian.toFixed(2), entMedian == null ? 'of uniform (1 = random actions)' : `of uniform (1 = random actions) · ${ents.length} tasks, latest`],
     ['Est. time remaining', eta == null ? '–' : eta < 1 ? `${Math.round(eta * 60)} min` : `${eta.toFixed(1)} h`, rate ? `~${rate.toFixed(1)} steps/s per task · ${slots} parallel` : 'waiting for throughput'],
     ['Launch gate', val ? (val.passed ? 'passed' : 'FAILED') : '–', val ? `${esc(val.device_kind || '')}${val.hosts > 1 ? ` · ${val.hosts} hosts` : ''}: repeat · lane isolation · resume` : 'not reported'],
   ];
@@ -205,7 +233,7 @@ function renderDots() {
   const metric = $('#metric').value, raw = VIEW === 'raw';
   const series = [['Ours (β=10)', 'primary', css('--s1')], ['Control (β=0)', 'control', css('--s2')], ['Weekend suite SAC+λ (250k)', 'weekend', css('--s3')]];
   const ink2 = css('--ink-2'), surface = css('--surface');
-  $('#dotTitle').textContent = raw ? 'Return per task' : 'Normalized score per task';
+  $('#dotTitle').textContent = (raw ? 'Return per task' : 'Normalized score per task') + ` · ${POLICY} policy`;
   $('#dotNote').textContent = raw
     ? 'Mean episodic return on the common POPGym scale (−1 to 1), with this run\'s random-policy holdout (weekend suite before that) and the best published POPGym PPO model (Morad et al. 2023, 15M steps, MMER) as reference marks. The bar spans random → best PPO: a short bar means the published reference barely beats random.'
     : '0 = random policy, 1 = best published POPGym PPO model (Morad et al. 2023, best of 13 memory models, 15M steps, MMER). Values beyond the axis are pinned to its edge (hover for the exact value). Tasks without a published reference are omitted.';
@@ -255,13 +283,15 @@ function renderDots() {
 
 let sortKey = null, sortDir = 1;
 function renderTable() {
-  const metric = $('#metric').value;
+  const metric = $('#metric').value, other = POLICY === 'greedy' ? 'stochastic' : 'greedy';
+  $('#tableNote').textContent = `Return of the ${policyName()} policy, mean ± SD across training seeds; the next column shows the other policy. Entropy = latest actor entropy / log A (1 = uniform). ▲/▼ compares with the best published PPO result (stochastic, training episodes).`;
   const cell = v => v ? `${fmt(v.mean)} <span class="sd">± ${fmt(v.std)}</span>` : '–';
   const cols = [
     ['Task', t => short(t.env_id), t => (t.arms.primary.url ? `<a href="${esc(t.arms.primary.url)}" target="_blank" rel="noopener">${esc(short(t.env_id))} ↗</a>` : esc(short(t.env_id))) + `<div class="sd">${esc((t.meta && t.meta.backend) || '')} · H=${(t.meta && t.meta.horizon) || '?'} · A=${(t.meta && t.meta.action_dim) || '?'}</div>`],
     ['Status', t => t.arms.primary.steps / (t.arms.primary.target || 1), t => status(t.arms.primary)],
     ['Ours (β=10)', t => (ours(t, 'primary', metric) || {}).mean, t => cell(ours(t, 'primary', metric)) + delta(t, ours(t, 'primary', metric))],
-    ['Greedy', t => greedy(t.arms.primary, metric), t => fmt(greedy(t.arms.primary, metric))],
+    [other === 'greedy' ? 'Ours, greedy' : 'Ours, stochastic', t => (ours(t, 'primary', metric, other) || {}).mean, t => fmt((ours(t, 'primary', metric, other) || {}).mean)],
+    ['Entropy', t => latestEntropy(t.arms.primary, t), t => fmt(latestEntropy(t.arms.primary, t), 2)],
     ['Control (β=0)', t => (ours(t, 'control', metric) || {}).mean, t => t.arms.control.state === 'pending' ? '<span class="sd">queued</span>' : cell(ours(t, 'control', metric))],
     ['Best PPO', t => t.refs.popgym && t.refs.popgym.mean, t => t.refs.popgym ? `${fmt(t.refs.popgym.mean)} <span class="sd" title="${esc(t.refs.popgym.model)}">${esc(models(t.refs.popgym.model))}</span>` : '–'],
     ['POPJym', t => t.refs.popjym && t.refs.popjym.mean, t => t.refs.popjym ? `${fmt(t.refs.popjym.mean)} <span class="sd">${esc(t.refs.popjym.model)}</span>` : '–'],
@@ -278,10 +308,11 @@ function renderTable() {
   $('#table').querySelectorAll('th').forEach(th => th.addEventListener('click', () => {
     const i = +th.dataset.i; sortDir = sortKey === i ? -sortDir : -1; sortKey = i; renderTable(); }));
 }
-function greedy(a, metric) {
-  if (metric === 'final') return a.final && a.final.greedy ? a.final.greedy.mean : null;
-  return a.latest ? a.latest.greedy : null;
+function entropyRows(arm, task) {
+  const A = (task.meta && task.meta.action_dim) || 2;
+  return arm.curve.filter(r => r.entropy != null).map(r => ({steps: r.steps, value: r.entropy / Math.log(A), alpha: r.alpha}));
 }
+function latestEntropy(arm, task) { const e = entropyRows(arm, task); return e.length ? e[e.length - 1].value : null; }
 function models(m) { const xs = m.split(' / '); return xs.length > 2 ? `${xs[0]} +${xs.length - 1} tied` : m; }
 function nTag(v) { return v && v.n < 3 ? ` <span class="sd">n=${v.n}</span>` : ''; }
 function delta(t, v) {
@@ -301,20 +332,22 @@ function status(a) {
 
 function renderCurves() {
   const c1 = css('--s1'), c2 = css('--s2'), c3 = css('--s3');
+  $('#curveTitle').textContent = `Learning curves · ${policyName()}`;
   $('#curveLegend').innerHTML = `<span><i class="sw" style="border-color:${c1}"></i>Ours β=10 (mean, band = seed min–max)</span>` +
     `<span><i class="sw" style="border-color:${c2}"></i>Control β=0</span>` +
     `<span><i class="sw" style="border-color:${css('--ink-2')};border-top-style:dashed"></i>Best PPO (15M steps)</span>` +
-    `<span><i class="sw" style="border-color:${c3};border-top-style:dotted"></i>Weekend SAC+λ final (250k)</span>`;
+    `<span><i class="sw" style="border-color:${c3};border-top-style:dotted"></i>Weekend SAC+λ final (250k, ${POLICY})</span>`;
   const host = $('#curves'); host.innerHTML = '';
   const maxSteps = (DATA.study.config || {}).max_steps || 1e6;
   visible().forEach(t => {
-    const p = t.arms.primary.curve, q = t.arms.control.curve;
-    const ppo = t.refs.popgym && t.refs.popgym.mean, wk = (t.refs['weekend-lambda'] || {}).final_stochastic;
+    const p = series(t.arms.primary), q = series(t.arms.control);
+    const ps = series(t.arms.primary, POLICY === 'greedy' ? 'stochastic' : 'greedy');
+    const ppo = t.refs.popgym && t.refs.popgym.mean, wk = (t.refs['weekend-lambda'] || {})[POLICY === 'greedy' ? 'final_greedy' : 'final_stochastic'];
     const vals = [...p.flatMap(r => r.seeds), ...q.map(r => r.mean)];
     if (ppo != null) vals.push(ppo);
     if (wk) vals.push(wk.mean);
     const div = document.createElement('div'); div.className = 'card panel';
-    div.innerHTML = `<h3>${esc(short(t.env_id))}<small>${status(t.arms.primary)}</small></h3>`;
+    div.innerHTML = `<h3><span class="ttl" title="${esc(short(t.env_id))}">${esc(short(t.env_id))}</span><small>${status(t.arms.primary)}</small></h3>`;
     host.appendChild(div);
     if (!vals.length) { div.insertAdjacentHTML('beforeend', '<div class="sd" style="padding:40px 0;text-align:center">No evaluations yet</div>'); return; }
     let lo = Math.min(...vals), hi = Math.max(...vals); if (hi - lo < 1e-3) { lo -= .05; hi += .05; }
@@ -346,8 +379,9 @@ function renderCurves() {
       if (!ref) return;
       cross.setAttribute('x1', x(ref.steps)); cross.setAttribute('x2', x(ref.steps)); cross.setAttribute('visibility', 'visible');
       let html = `<b>${esc(short(t.env_id))} · ${(ref.steps / 1e3).toFixed(0)}k steps</b>`;
-      if (a) html += `<div class="row"><span><i class="dot" style="background:${c1}"></i> ours β=10</span><span>${fmt(a.mean)} [${fmt(Math.min(...a.seeds))}, ${fmt(Math.max(...a.seeds))}]</span></div>` +
-        `<div class="row"><span>greedy</span><span>${fmt(a.greedy)}</span></div>`;
+      const o = near(ps);
+      if (a) html += `<div class="row"><span><i class="dot" style="background:${c1}"></i> ours β=10, ${POLICY}</span><span>${fmt(a.mean)} [${fmt(Math.min(...a.seeds))}, ${fmt(Math.max(...a.seeds))}]</span></div>`;
+      if (o) html += `<div class="row"><span>ours, ${POLICY === 'greedy' ? 'stochastic' : 'greedy'}</span><span>${fmt(o.mean)}</span></div>`;
       if (b) html += `<div class="row"><span><i class="dot" style="background:${c2}"></i> control β=0</span><span>${fmt(b.mean)}</span></div>`;
       if (ppo != null) html += `<div class="row"><span>best PPO</span><span>${fmt(ppo)}</span></div>`;
       if (wk) html += `<div class="row"><span>weekend λ</span><span>${fmt(wk.mean)}</span></div>`;
@@ -371,7 +405,45 @@ function renderNotes() {
   $('#notes').innerHTML = '<ul>' + items.map(i => `<li>${i}</li>`).join('') + '</ul>';
 }
 
-function render() { renderHeader(); renderDots(); renderTable(); renderCurves(); renderNotes(); }
+function renderEntropy() {
+  const c1 = css('--s1'), c2 = css('--s2');
+  $('#entropyLegend').innerHTML = `<span><i class="sw" style="border-color:${c1}"></i>Ours β=10 (seed mean)</span>` +
+    `<span><i class="sw" style="border-color:${c2}"></i>Control β=0</span>` +
+    `<span><i class="sw" style="border-color:${css('--ink-2')};border-top-style:dashed"></i>uniform policy (1)</span>`;
+  const host = $('#entropy'); host.innerHTML = '';
+  const maxSteps = (DATA.study.config || {}).max_steps || 1e6;
+  visible().forEach(t => {
+    const p = entropyRows(t.arms.primary, t), q = entropyRows(t.arms.control, t);
+    const div = document.createElement('div'); div.className = 'card panel';
+    const last = p.length ? p[p.length - 1].value : null;
+    div.innerHTML = `<h3><span class="ttl" title="${esc(short(t.env_id))}">${esc(short(t.env_id))}</span><small>${last == null ? '' : fmt(last, 2)}</small></h3>`;
+    host.appendChild(div);
+    if (!p.length && !q.length) { div.insertAdjacentHTML('beforeend', '<div class="sd" style="padding:22px 0;text-align:center">No data yet</div>'); return; }
+    const W = 220, H = 90, L = 28, R = 6, T = 6, B = 16;
+    const x = s => L + s / maxSteps * (W - L - R), y = v => T + (1.05 - Math.max(0, Math.min(1.05, v))) / 1.05 * (H - T - B);
+    let s = '';
+    [0, .5, 1].forEach(v => s += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="${css(v === 1 ? '--ink-2' : '--grid')}" ${v === 1 ? 'stroke-dasharray="4 3"' : ''}/><text x="${L - 4}" y="${y(v) + 3}" text-anchor="end">${v}</text>`);
+    [0, 1].forEach(f => s += `<text x="${x(f * maxSteps)}" y="${H - 4}" text-anchor="${f ? 'end' : 'start'}">${f * maxSteps / 1e6}M</text>`);
+    [[q, c2], [p, c1]].forEach(([rows, c]) => { if (rows.length) s += `<path d="M${rows.map(r => x(r.steps) + ',' + y(r.value)).join('L')}" fill="none" stroke="${c}" stroke-width="2" stroke-linejoin="round"/>`; });
+    s += `<line class="cross" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="${css('--axis')}" visibility="hidden"/><rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/>`;
+    div.insertAdjacentHTML('beforeend', `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(short(t.env_id))} policy entropy">${s}</svg>`);
+    const svg = div.querySelector('svg'), cross = svg.querySelector('.cross');
+    svg.addEventListener('mousemove', e => {
+      const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+      const step = (pt.matrixTransform(svg.getScreenCTM().inverse()).x - L) / (W - L - R) * maxSteps;
+      const near = arr => arr.length ? arr.reduce((a, b) => Math.abs(b.steps - step) < Math.abs(a.steps - step) ? b : a) : null;
+      const a = near(p), b = near(q), ref = a || b;
+      cross.setAttribute('x1', x(ref.steps)); cross.setAttribute('x2', x(ref.steps)); cross.setAttribute('visibility', 'visible');
+      let html = `<b>${esc(short(t.env_id))} · ${(ref.steps / 1e3).toFixed(0)}k steps</b>`;
+      if (a) html += `<div class="row"><span><i class="dot" style="background:${c1}"></i> ours β=10</span><span>${fmt(a.value, 3)} of uniform</span></div><div class="row"><span>α</span><span>${a.alpha == null ? '–' : (+a.alpha).toPrecision(2)}</span></div>`;
+      if (b) html += `<div class="row"><span><i class="dot" style="background:${c2}"></i> control β=0</span><span>${fmt(b.value, 3)}</span></div>`;
+      showTip(html, e);
+    });
+    svg.addEventListener('mouseleave', () => { cross.setAttribute('visibility', 'hidden'); hideTip(); });
+  });
+}
+
+function render() { renderHeader(); renderDots(); renderTable(); renderCurves(); renderEntropy(); renderNotes(); }
 async function load() {
   try {
     const r = await fetch('data.json', {cache: 'no-store'});
@@ -384,12 +456,19 @@ async function load() {
 }
 function setView(v) {
   VIEW = v;
-  document.querySelectorAll('.seg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === v)));
+  document.querySelectorAll('.seg button[data-view]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === v)));
   try { localStorage.setItem('popgym-bench-view', v); } catch (e) { /* storage unavailable */ }
   if (DATA) renderDots();
 }
-document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
-setView(VIEW);
+function setPolicy(v) {
+  POLICY = v;
+  document.querySelectorAll('.seg button[data-policy]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.policy === v)));
+  try { localStorage.setItem('popgym-bench-policy', v); } catch (e) { /* storage unavailable */ }
+  if (DATA) render();
+}
+document.querySelectorAll('.seg button[data-view]').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+document.querySelectorAll('.seg button[data-policy]').forEach(b => b.addEventListener('click', () => setPolicy(b.dataset.policy)));
+setView(VIEW); setPolicy(POLICY);
 ['#metric', '#family', '#difficulty'].forEach(s => $(s).addEventListener('change', () => DATA && render()));
 addEventListener('resize', () => DATA && renderDots());
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => DATA && render());

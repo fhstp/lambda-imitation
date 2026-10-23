@@ -51,8 +51,11 @@ def arm_from_rows(rows, config, summary, state, url, heartbeat):
             values = [r.get(f'seed/{s}/eval/stochastic/return_mean') for s in seeds]
             if any(v is None for v in values):
                 continue  # incomplete row: never fill missing seeds
+            greedy = [r.get(f'seed/{s}/eval/greedy/return_mean') for s in seeds]
             curve.append(dict(steps=r['steps'], mean=r['eval/stochastic/return_mean/mean'], seeds=values,
-                              greedy=r.get('eval/greedy/return_mean/mean')))
+                              greedy=r.get('eval/greedy/return_mean/mean'),
+                              greedy_seeds=greedy if all(v is not None for v in greedy) else None,
+                              entropy=r.get('train/entropy/mean'), alpha=r.get('train/alpha/mean')))
         if r.get('final/stochastic/return_mean/mean') is not None:
             final = {}
             for mode in FINAL_MODES:

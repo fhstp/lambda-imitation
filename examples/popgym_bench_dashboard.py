@@ -47,7 +47,9 @@ def arm_summary(folder):
                      for v in [d['return_mean']]}
             continue
         greedy = row['eval'].get('greedy', {}).get('return_mean', {})
-        curve.append(dict(steps=row['steps'], mean=sto['mean'], seeds=sto['seeds'], greedy=greedy.get('mean')))
+        train = row.get('train') or {}
+        curve.append(dict(steps=row['steps'], mean=sto['mean'], seeds=sto['seeds'], greedy=greedy.get('mean'),
+                          greedy_seeds=greedy.get('seeds'), entropy=train.get('entropy', {}).get('mean'), alpha=row.get('alpha')))
     meta = config.get('meta', {})
     return dict(state=status.get('state', 'pending'), steps=status.get('steps', 0), target=status.get('target_steps'),
                 steps_per_second=status.get('steps_per_second'), updated=status.get('time'),
