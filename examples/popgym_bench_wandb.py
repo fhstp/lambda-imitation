@@ -22,7 +22,7 @@ sys.path.insert(0, str(HERE))
 
 import popgym_bench_dashboard as dashboard  # noqa: E402
 
-STUDY = 'popgym-b200-flash-bench'
+STUDY = 'popgym-b200-flash-bench-v2'
 META_KEYS = ('env_id', 'arm', 'backend', 'port_id', 'horizon', 'action_dim', 'obs_shape', 'batch_episodes')
 FINAL_MODES = ('stochastic', 'greedy', 'critic', 'random')
 

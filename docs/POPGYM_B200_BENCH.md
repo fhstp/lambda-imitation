@@ -12,12 +12,29 @@ study with its own entry point.
 | Tasks | All 42 discrete POPGym tasks (14 families × Easy/Medium/Hard). Pendulums are continuous and excluded. |
 | Environments | 24 audited POPJym JAX ports. NEW JAX ports of Autoencode, CountRecall, MineSweeper and VelocityOnlyCartPole (`examples/popgym_bench_envs.py`), checked step by step against NumPy POPGym 1.0.7 (`tests/test_popgym_bench_envs.py`). Labyrinth Escape/Explore use the original Gymnasium envs on the host, with acting/replay/updates still vmapped on the GPU. |
 | Agent | FlashSAC-style residual RMS heads (actor 128, critics 256, 2 expansion-4 blocks), critic OFN, all six critics 51-atom categorical on [-1.5, 1.5] (dense deterministic projection), GRU512 + 128-unit prev-action projection, complete-episode BPTT, reward-only projected main law, two-hot scalar-Retrace λ heads, detached-head scalar λ-discrepancy, actor-to-FE stopped. |
-| Settings | flash-combined defaults: β=10, all LRs 1e-4, α 1→.01 geometric over 500k then fixed, τ=.005, γ=.99, λ1=.05, **λ2=.99**, replay 100k, 12.8k random prefill to a natural episode boundary. |
+| Settings | flash-combined defaults: β=10, all LRs 1e-4, τ=.005, γ=.99, λ1=.05, **λ2=.99**, replay 100k, 12.8k random prefill to a natural episode boundary. |
+| Entropy (v2) | **SAC temperature auto-tuning** to a policy entropy of 0.3·log A (Adam 1e-4 on log α), starting at α=1/H (horizon-scaled, because POPGym returns are spread over H steps). **SAC soft main target** (+α·H(π(·\|s′))). The Retrace λ heads stay reward-only. |
 | Batch | Constant ~8.3k transition slots per update: `max(8, 8320 // (H+1))` complete episodes (Battleship Easy keeps 128×65). |
 | Exploration | **Correlated**: unit-Gaussian logit bias held for k decisions, P(k)∝k⁻², k≤16, fresh categorical draw every step. The exact conditional behaviour probability softmax(logits+bias)[a] is stored for Retrace. Bias resets at real episode ends, with its own RNG. Evaluations use the unbiased actor. |
 | Seeds | 3 per task (42–44), genuinely `jax.vmap`-batched: training, prefill, replay, optimizer, rollout and RNG are per lane. |
 | Budget | 1M online steps per task. Evaluate every 20k (50 stochastic + 50 greedy episodes per seed). Final holdout: 200 episodes per seed × stochastic/greedy/critic-greedy/random. |
 | Arms | `primary` (β=10) for all 42 tasks first. Only after **every** primary task has finished: `control` (β=0, otherwise identical). |
+
+## v1 → v2 (2026-10-24)
+
+The first study (W&B `popgym-b200-flash-bench`, α 1→.01 over 500k, no soft
+target) was stopped. Its α was not scaled to POPGym's ~1/H per-step rewards,
+so stochastic policies stayed uniform (H(π)≈log A) in every task. Greedy
+policies did learn in some tasks. A local pilot (RepeatFirst Hard, Battleship
+Easy, 3 seeds × 200k each) compared the options:
+- Fixed small α collapses entropy.
+- Auto-tuning to 0.3·log A was stable: RepeatFirst Hard reached +0.80
+  stochastic / +0.95 greedy.
+- Without correlated exploration, the same config reached +0.65 / +0.93,
+  so the noise stays.
+
+v1 configs and checkpoints are never resumed with v2 settings: options missing
+from a stored config take their v1 values (`LEGACY`), so the configs differ.
 
 ## Setup (separate checkout, so running sweep agents keep their sources)
 
@@ -54,7 +71,7 @@ The supervisor does the following:
 4. Starts the β=0 control arm only once no primary task is pending or running.
 
 W&B: entity `fhstp-data-intelligence-research-group` (or `$WANDB_ENTITY`),
-project `popgym-b200-flash-bench` (or `$WANDB_PROJECT`). There is one run per
+project `popgym-b200-flash-bench-v2` (or `$WANDB_PROJECT`). There is one run per
 task × arm, grouped by task, tagged `primary`/`control`, with per-seed returns.
 A W&B outage never stops training; errors go to the task's `wandb-errors.log`.
 
@@ -145,7 +162,7 @@ progress:
 ```bash
 kill <supervisor pid>      # only the supervisor (not Ctrl-C: that also kills the workers)
 git fetch origin && git checkout --detach origin/feat/popgym-b200-bench
-python examples/popgym_bench.py --output /raid/scratch/popgym-bench-v2
+python examples/popgym_bench.py --output /raid/scratch/popgym-bench-autotune
 ```
 
 It prints `adopted running …` for each worker, then starts further tasks only
@@ -155,7 +172,7 @@ when W&B shows them unclaimed.
 workers checkpoint, upload and pause on the SIGTERM it forwards), then
 
 ```bash
-python examples/popgym_bench.py upload-checkpoints --output /raid/scratch/popgym-bench-v2
+python examples/popgym_bench.py upload-checkpoints --output /raid/scratch/popgym-bench-autotune
 ```
 
 This uploads every unfinished task's local checkpoint, so the cluster resumes

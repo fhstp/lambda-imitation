@@ -264,7 +264,7 @@ def test_parse_slurm_time():
 
 
 def _trained(config, steps=32, env_id='popgym-RepeatPreviousEasy-v0'):
-    c = bench.resolve_config({**TINY, **config})
+    c = bench.resolve_config({**TINY, **bench.LEGACY, **config})
     port = make_port(env_id)
     states, runner, seeds = bench.build(c, port, small=True)
     rollout = runner.initial_rollout(seeds)
@@ -298,8 +298,10 @@ def test_autotune_alpha_moves_towards_target_entropy():
 
 
 def test_alpha_scale_and_old_config_compatibility():
-    c = bench.resolve_config({'alpha_scale': 'inverse_horizon'})
+    c = bench.resolve_config({'autotune_alpha': False})
     assert abs(float(bench.alpha_at(0, c, 100)) - .01) < 1e-7 and abs(float(bench.alpha_at(10 ** 7, c, 100)) - 1e-4) < 1e-9
     old = {k: v for k, v in bench.DEFAULTS.items() if k not in ('alpha_scale', 'soft_main_target', 'autotune_alpha',
                                                                   'target_entropy_fraction', 'alpha_lr')}
-    assert bench.resolve_config(old) == bench.resolve_config({})
+    # A v1 checkpoint/study (without the new keys) resolves to the v1 settings, never to the v2 defaults.
+    assert bench.saved_config(old) == bench.resolve_config(bench.LEGACY) != bench.resolve_config({})
+    assert bench.saved_config(bench.resolve_config({})) == bench.resolve_config({})

@@ -192,11 +192,17 @@ function visible() {
   return DATA.tasks.filter(t => (!fam || t.family === fam) && (!dif || t.difficulty === dif));
 }
 
+function alphaChip(c) {
+  const scale = c.alpha_scale === 'inverse_horizon' ? '/H' : '';
+  if (c.autotune_alpha) return `α auto-tuned to H(π)=${c.target_entropy_fraction}·log A (init ${c.alpha_initial}${scale})${c.soft_main_target ? ', SAC soft main target' : ''}`;
+  return `α ${c.alpha_initial}${scale}→${c.alpha_final}${scale} over ${c.alpha_decay_steps / 1e3}k${c.soft_main_target ? ', SAC soft main target' : ''}`;
+}
+
 function renderHeader() {
   const c = DATA.study.config || {};
   $('#subtitle').textContent = `${DATA.tasks.length} discrete POPGym tasks · ${c.n_seeds} vmapped seeds · ${(c.max_steps / 1e6)}M steps each · W&B ${DATA.study.wandb_entity || ''}/${DATA.study.wandb_project || '—'}`;
   const chips = ['FlashSAC residual RMS heads + OFN', '51-atom categorical critics', `GRU${c.memory_hidden_dim} memory`,
-    `λ1=${c.lambda1}, λ2=${c.lambda2}`, `β=${c.lambda_coef} (control β=0)`, `α ${c.alpha_initial}→${c.alpha_final} over ${c.alpha_decay_steps / 1e3}k`,
+    `λ1=${c.lambda1}, λ2=${c.lambda2}`, `β=${c.lambda_coef} (control β=0)`, alphaChip(c),
     `LRs ${c.fe_lr}`, `correlated logit-bias exploration (k≤${c.noise_max_duration}, p∝k^-${c.noise_power})`, 'complete-episode BPTT'];
   $('#chips').innerHTML = chips.map(x => `<span class="chip">${esc(x)}</span>`).join('');
   const count = (arm, st) => DATA.tasks.filter(t => t.arms[arm].state === st).length;

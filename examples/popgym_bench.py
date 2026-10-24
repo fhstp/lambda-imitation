@@ -38,7 +38,7 @@ from types import SimpleNamespace
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-STUDY = 'popgym-b200-flash-bench'
+STUDY = 'popgym-b200-flash-bench-v2'
 DEFAULTS = dict(
     n_seeds=3, seed_base=42, max_steps=1_000_000, lambda_coef=10., fe_lr=1e-4, actor_lr=1e-4, critic_lr=1e-4,
     alpha_initial=1., alpha_final=.01, alpha_decay_steps=500_000, tau=.005, gamma=.99, lambda1=.05, lambda2=.99,
@@ -46,11 +46,13 @@ DEFAULTS = dict(
     prefill_steps=12_800, batch_transitions=8320, min_batch_episodes=8, collect_steps=16, chunk_steps=2048,
     eval_every=20_000, checkpoint_every=100_000, eval_episodes=50, final_episodes=200,
     noise_strength=1., noise_power=2., noise_max_duration=16,
-    # Entropy handling (all off = the original study):
-    alpha_scale='none',          # 'inverse_horizon': every alpha value above divided by the task horizon H
-    soft_main_target=False,      # main critic target adds +alpha*H(pi(.|s')) (SAC soft value); lambda heads stay reward-only
-    autotune_alpha=False,        # SAC temperature learning towards target_entropy_fraction*log(A); schedule = initial value only
+    # Entropy handling (v2 study; LEGACY below = the original v1 study):
+    alpha_scale='inverse_horizon',  # every alpha value above divided by the task horizon H ('none': unscaled)
+    soft_main_target=True,       # main critic target adds +alpha*H(pi(.|s')) (SAC soft value); lambda heads stay reward-only
+    autotune_alpha=True,         # SAC temperature learning towards target_entropy_fraction*log(A); schedule = initial value only
     target_entropy_fraction=.3, alpha_lr=1e-4)
+# Values of options added after the v1 study, for saved configs that lack them.
+LEGACY = dict(alpha_scale='none', soft_main_target=False, autotune_alpha=False)
 ARMS = {'primary': {}, 'control': {'lambda_coef': 0.}}
 NOISE_RNG_TAG = 1464689751
 VALIDATION_TASKS = ('popgym-BattleshipEasy-v0', 'popgym-AutoencodeEasy-v0')
@@ -71,6 +73,11 @@ def resolve_config(values):
     if not 0 < c['target_entropy_fraction'] <= 1:
         raise ValueError('target_entropy_fraction must be in (0, 1]')
     return c
+
+
+def saved_config(values):
+    """Resolve a stored config; options it predates take their v1 values."""
+    return resolve_config({**LEGACY, **{k: v for k, v in values.items() if k in DEFAULTS}})
 
 
 def task_settings(c, horizon):
@@ -800,8 +807,7 @@ def train_task(output, arm, env_id, wandb_cfg, small=False, deadline=None, uploa
     if checkpoint.exists():
         with checkpoint.open('rb') as f:
             saved = cloudpickle.load(f)
-        # resolve_config fills options added later with their (original-study) defaults
-        if resolve_config({k: v for k, v in saved['config'].items() if k in DEFAULTS}) != c or saved['meta'] != meta:
+        if saved_config(saved['config']) != c or saved['meta'] != meta:
             raise ValueError('Checkpoint configuration differs; use a new output directory')
         if saved['source_manifest'] != manifest:
             # Resuming with changed sources is recorded, not silently hidden.
@@ -980,7 +986,7 @@ def validate(output, env_ids, updates=64, small=False):
     import numpy as np
     from battleship_sweep import exact
     from popgym_bench_envs import make_port
-    c = resolve_config(json.loads((Path(output) / 'study.json').read_text())['config'])
+    c = saved_config(json.loads((Path(output) / 'study.json').read_text())['config'])
     results = {}
     for env_id in env_ids:
         port = make_port(env_id)
@@ -1088,7 +1094,7 @@ def supervise(args):
     study = output / 'study.json'
     if args.study_from_wandb and not study.exists():
         config, envs = study_from_wandb(args.wandb_entity, args.wandb_project)
-        config = resolve_config(config)
+        config = saved_config(config)
         envs = args.envs or envs
     else:
         config = resolve_config(json.loads(args.config.read_text()) if args.config else {})
@@ -1097,7 +1103,7 @@ def supervise(args):
                   envs=envs, created=time.time())
     if study.exists():
         old = json.loads(study.read_text())
-        if resolve_config(old['config']) != config and not args.study_from_wandb or (args.envs and old['envs'] != record['envs']):
+        if saved_config(old['config']) != config and not args.study_from_wandb or (args.envs and old['envs'] != record['envs']):
             raise ValueError(f'{study} has a different configuration/task list; use a new --output')
         record = old
     else:
