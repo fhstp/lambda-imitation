@@ -10,5 +10,18 @@
   "checkpoint_roundtrip_preexisting_proof": "reviewer_response/archive-roundtrip.json",
   "local_reserved_jobs": 8,
   "original_training_processes_interrupted": false,
-  "junit_path": "deployment/b200/validation/packaging-tests.xml"
+  "junit_path": "deployment/b200/validation/packaging-tests.xml",
+  "clean_checkout": {
+    "passed": true,
+    "commit_under_test": "f6056f2",
+    "cpu_tests": 273,
+    "junit_path": "deployment/b200/validation/clean-checkout-tests.xml",
+    "junit_sha256": "2152479ebfd9888c938d053f7ab8dfea3a24e4da1bf19a8daf443363ee2c0267",
+    "source_runtime_verified": true,
+    "no_live_state_or_checkpoints_copied": true,
+    "non_b200_cli_launch_rejected_before_dispatch": true,
+    "isolated_environment_reused_for_cpu_tests": true,
+    "clean_new_environment_install_tested": false,
+    "utc": "2026-11-10T12:33:14.187757+00:00"
+  }
 }
