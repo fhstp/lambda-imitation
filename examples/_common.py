@@ -43,6 +43,12 @@ def build_parser(name, defaults=None):
     g.add_argument("--num-seeds", type=int, default=1, help="seeds run together with vmap")
     g.add_argument("--memory-type", choices=("identity", "rnn", "gru", "lstm"), default="gru")
     g.add_argument("--memory-hidden-dim", type=int, default=512)
+    g.add_argument('--history-length',type=int,default=-1,
+                   help='H previous network inputs plus current; -1 is the original recurrent learner')
+    g.add_argument('--history-context',type=int,default=0,
+                   help='Additional context-only replay prefix, not scored learning transitions')
+    g.add_argument('--archive-checkpoints',action='store_true',
+                   help='Archive new checkpoints to W&B, verify remote bytes, then release local staging')
     g.add_argument("--fe-lr", type=float, default=1e-5)
     g.add_argument("--actor-lr", type=float, default=1e-4)
     g.add_argument("--critic-lr", type=float, default=1e-4, help="task and auxiliary critic learning rate")
@@ -57,12 +63,16 @@ def build_parser(name, defaults=None):
     g.add_argument("--lambda1", type=float, default=0.05)
     g.add_argument("--lambda2", type=float, default=0.85)
     g.add_argument("--lambda-coef", type=float, default=0.01)
+    g.add_argument("--replay-correction", choices=("retrace", "uncorrected", "is"), default="retrace")
+    g.add_argument("--lambda-critic-loss", choices=("huber", "mse"), default="huber")
+    g.add_argument("--trace-diagnostics", action="store_true")
     g.add_argument("--online-buffer-size", type=int, default=100_000)
     g.add_argument("--prefill-steps", type=int, default=0,
                    help="random prefill; 0 means batch size times replay window length")
     g = p.add_argument_group("evaluation and output")
     g.add_argument("--eval-every", type=int, default=1, help="evaluation interval in rounds")
     g.add_argument("--eval-episodes", type=int, default=50)
+    g.add_argument("--eval-initial", action="store_true", help="also evaluate the untrained policy after prefill")
     g.add_argument("--final-return-window", type=int, default=5,
                    help="final evaluation points averaged within each seed")
     g.add_argument("--checkpoint-every", type=int, default=10,
@@ -118,10 +128,11 @@ def prepare_tracking(parser, args):
             if action.choices is not None and value not in action.choices:
                 parser.error(f"invalid sweep value {value!r} for {name!r}")
             setattr(args, name, value)
-        args.output_dir = Path(args.output_dir) / f"run_{run.id}"
         args.wandb = True
         if args.resume_from:
             parser.error("sweep trials must start fresh")
+    # Use W&B's unique run directory, not a directory derived from a tmux session.
+    args.output_dir = Path(run.dir) / "training"
     run.define_metric("env_interactions")
     for prefix in ("eval", "train", "reference", "probe", "timing"):
         run.define_metric(f"{prefix}/*", step_metric="env_interactions")
@@ -148,7 +159,11 @@ def validate_args(parser, args):
         parser.error("require 0 < gamma < 1 and 0 < tau <= 1")
     if args.method != "ld":
         args.lambda_coef = 0.0
-    window = args.burn_in_length + args.sequence_length + args.lambda_truncation
+    if args.history_length>=0:
+        if args.history_length not in (0,1,2,5,10,15,20,25) or args.history_context!=26:
+            parser.error('controlled histories require a common 26-step context prefix')
+        if args.resume_from:parser.error('controlled-history runs must not resume')
+    window = args.history_context + args.burn_in_length + args.sequence_length + args.lambda_truncation
     if not args.prefill_steps:
         args.prefill_steps = args.batch_size * window
     if not window < args.prefill_steps <= args.online_buffer_size:
@@ -162,11 +177,30 @@ def config_dict(args):
     return {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
 
 
+def check_rebuttal_guards(output):
+    """Administrative integrity/disk guards; do not change training or RNG."""
+    manifest = os.environ.get("REBUTTAL_SOURCE_MANIFEST")
+    if not manifest:
+        return
+    import hashlib
+    import shutil
+
+    root = Path(__file__).resolve().parents[1]
+    for name, expected in json.loads(Path(manifest).read_text()).items():
+        if hashlib.sha256((root / name).read_bytes()).hexdigest() != expected:
+            raise RuntimeError(f"sealed source changed: {name}; stopping without retry")
+    checkpoint_allowance = int(os.environ.get("REBUTTAL_CHECKPOINT_BYTES", 2**30))
+    if shutil.disk_usage(output).free < 2 * 2**30 + checkpoint_allowance:
+        raise RuntimeError("disk reserve reached; no checkpoint deletion or automatic retry")
+
+
 RESUME_MUTABLE = {
     "rounds", "eval_every", "eval_episodes", "final_return_window", "checkpoint_every",
     "resume_from", "output_dir", "wandb", "wandb_project", "wandb_run_name",
     "probe", "probe_every", "probe_collect_steps", "probe_steps", "probe_hidden_dim",
     "probe_batch_size", "probe_lr",
+    "eval_initial",
+    "cuda_visible_devices", "runtime_devices",
 }
 
 
@@ -214,6 +248,9 @@ def make_evaluator(experiment, fns, carry_dim, action_dim, episodes, mode):
             def step(carry, _):
                 obs, es, memory, pa, key, active, totals = carry
                 key, ak, ek = jax.random.split(key, 3)
+                d2=twin2=jnp.float32(0)
+                if mode in ('greedy','sampled') and getattr(fns,'discrepancy',None) is not None:
+                    d2,twin2=fns.discrepancy(agent,obs,memory,prev_action=pa)
                 if mode == "reference":
                     action = experiment.reference(obs, es, ak)
                 elif mode == "random":
@@ -230,13 +267,13 @@ def make_evaluator(experiment, fns, carry_dim, action_dim, episodes, mode):
                 totals += active * jnp.array([
                     reward, 1.0, done,
                     info.get("known_safe_opportunity", 0.0),
-                    info.get("known_safe_taken", 0.0), info.get("repeat_action", 0.0)], jnp.float32)
+                    info.get("known_safe_taken", 0.0), info.get("repeat_action", 0.0),d2,twin2], jnp.float32)
                 memory = jnp.where(done, jnp.zeros_like(memory), memory)
                 pa = jnp.where(done, jnp.zeros_like(pa), fns.encode_action(action))
                 return (obs, es, memory, pa, key, active & ~done, totals), None
 
             initial = (obs, es, jnp.zeros(carry_dim), jnp.zeros(action_dim), key,
-                       jnp.bool_(True), jnp.zeros(6))
+                       jnp.bool_(True), jnp.zeros(8))
             final, _ = jax.lax.scan(step, initial, length=experiment.max_steps)
             return final[-1]
 
@@ -245,7 +282,9 @@ def make_evaluator(experiment, fns, carry_dim, action_dim, episodes, mode):
         totals = results.sum(0)
         return {"return": mean[0], "steps": mean[1], "completed": mean[2],
                 "known_safe_choice": jnp.where(totals[3] > 0, totals[4] / jnp.maximum(totals[3], 1), jnp.nan),
-                "repeat_fraction": totals[5] / jnp.maximum(totals[1], 1)}
+                "repeat_fraction": totals[5] / jnp.maximum(totals[1], 1),
+                'discrepancy_rms':jnp.sqrt(totals[6]/jnp.maximum(totals[1],1)),
+                'aux_twin_rms':jnp.sqrt(totals[7]/jnp.maximum(totals[1],1))}
 
     return jax.jit(jax.vmap(evaluate))
 
@@ -256,6 +295,8 @@ def summarize(values, prefix):
     result = {}
     for name, array in values.items():
         a = np.asarray(array, dtype=float)
+        if name in ("return", "return_smoothed") and not np.isfinite(a).all():
+            raise FloatingPointError("nonfinite seed return; refusing survivor-only summary")
         for seed, value in enumerate(a):
             result[f"{prefix}/{name}/seed_{seed}"] = float(value)
         finite = a[np.isfinite(a)]
@@ -281,8 +322,10 @@ def run(parser, args, build_experiment):
     hp = Hyperparameters(**{k: getattr(args, k) for k in Hyperparameters._fields
                             if k != "lambda_critic_lr"}, lambda_critic_lr=args.critic_lr)
     config = {**config_dict(args), "environment": type(env).__name__,
-              "lambda_critic_loss": "huber", "huber_delta": 1.0,
-              "reset_memory_each_round": experiment.reset_memory_each_round}
+               "huber_delta": 1.0 if args.lambda_critic_loss == "huber" else None,
+               "reset_memory_each_round": experiment.reset_memory_each_round,
+               "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+               "runtime_devices": [str(device) for device in jax.devices()]}
     args.output_dir.mkdir(parents=True, exist_ok=True)
     config_path = args.output_dir / "config.json"
     if config_path.exists() and not args.resume_from:
@@ -296,11 +339,15 @@ def run(parser, args, build_experiment):
             lambda1_critic_dims=experiment.critic_dims, lambda2_critic_dims=experiment.critic_dims,
             train_steps=args.train_steps, approximate_lambda=args.method != "ac",
             critic_layer_norm=args.critic_layer_norm, obs_fn=experiment.obs_fn,
-            mask_fn=experiment.mask_fn, seed=seed)
+            mask_fn=experiment.mask_fn, seed=seed,history_length=args.history_length)
 
     first, fns = build(args.seed)
     carry_dim = (0 if args.memory_type == "identity" else
-                 args.memory_hidden_dim * (2 if args.memory_type == "lstm" else 1))
+                  args.memory_hidden_dim * (2 if args.memory_type == "lstm" else 1))
+    if args.history_length>=0:
+        import math
+        input_shape=jax.eval_shape(experiment.obs_fn,jax.ShapeDtypeStruct(spec.obs_shape,jnp.float32)).shape
+        carry_dim=args.history_length*(math.prod(input_shape)+spec.action_dim+1)
     train = jax.jit(jax.vmap(lambda s, es, c, pa, k:
         fns.train_unrolled(s, env, params, es, c, pa, k)))
     evaluate = {mode: make_evaluator(experiment, fns, carry_dim, spec.action_dim,
@@ -333,6 +380,54 @@ def run(parser, args, build_experiment):
     config_path.write_text(json.dumps(config, indent=2) + "\n")
     if tracking:
         tracking.config.update(config, allow_val_change=True)
+        import hashlib
+        import importlib.metadata
+        import wandb
+
+        source = wandb.Artifact(f"replay-correction-source-{tracking.id}", type="source")
+        root = Path(__file__).resolve().parents[1]
+        used_files = [*sorted((root / "src").rglob("*.py")),
+                      *sorted((root / "examples").glob("*.py")),
+                      *sorted((root / "reviewer_response").glob("*.py")),
+                      *sorted((root / "reviewer_response").glob("*.sh")),
+                      *[root / "reviewer_response" / name for name in (
+                          "protocol.json", "admission.json", "provenance/source_manifest.json",
+                          "provenance/native-validation.json", "provenance/cpu-tests.xml")]]
+        hashes = {}
+        for path in used_files:
+            if path.exists():
+                hashes[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
+                source.add_file(str(path), name=str(path.relative_to(root)), policy="immutable")
+        tracking.config.update({"source_sha256": hashes, "runtime_versions": {
+            p: importlib.metadata.version(p) for p in ("jax", "jaxlib", "flax", "optax", "numpy")}})
+        tracking.log_artifact(source)
+
+    def checkpoint(name, training, rnd):
+        path = args.output_dir / name
+        save_checkpoint(path, config, training, rnd, history)
+        if tracking:
+            artifact = wandb.Artifact(f"replay-correction-checkpoint-{tracking.id}-r{rnd}",
+                                      type="checkpoint", metadata={
+                "round": rnd, "env_interactions": args.prefill_steps + rnd * args.train_steps,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+            artifact.add_file(str(path), name=name, policy="immutable",skip_cache=args.archive_checkpoints)
+            uploaded=tracking.log_artifact(artifact)
+            if args.archive_checkpoints:
+                import base64
+                uploaded.wait()
+                remote=wandb.Api(timeout=120).artifact(uploaded.qualified_name)
+                entry=remote.manifest.entries[name]
+                with path.open('rb') as stream:
+                    md5=base64.b64encode(hashlib.file_digest(stream,'md5').digest()).decode()
+                assert remote.state=='COMMITTED' and entry.digest==md5 and entry.size==path.stat().st_size
+                assert remote.metadata['sha256']==hashlib.sha256(path.read_bytes()).hexdigest()
+                receipt={'artifact':remote.qualified_name,'name':name,'round':rnd,
+                         'sha256':remote.metadata['sha256'],'md5':md5,'bytes':entry.size,
+                         'remote_committed_verified':True,'local_staging_released':'failure' not in name}
+                (args.output_dir/(name+'.archived.json')).write_text(json.dumps(receipt,indent=2)+'\n')
+                # Only this newly generated, verified remote-backed file. Never
+                # touch another study's checkpoints, caches or failure evidence.
+                if 'failure' not in name:path.unlink()
     metrics_path = args.output_dir / "metrics.jsonl"
     # On resume, the checkpoint is authoritative, including its history.
     metrics_path.write_text("".join(json.dumps(row, allow_nan=False) + "\n" for row in history))
@@ -348,9 +443,13 @@ def run(parser, args, build_experiment):
     for mode in ("random", "reference"):
         if mode in evaluate:
             reference.update(summarize(evaluate[mode](training[0], eval_keys(0, 2)), f"reference/{mode}"))
+    if args.eval_initial and not args.resume_from:
+        for mode in ("greedy", "sampled"):
+            reference.update(summarize(evaluate[mode](training[0], eval_keys(0, 3)), f"eval/{mode}"))
     log(reference)
     compiled = False
     for rnd in range(start_round + 1, args.rounds + 1):
+        check_rebuttal_guards(args.output_dir)
         agents, env_states, carries, prev_actions, keys = training
         if experiment.reset_memory_each_round:
             carries, prev_actions = jnp.zeros_like(carries), jnp.zeros_like(prev_actions)
@@ -361,6 +460,22 @@ def run(parser, args, build_experiment):
         jax.block_until_ready(agents.update_step)
         elapsed = time.perf_counter() - start
         training = (agents, env_states, carries, prev_actions, split[:, 0])
+        # Never let summarize() discard failed seeds as nonfinite observations.
+        if not all(np.isfinite(np.asarray(a)).all()
+                   for a in jax.tree.leaves((agents[:15], metrics))):
+            checkpoint("checkpoint_failure.pkl", training, rnd)
+            with (args.output_dir / "failure_metrics.pkl").open("wb") as stream:
+                pickle.dump(jax.device_get(metrics), stream)
+            failure = {"round": rnd, "reason": "nonfinite state or training metric",
+                       "env_interactions": args.prefill_steps + rnd * args.train_steps,
+                       "retry_allowed": False}
+            (args.output_dir / "failure.json").write_text(json.dumps(failure, indent=2) + "\n")
+            if tracking:
+                tracking.summary.update({"numerical_failure": True, "failure_round": rnd})
+                tracking.save(str(args.output_dir / "failure.json"), base_path=str(args.output_dir))
+                tracking.save(str(args.output_dir / "failure_metrics.pkl"), base_path=str(args.output_dir))
+                tracking.finish(exit_code=1)
+            raise FloatingPointError(f"nonfinite training; entire seed block retained at {args.output_dir}")
         row = {"round": rnd, "train_env_steps": rnd * args.train_steps,
                "env_interactions": args.prefill_steps + rnd * args.train_steps,
                "timing/train_seconds": elapsed,
@@ -369,7 +484,12 @@ def run(parser, args, build_experiment):
         compiled = True
         if rnd % args.eval_every == 0 or rnd == args.rounds:
             for mode in ("greedy", "sampled"):
-                row.update(summarize(evaluate[mode](agents, eval_keys(rnd, 3)), f"eval/{mode}"))
+                evaluated = evaluate[mode](agents, eval_keys(rnd, 3))
+                if not all(np.isfinite(np.asarray(evaluated[k])).all()
+                           for k in ('return','discrepancy_rms','aux_twin_rms')):
+                    checkpoint("checkpoint_evaluation_failure.pkl", training, rnd)
+                    raise FloatingPointError("nonfinite evaluation return/discrepancy; no seeds discarded")
+                row.update(summarize(evaluated, f"eval/{mode}"))
         if args.probe_every and rnd % args.probe_every == 0:
             from _probes import run_probes
             row.update(run_probes(args, experiment, fns, agents, carry_dim, rnd))
@@ -378,7 +498,7 @@ def run(parser, args, build_experiment):
         print(f"round {rnd}/{args.rounds}  interactions={row['env_interactions']}  "
               f"train={elapsed:.2f}s" + (f"  return={ret:.3f}" if ret is not None else ""), flush=True)
         if args.checkpoint_every and rnd % args.checkpoint_every == 0:
-            save_checkpoint(args.output_dir / f"checkpoint_{rnd}.pkl", config, training, rnd, history)
+            checkpoint(f"checkpoint_{rnd}.pkl", training, rnd)
 
     if args.probe and not (args.probe_every and args.rounds % args.probe_every == 0
                           and args.rounds > start_round):
@@ -392,8 +512,12 @@ def run(parser, args, build_experiment):
                           for row in evaluations[-args.final_return_window:]]).mean(0)
         summary.update(summarize({"return_smoothed": final}, "final"))
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
-    save_checkpoint(args.output_dir / "checkpoint_final.pkl", config, training, args.rounds, history)
+    checkpoint("checkpoint_final.pkl", training, args.rounds)
     if tracking:
+        records = wandb.Artifact(f"replay-correction-results-{tracking.id}", type="results")
+        for name in ("config.json", "metrics.jsonl", "summary.json"):
+            records.add_file(str(args.output_dir / name), name=name, policy="immutable")
+        tracking.log_artifact(records)
         tracking.summary.update(summary)
         tracking.finish()
     return summary

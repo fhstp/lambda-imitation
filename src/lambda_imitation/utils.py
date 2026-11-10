@@ -177,6 +177,7 @@ def create_actor_critic_from_env(
     mask_fn=None,
     debug=False,
     seed=0,
+    history_length=-1,
 ):
     """Build an agent from observation/action dimensions; no dataset is needed.
 
@@ -187,9 +188,16 @@ def create_actor_critic_from_env(
     hp = Hyperparameters() if hp is None else hp
     shape = jax.eval_shape(obs_fn, jax.ShapeDtypeStruct(env_spec.obs_shape, jnp.float32)).shape
     key_fe, key_heads = jax.random.split(jax.random.key(seed))
-    fe = RecurrentFeatureExtractor(
-        shape, projection, memory_type, memory_hidden_dim,
-        env_spec.action_dim if use_prev_action else 0, rngs=nnx.Rngs(key_fe))
+    if history_length >= 0:
+        from .history import HistoryFeatureExtractor
+        if memory_type != 'gru':
+            raise ValueError('Controlled histories use the same GRU at every H')
+        fe = HistoryFeatureExtractor(shape,projection,memory_hidden_dim,
+            env_spec.action_dim if use_prev_action else 0,history_length,rngs=nnx.Rngs(key_fe))
+    else:
+        fe = RecurrentFeatureExtractor(
+            shape, projection, memory_type, memory_hidden_dim,
+            env_spec.action_dim if use_prev_action else 0, rngs=nnx.Rngs(key_fe))
     return create_actor_critic(
         hp, env_spec.obs_shape, env_spec.action_dim, fe, key_heads,
         train_steps=train_steps, actor_dims=actor_dims, critic_dims=critic_dims,

@@ -1,0 +1,18 @@
+# Preserve local runtime/evidence files, but never publish live state or weights.
+*
+!.gitignore
+!admission.json
+!source_manifest.json
+!protocol.json
+!protocol.py
+!launch.py
+!native.py
+!report.py
+!test_queue.py
+!full-cpu-tests.xml
+!history-cpu-tests.xml
+!queue-cpu-tests.xml
+!archive-roundtrip.json
+!native-h*.json
+!import-provenance.json
+!publication.json

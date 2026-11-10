@@ -138,6 +138,9 @@ celerybeat.pid
 .env
 .envrc
 .venv
+.venv-b200/
+/deployment/b200/state/
+/deployment/b200/work/
 env/
 venv/
 ENV/

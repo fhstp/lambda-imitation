@@ -1,0 +1,14 @@
+{
+  "utc": "2026-11-10T12:27:28.737276+00:00",
+  "scope": "CPU-only packaging and scientific regression; not a B200 execution claim",
+  "cpu_tests": 273,
+  "passed": true,
+  "junit_sha256": "deb871cede5e8fd970c1c121c840057004e744294ee347cd47c3e8b064b9905a",
+  "bundle_manifest_sha256": "d177ce908b13d87e0e28071f274d8389070a094dd4ace247d64fa97de815c3b1",
+  "b200_native_validation_performed_by_packager": false,
+  "clean_remote_install_performed_by_packager": false,
+  "checkpoint_roundtrip_preexisting_proof": "reviewer_response/archive-roundtrip.json",
+  "local_reserved_jobs": 8,
+  "original_training_processes_interrupted": false,
+  "junit_path": "deployment/b200/validation/packaging-tests.xml"
+}

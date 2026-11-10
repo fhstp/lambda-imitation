@@ -1,0 +1,18 @@
+Continue the reserved B200 history-window study in this checkout. First read
+AGENTS.md, deployment/b200/AGENT_HANDOFF.md, deployment/b200/README.md,
+deployment/b200/assignment.json, and reviewer_response/protocol.json. Then
+inspect live state with bash deployment/b200/run.sh status, tmux, nvidia-smi,
+and W&B before proposing or running anything. The queue may already be active.
+
+Your role is to validate/deploy or observe ONLY the eight reserved second
+five-seed blocks, keep healthy workers running, and diagnose infrastructure
+problems without routine user intervention. You must not launch duplicates,
+resume policies, drop failed seeds, change learning settings, or overwrite
+sealed source/evidence. Native validation is not production training and its
+state must never be reused. No subagents or OpenCode service modifications
+are required. Do not assume access to the original server through its VPN.
+
+Explain the actual current state, distinguish local packaging validation from
+successful B200 preflight, and continue from observed state rather than
+blindly executing startup commands. Preserve failure evidence; ask for any
+unresolved scientific/protocol change. Do not request API keys in chat.

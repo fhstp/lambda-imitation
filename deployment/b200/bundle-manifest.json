@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "purpose": "Portable reserved B200 worker deployment; scientific source remains separately sealed",
+  "sha256": {
+    "deployment/b200/local.py": "efffcb5c1db494ad13cddba8ac4b7a3819bd58e1e06fa7b4fdf4659fdb579366",
+    "deployment/b200/worker_queue.py": "76d377c83a916bc9d2780254adce00c4eb88060b3077e03acef411bb4032631a",
+    "deployment/b200/tests/test_deployment.py": "34a10daad15592f983f6a88d2424c6de0e694c299199fe200e0a901cdfbb4347",
+    "deployment/b200/run.sh": "d303adf5bbc49c42df0fe9d6964d28d659094df360bf5c7b9e23351853a0669f",
+    "deployment/b200/setup.sh": "7afca3a3c42d96e860a78d004717b8d4d4750f6ef483e8babbb918c86071bca3",
+    "deployment/b200/AGENT_HANDOFF.md": "34f4a462c35842bd148dc15d527ac5c4edcef0d6526a819094ed6ef37aa8089a",
+    "deployment/b200/README.md": "118583510bb83adf4d8caf5d0db5039fe431eaa50db678e4a15b76447d806797",
+    "deployment/b200/requirements.txt": "cabf2ca23fdb70b4c9d9530b9821e533de552eb7453a67c2c471c924c19f17c0",
+    "deployment/b200/AGENT_PROMPT.txt": "826b89471638f32fc822f5688722e2254e5b5c1a4f8bf03e35141109358c1e35",
+    "deployment/b200/assignment.json": "741654502f92efc4c1ad8480bd72adb8b3d1c931f862381440848bfa00021f9d",
+    "deployment/b200/reservation-complete.json": "5ad262c73e0c6414e1a7cf642eae8106c579235c67c24ed32c2413c3613e4baa",
+    "AGENTS.md": "d664a504c73deeef21bd1b8e59d825befe02a1656d5b8d8a12636932e627fbfd"
+  }
+}

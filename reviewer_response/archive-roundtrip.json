@@ -1,0 +1,30 @@
+{
+  "passed": true,
+  "validation_only": true,
+  "production_training": false,
+  "working_output": "/dev/shm/lambda-history-archive-canary-2026-11-09/runs/wandb/run-20261109_151643-1hpfpvp3/files/training",
+  "uploaded_verified_local_staging_released_downloaded_roundtrip": [
+    {
+      "artifact": "fhstp-data-intelligence-research-group/retrace-rebuttal-validation/replay-correction-checkpoint-1hpfpvp3-r1:v1",
+      "name": "checkpoint_final.pkl",
+      "round": 1,
+      "sha256": "725d827d51c6da7715faf8fdcf469b0f12e68d11349239b42d0bd0c50d74992f",
+      "md5": "UQH+FRFMGoPnyDdgQ17oTg==",
+      "bytes": 87664,
+      "remote_committed_verified": true,
+      "local_staging_released": true,
+      "downloaded_sha256_verified": true
+    },
+    {
+      "artifact": "fhstp-data-intelligence-research-group/retrace-rebuttal-validation/replay-correction-checkpoint-1hpfpvp3-r1:v0",
+      "name": "checkpoint_1.pkl",
+      "round": 1,
+      "sha256": "725d827d51c6da7715faf8fdcf469b0f12e68d11349239b42d0bd0c50d74992f",
+      "md5": "UQH+FRFMGoPnyDdgQ17oTg==",
+      "bytes": 87664,
+      "remote_committed_verified": true,
+      "local_staging_released": true,
+      "downloaded_sha256_verified": true
+    }
+  ]
+}

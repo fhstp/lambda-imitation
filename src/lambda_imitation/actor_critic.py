@@ -92,6 +92,7 @@ class AgentFunctions(NamedTuple):
     prefill_buffer: Callable
     train_unrolled: Callable
     encode_action: Callable
+    discrepancy: Callable | None = None
 
 
 class DebugFunctions(NamedTuple):
@@ -129,9 +130,63 @@ class Hyperparameters(NamedTuple):
     sequence_length: int = 40
     lambda_truncation: int = 50
     lambda_coef: float = 0.01
+    replay_correction: str = "retrace"
+    lambda_critic_loss: str = "huber"
+    trace_diagnostics: bool = False
+    # 26 context-only transitions for ALL H, in addition to paper B=10/L=40/tail=50.
+    history_context: int = 0
 
 
-def retrace_targets(q_taken, v, rewards, dones, ratios, gamma, lam):
+def trace_coefficients(ratios, lam, correction="retrace"):
+    """Only the future-trace coefficient differs between the three conditions.
+
+    Uncorrected replay uses c=lambda, ordinary per-decision IS uses
+    c=lambda*pi/mu, and Retrace uses c=lambda*min(1, pi/mu). No self-normalizing,
+    clipping, replay prioritization or extra current-action weighting is used.
+    """
+    if correction == "retrace":
+        return lam * jnp.minimum(1.0, ratios)
+    if correction == "uncorrected":
+        return jnp.full_like(ratios, lam)
+    if correction == "is":
+        return lam * ratios
+    raise ValueError(f"unknown replay correction {correction!r}")
+
+
+def trace_diagnostics(ratios, dones, gamma, lam, correction):
+    """Read-only ratio diagnostics and log total absolute trace influence.
+
+    Log-domain computation is for reporting ONLY. It does not stabilize or
+    replace the ordinary floating-point target recursion used for learning.
+    ESS is per-transition ratio ESS, not an independent-episode sample size.
+    """
+    coefficients = trace_coefficients(ratios, lam, correction)
+    log_c = jnp.where(coefficients > 0,
+                      jnp.log(jnp.where(coefficients > 0, coefficients, 1)), -jnp.inf)
+
+    def step(carry, inputs):
+        log_mass_next, log_c_next = carry
+        done, current_log_c = inputs
+        log_future = jnp.where(done, -jnp.inf,
+                              jnp.log(gamma) + log_c_next + log_mass_next)
+        log_mass = jnp.logaddexp(0.0, log_future)
+        return (log_mass, current_log_c), log_mass
+
+    zero = jnp.zeros_like(ratios[0])
+    _, log_mass = jax.lax.scan(step, (zero, jnp.full_like(zero, -jnp.inf)),
+                              (dones.astype(bool), log_c), reverse=True)
+    # Scale cancels from ratio ESS; this avoids overflowing the diagnostic sum.
+    max_ratio = ratios.max()
+    scaled = ratios / jnp.maximum(max_ratio, jnp.finfo(ratios.dtype).tiny)
+    ess = scaled.sum() ** 2 / jnp.maximum((scaled ** 2).sum(), 1e-30) / ratios.size
+    return {"importance_ratio_mean": ratios.mean(), "importance_ratio_max": max_ratio,
+            "importance_ratio_min": ratios.min(), "importance_ratio_ess_fraction": ess,
+            "importance_ratio_gt_one_fraction": (ratios > 1).mean(),
+            "trace_coefficient_max": coefficients.max(),
+            "trace_log10_influence_max": log_mass.max() / jnp.log(10.0)}
+
+
+def retrace_targets(q_taken, v, rewards, dones, ratios, gamma, lam, correction="retrace"):
     """Truncated Retrace(λ) Q-targets for time-major ``(T, B)`` arrays.
 
     ``delta_t = r_t + gamma * (1-done_t) * V_{t+1} - Q_t`` and
@@ -148,7 +203,7 @@ def retrace_targets(q_taken, v, rewards, dones, ratios, gamma, lam):
         acc_next, c_next = carry
         delta, done, ratio = x
         acc = delta + (1.0 - done) * gamma * c_next * acc_next
-        return (acc, lam * jnp.minimum(1.0, ratio)), acc
+        return (acc, trace_coefficients(ratio, lam, correction)), acc
 
     _, accs = jax.lax.scan(
         scan_fn, (jnp.zeros_like(deltas[0]), jnp.zeros_like(deltas[0])),
@@ -193,7 +248,7 @@ def create_actor_critic(
     ``prefill_buffer(state, env, env_params, env_state, n_steps, key)``.
     Gymnax auto-reset handles episode boundaries.
     """
-    window = params.burn_in_length + params.sequence_length + params.lambda_truncation
+    window = params.history_context + params.burn_in_length + params.sequence_length + params.lambda_truncation
     if action_dim < 1 or train_steps < 1 or params.batch_size < 1:
         raise ValueError("action_dim, train_steps and batch_size must be positive")
     if params.burn_in_length < 0 or params.sequence_length < 1 or params.lambda_truncation < 1:
@@ -207,6 +262,10 @@ def create_actor_critic(
     if min(params.alpha, params.lambda_coef, params.fe_lr, params.actor_lr,
            params.critic_lr, params.lambda_critic_lr) < 0:
         raise ValueError("loss coefficients and learning rates must be nonnegative")
+    if params.replay_correction not in ("retrace", "uncorrected", "is"):
+        raise ValueError("replay_correction must be retrace, uncorrected, or is")
+    if params.lambda_critic_loss not in ("huber", "mse"):
+        raise ValueError("lambda_critic_loss must be huber or mse")
     expected_pa = action_dim if use_prev_action else 0
     if getattr(feature_extractor, "prev_action_dim", 0) != expected_pa:
         raise ValueError(f"feature extractor prev_action_dim must equal {expected_pa}")
@@ -316,6 +375,18 @@ def create_actor_critic(
         probs, _ = policy(agent.actor, x, mask)
         return jnp.min(q_values(agent.critic, critic_graph, x), -1)[0], probs[0], new_carry
 
+    @jax.jit
+    def discrepancy(agent,obs,carry,prev_action=None):
+        """Read-only current-policy action-weighted learned squared disagreement."""
+        _,x=features(agent,obs,carry,prev_action)
+        mask=mask_fn(obs) if mask_fn is not None else None
+        probs,_=policy(agent.actor,x,mask)
+        a=q_values(agent.lambda1_critic,l1_graph,x)[0]
+        b=q_values(agent.lambda2_critic,l2_graph,x)[0]
+        d=jnp.min(a,-1)-jnp.min(b,-1)
+        twin=.5*((a[:,0]-a[:,1])**2+(b[:,0]-b[:,1])**2)
+        return jnp.sum(probs[0]*d**2),jnp.sum(probs[0]*twin)
+
     def calculate_latent(fe, target_fe, observations, actions, dones, init_carries):
         """Zero-start replay unroll with detached burn-in and episode resets."""
         model, target_model = nnx.merge(fe_graph, fe), nnx.merge(fe_graph, target_fe)
@@ -323,6 +394,12 @@ def create_actor_critic(
         dones = jnp.swapaxes(dones, 0, 1)
         enc = (encode_action(jnp.swapaxes(actions, 0, 1)) if use_prev_action else
                jnp.zeros((*obs.shape[:2], 0), jnp.float32))
+
+        if hasattr(feature_extractor,'history_length'):
+            # Recompute every window under current/target weights, with no stale
+            # learned carry and no information from before its declared horizon.
+            bl=params.history_context+params.burn_in_length
+            return model.sequence(obs,enc,dones,start=bl),target_model.sequence(obs,enc,dones,start=bl)
 
         def step(carries, inputs):
             carry, target_carry, pa = carries
@@ -334,7 +411,7 @@ def create_actor_critic(
                     jnp.where(reset, 0, action)), (y, ty)
 
         initial = (init_carries, init_carries, jnp.zeros_like(enc[0]))
-        bl = params.burn_in_length
+        bl = params.history_context + params.burn_in_length
         burnt, _ = jax.lax.scan(step, initial, (obs[:bl], dones[:bl], enc[:bl]), unroll=8)
         _, latent = jax.lax.scan(step, jax.lax.stop_gradient(burnt),
                                  (obs[bl:], dones[bl:], enc[bl:]), unroll=8)
@@ -348,13 +425,18 @@ def create_actor_critic(
         shape = rewards.shape
         v = value(target_actor, tq, graph, flat(target_latent), masks).reshape(shape)
         target_taken = q_min(tq, graph, flat(target_latent), flat(actions)).reshape(shape)
-        targets = retrace_targets(target_taken, v, rewards, dones, ratios, params.gamma, lam)
+        targets = retrace_targets(target_taken, v, rewards, dones, ratios, params.gamma, lam,
+                                  correction=params.replay_correction)
         q1, q2 = (a.reshape(shape) for a in q_both(q, graph, flat(latent), flat(actions)))
         end = -params.lambda_truncation
         targets = jax.lax.stop_gradient(targets)
         # Both twins regress independently. The minimum belongs only in targets.
-        loss = 0.5 * (optax.huber_loss(q1[:end], targets[:end]).mean()
-                      + optax.huber_loss(q2[:end], targets[:end]).mean())
+        if params.lambda_critic_loss == "huber":
+            loss = 0.5 * (optax.huber_loss(q1[:end], targets[:end]).mean()
+                           + optax.huber_loss(q2[:end], targets[:end]).mean())
+        else:
+            loss = 0.5 * (((q1[:end] - targets[:end]) ** 2).mean()
+                           + ((q2[:end] - targets[:end]) ** 2).mean())
         return loss, {
             f"lambda{lam}_loss": loss,
             f"lambda{lam}_critic": jnp.minimum(q1, q2)[:end].mean(),
@@ -371,7 +453,7 @@ def create_actor_critic(
         latent, target_latent = calculate_latent(
             fe, agent.feature_extractor_target, data[obs_key], data[action_key],
             data[terminated_key], feature_extractor.initialize_carry(params.batch_size))
-        bl = params.burn_in_length
+        bl = params.history_context + params.burn_in_length
         actions, rewards, dones, behaviour = (
             jnp.swapaxes(data[k], 0, 1)[bl:]
             for k in (action_key, reward_key, terminated_key, behaviour_key))
@@ -379,7 +461,7 @@ def create_actor_critic(
                  if mask_fn is not None else None)
         masks_flat = flat(masks) if masks is not None else None
         actor_latent = (jax.lax.stop_gradient(flat(latent))
-                        if feature_extractor.carry_dim else flat(latent))
+                         if feature_extractor.carry_dim or hasattr(feature_extractor,'history_length') else flat(latent))
         probs, log_probs = policy(actor, actor_latent, masks_flat)
         actor_q = jnp.min(q_values(jax.lax.stop_gradient(critic), critic_graph, actor_latent), -1)
         entropy = -(probs * log_probs).sum(-1)
@@ -409,6 +491,9 @@ def create_actor_critic(
                     actions, rewards, dones, ratios, masks_flat)
                 loss += aux_loss
                 metrics.update(aux_metrics)
+            if params.trace_diagnostics:
+                metrics.update(trace_diagnostics(
+                    ratios, dones, params.gamma, params.lambda2, params.replay_correction))
             d = (q_min(jax.lax.stop_gradient(l1), l1_graph, flat(latent[:-1]), flat(actions[:-1]))
                  - q_min(jax.lax.stop_gradient(l2), l2_graph, flat(latent[:-1]), flat(actions[:-1])))
             ld = (d ** 2).mean()
@@ -457,7 +542,10 @@ def create_actor_critic(
 
         (agent, es, carry, pa, _), metrics = jax.lax.scan(
             step, (agent, env_state, carry, prev_action, key), length=train_steps)
-        return agent, es, carry, pa, jax.tree.map(lambda x: x.mean(), metrics)
+        reduced = {name: (value.max() if name.endswith("_max") else
+                          value.min() if name.endswith("_min") else value.mean())
+                   for name, value in metrics.items()}
+        return agent, es, carry, pa, reduced
 
     @partial(jax.jit, static_argnames=["env", "n_steps"])
     def prefill_buffer(agent, env, env_params, env_state, n_steps, key):
@@ -493,7 +581,8 @@ def create_actor_critic(
         (agent, es, _), _ = jax.lax.scan(step, (agent, env_state, key), jnp.arange(n_steps))
         return agent, es
 
-    fns = AgentFunctions(predict, prefill_buffer, train_unrolled, encode_action)
+    fns = AgentFunctions(predict, prefill_buffer, train_unrolled, encode_action,
+                         discrepancy if approximate_lambda else None)
     if debug:
         return state, fns, DebugFunctions(get_importance_ratios, calculate_latent,
                                           predict_qpi, loss_combined, update_step)

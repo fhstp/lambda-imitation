@@ -1,0 +1,16 @@
+{
+  "lease_id": "32df839bad43f7e9",
+  "assignment_sha256": "741654502f92efc4c1ad8480bd72adb8b3d1c931f862381440848bfa00021f9d",
+  "jobs": [
+    "battleship-retrace-history00-block2-5seeds",
+    "battleship-retrace-history01-block2-5seeds",
+    "battleship-retrace-history02-block2-5seeds",
+    "battleship-retrace-history05-block2-5seeds",
+    "battleship-retrace-history10-block2-5seeds",
+    "battleship-retrace-history15-block2-5seeds",
+    "battleship-retrace-history20-block2-5seeds",
+    "battleship-retrace-history25-block2-5seeds"
+  ],
+  "local_dispatch_only_was_paused": true,
+  "utc": "2026-11-10T12:08:54.816678+00:00"
+}

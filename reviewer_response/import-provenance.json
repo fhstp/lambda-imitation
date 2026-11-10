@@ -1,0 +1,17 @@
+{
+  "base": "publication-cleanup",
+  "commit": "07381e766181521b3461b87b274970f00d8b46d1",
+  "changes_imported_for_mse_and_guarded_runner": {
+    "src/lambda_imitation/actor_critic.py": {
+      "publication_sha256": "b000362cb20f8236fed7a28b3332aa4f8c48ada1d2057a7080c965051cdf296d",
+      "rebuttal_base_sha256": "99f8baadb1471af2759e640adb8cf295ca3013781d684bc2211886a4d4624365"
+    },
+    "examples/_common.py": {
+      "publication_sha256": "d58676508efb11056b944cf080589448368bbac07ee2d952bb88483490bd8316",
+      "rebuttal_base_sha256": "ad101d529fba5e4fae6e4192cb21c11421b9bf3605c2ecf58a1260b2837c9716"
+    },
+    "reviewer_response/protocol.py": {
+      "rebuttal_base_sha256": "cf451e8d68b0bf00b3b6ba630a243642238a9ecad9ef0f9b3a91166a2cafe6cc"
+    }
+  }
+}
