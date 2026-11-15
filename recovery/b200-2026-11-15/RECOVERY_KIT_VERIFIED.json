@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "utc": "2026-11-15T12:51:11.415025+00:00",
+  "artifact": "fhstp-data-intelligence-research-group/retrace-rebuttal-validation/b200-recovery-kit-20261115-v1:v0",
+  "git_commit": "5f9a02f29b4b351b81317ce750f943d859de54b4",
+  "sha256": {
+    "REMOTE.md": "2e913e82faea3b13a57b7e12f25863dc4f67a3c63e759353384ec2abadd3eb78",
+    "restore.py": "05004f95c1ee314b4f4c9b0fd0e6b9ca3b1e02142b35885777eee6ffc7ba3e74",
+    "COMPLETION_AUDIT.json": "5bd4dd180e303b98ae58c3df1be4dd8b70aba4b848987af021d3cf3e7df828e4",
+    "manifest.json": "7d5e1ff00e042c00a37d737f3fa725425843e02f1db8ac13033becac0e146e99",
+    "README.md": "33bcd55d34757d7f8ca1b773f325c736aca16ae3f14391ca5e1a9f9662980262",
+    "RESTORE_TEST.json": "dcea390dfc6fe4043da2e11064e1e52b091a60075da332d4c0e1a8be42a00013",
+    "FINAL_RESTORE_TEST.json": "3191e1401d0d55bdb5beee42f9a7538a1929878b4adbdcbecd395197613a2d8d",
+    "PAPER_HANDOFF.md": "35f1e518d3b64e2ff8da35429ebbc5e672a7c932adba3c756002f37934aa5e08",
+    "repository.bundle": "3cab521055c682b533459263207d9f74a7dcf74efe5664af543303c68b3fcf69"
+  },
+  "remote_download_and_fresh_clone_verified": true,
+  "paper_data_verifier_passed_in_remote_kit_clone": true,
+  "local_deletion": false
+}
