@@ -1,0 +1,9 @@
+{
+  "utc": "2026-11-15T11:36:16.661839+00:00",
+  "report_download_and_sha256_verification_passed": true,
+  "report_bytes": 67230,
+  "report_sha256": "2807702f09da822f38e31c4b5394c019fca1bf01906ab996e221d2125df5ea49",
+  "local_evidence_archive_committed": true,
+  "archive_ttl": "None",
+  "note": "This proves current access through the configured account, not future availability or the state of every other account."
+}
