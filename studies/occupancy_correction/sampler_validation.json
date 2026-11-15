@@ -1,0 +1,19 @@
+{
+  "scope": "sampler and sampled-anchor target arithmetic only; not an end-to-end training admission",
+  "production_admitted": false,
+  "test_started_local": "2026-11-13T13:50:34.261506",
+  "host": "dgxB200",
+  "platform": "cpu",
+  "tests": 27,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "seconds": 3.091,
+  "junit_report": "/tmp/opencode/occupancy-sampler-tests-2026-11-13.xml",
+  "source_sha256": {
+    "sampling.py": "a77da0c6c53e8cd906928640fbd296485c02c7c70c3ce6479d4dfbeccd5cb72d",
+    "test_sampling.py": "a945af3f49cc589746fa9b9d548f8356e9c98eeeba12a35a741792e1d0353d6e"
+  },
+  "historical_sealed_files_checked": 44,
+  "historical_seal_mismatches": []
+}
