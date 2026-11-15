@@ -1,0 +1,356 @@
+{
+  "histories": {
+    "0": {
+      "seeds": [
+        7451234536,
+        7451234537,
+        7451234538,
+        7451234539,
+        7451234540,
+        7451234542,
+        7451234543,
+        7451234544,
+        7451234545,
+        7451234546
+      ],
+      "endpoint": {
+        "return": {
+          "mean": 6.459999847412109,
+          "lower": 5.617321441158396,
+          "upper": 7.302678253665823
+        },
+        "discrepancy_rms": {
+          "mean": 3.0880918979644774,
+          "lower": 2.8063137763434547,
+          "upper": 3.3698700195855
+        },
+        "greedy_discrepancy_rms": {
+          "mean": 3.0682049989700317,
+          "lower": 2.783324548889941,
+          "upper": 3.3530854490501225
+        },
+        "aux_twin_rms": {
+          "mean": 0.10222116485238075,
+          "lower": 0.08856181818287427,
+          "upper": 0.11588051152188723
+        },
+        "replay_discrepancy_rms": {
+          "mean": 3.115216397643854,
+          "lower": 2.7212465997503132,
+          "upper": 3.509186195537395
+        }
+      }
+    },
+    "1": {
+      "seeds": [
+        7451234536,
+        7451234537,
+        7451234538,
+        7451234539,
+        7451234540,
+        7451234542,
+        7451234543,
+        7451234544,
+        7451234545,
+        7451234546
+      ],
+      "endpoint": {
+        "return": {
+          "mean": 6.555999898910523,
+          "lower": 6.088935161136601,
+          "upper": 7.0230646366844445
+        },
+        "discrepancy_rms": {
+          "mean": 1.9264014124870301,
+          "lower": 1.77296764232159,
+          "upper": 2.07983518265247
+        },
+        "greedy_discrepancy_rms": {
+          "mean": 1.9294692158699036,
+          "lower": 1.765681169438183,
+          "upper": 2.093257262301624
+        },
+        "aux_twin_rms": {
+          "mean": 0.5566555678844451,
+          "lower": 0.5080510498668097,
+          "upper": 0.6052600859020806
+        },
+        "replay_discrepancy_rms": {
+          "mean": 2.053047634597607,
+          "lower": 1.9569070592076254,
+          "upper": 2.1491882099875887
+        }
+      }
+    },
+    "2": {
+      "seeds": [
+        7451234536,
+        7451234537,
+        7451234538,
+        7451234539,
+        7451234540,
+        7451234542,
+        7451234543,
+        7451234544,
+        7451234545,
+        7451234546
+      ],
+      "endpoint": {
+        "return": {
+          "mean": 5.961999797821045,
+          "lower": 5.273026989889422,
+          "upper": 6.650972605752669
+        },
+        "discrepancy_rms": {
+          "mean": 4.037417864799499,
+          "lower": 3.890991418197925,
+          "upper": 4.1838443114010735
+        },
+        "greedy_discrepancy_rms": {
+          "mean": 4.0771037340164185,
+          "lower": 3.9189150642953225,
+          "upper": 4.235292403737514
+        },
+        "aux_twin_rms": {
+          "mean": 3.6641819715499877,
+          "lower": 3.4949803156114503,
+          "upper": 3.833383627488525
+        },
+        "replay_discrepancy_rms": {
+          "mean": 3.2683031013251047,
+          "lower": 3.1833207513428117,
+          "upper": 3.3532854513073977
+        }
+      }
+    },
+    "5": {
+      "seeds": [
+        7451234536,
+        7451234537,
+        7451234538,
+        7451234539,
+        7451234540,
+        7451234542,
+        7451234543,
+        7451234544,
+        7451234545,
+        7451234546
+      ],
+      "endpoint": {
+        "return": {
+          "mean": 6.549999856948853,
+          "lower": 6.102153697854963,
+          "upper": 6.997846016042743
+        },
+        "discrepancy_rms": {
+          "mean": 19.765383338928224,
+          "lower": 18.39511096677741,
+          "upper": 21.13565571107904
+        },
+        "greedy_discrepancy_rms": {
+          "mean": 19.791928863525392,
+          "lower": 18.392630408810465,
+          "upper": 21.19122731824032
+        },
+        "aux_twin_rms": {
+          "mean": 16.73103837966919,
+          "lower": 15.447672137629088,
+          "upper": 18.014404621709293
+        },
+        "replay_discrepancy_rms": {
+          "mean": 17.488299294456322,
+          "lower": 16.522085540468264,
+          "upper": 18.45451304844438
+        }
+      }
+    },
+    "10": {
+      "seeds": [
+        7451234536,
+        7451234537,
+        7451234538,
+        7451234539,
+        7451234540,
+        7451234542,
+        7451234543,
+        7451234544,
+        7451234545,
+        7451234546
+      ],
+      "endpoint": {
+        "return": {
+          "mean": 9.793999576568604,
+          "lower": 9.409799747722023,
+          "upper": 10.178199405415185
+        },
+        "discrepancy_rms": {
+          "mean": 9.657397747039795,
+          "lower": 8.797024448767274,
+          "upper": 10.517771045312315
+        },
+        "greedy_discrepancy_rms": {
+          "mean": 9.630173587799073,
+          "lower": 8.827212527906408,
+          "upper": 10.433134647691737
+        },
+        "aux_twin_rms": {
+          "mean": 7.804019546508789,
+          "lower": 7.290478299340757,
+          "upper": 8.31756079367682
+        },
+        "replay_discrepancy_rms": {
+          "mean": 7.450141815128144,
+          "lower": 7.2447053895480815,
+          "upper": 7.6555782407082065
+        }
+      }
+    },
+    "15": {
+      "seeds": [
+        7451234536,
+        7451234537,
+        7451234538,
+        7451234539,
+        7451234540,
+        7451234542,
+        7451234543,
+        7451234544,
+        7451234545,
+        7451234546
+      ],
+      "endpoint": {
+        "return": {
+          "mean": 11.19799976348877,
+          "lower": 10.668723769917406,
+          "upper": 11.727275757060134
+        },
+        "discrepancy_rms": {
+          "mean": 3.9429780721664427,
+          "lower": 3.453515600620057,
+          "upper": 4.432440543712828
+        },
+        "greedy_discrepancy_rms": {
+          "mean": 3.9142384052276613,
+          "lower": 3.4309230685632297,
+          "upper": 4.397553741892093
+        },
+        "aux_twin_rms": {
+          "mean": 3.0623810291290283,
+          "lower": 2.735956720631115,
+          "upper": 3.3888053376269416
+        },
+        "replay_discrepancy_rms": {
+          "mean": 3.352212957457021,
+          "lower": 3.0636790468571675,
+          "upper": 3.6407468680568744
+        }
+      }
+    },
+    "20": {
+      "seeds": [
+        7451234536,
+        7451234537,
+        7451234538,
+        7451234539,
+        7451234540,
+        7451234542,
+        7451234543,
+        7451234544,
+        7451234545,
+        7451234546
+      ],
+      "endpoint": {
+        "return": {
+          "mean": 11.643999671936035,
+          "lower": 11.237101896626642,
+          "upper": 12.050897447245427
+        },
+        "discrepancy_rms": {
+          "mean": 2.5337422609329225,
+          "lower": 2.1220330278606725,
+          "upper": 2.9454514940051726
+        },
+        "greedy_discrepancy_rms": {
+          "mean": 2.486517238616943,
+          "lower": 2.0920114583490794,
+          "upper": 2.881023018884807
+        },
+        "aux_twin_rms": {
+          "mean": 2.089543175697327,
+          "lower": 1.6691787160531555,
+          "upper": 2.509907635341498
+        },
+        "replay_discrepancy_rms": {
+          "mean": 2.2552052078904947,
+          "lower": 2.1261076335281213,
+          "upper": 2.384302782252868
+        }
+      }
+    },
+    "25": {
+      "seeds": [
+        7451234536,
+        7451234537,
+        7451234538,
+        7451234539,
+        7451234540,
+        7451234542,
+        7451234543,
+        7451234544,
+        7451234545,
+        7451234546
+      ],
+      "endpoint": {
+        "return": {
+          "mean": 11.72599983215332,
+          "lower": 11.333310178750224,
+          "upper": 12.118689485556416
+        },
+        "discrepancy_rms": {
+          "mean": 2.531553399562836,
+          "lower": 1.960549113069874,
+          "upper": 3.102557686055798
+        },
+        "greedy_discrepancy_rms": {
+          "mean": 2.5406154870986937,
+          "lower": 1.9683558026046843,
+          "upper": 3.112875171592703
+        },
+        "aux_twin_rms": {
+          "mean": 1.936859953403473,
+          "lower": 1.5271012793479386,
+          "upper": 2.3466186274590073
+        },
+        "replay_discrepancy_rms": {
+          "mean": 2.0699916806019827,
+          "lower": 1.901507661080225,
+          "upper": 2.2384757001237405
+        }
+      }
+    }
+  },
+  "n_seeds_per_history": 10,
+  "primary_endpoint_interactions": 492800,
+  "confidence": "Pointwise 95% Student-t across independent training seeds",
+  "historical_results_pooled": false,
+  "input_metrics_sha256": {
+    "battleship-retrace-history00-block1-5seeds": "d73e318a08c2027903a9c38805b336ce5885f481871a4c991838951367a69d9f",
+    "battleship-retrace-history00-block2-5seeds": "131c87c5391967b574881a6f4b3164c2034fe8dd2cdfb70fb0975e9ac40f480f",
+    "battleship-retrace-history01-block1-5seeds": "d656b8d731d255ab4dce12f7afcd4d244f9bc986592a351e245cdfa15564f7f6",
+    "battleship-retrace-history01-block2-5seeds": "5a674cd73ff895b05e95d0b00c6f4d0b7e2ef0d0cf84e64d6543ac89d9c3d131",
+    "battleship-retrace-history02-block1-5seeds": "8f42a0d43c4988f0717d1d9498d518f7d07526f5b3f79906f93b66c50066b988",
+    "battleship-retrace-history02-block2-5seeds": "1242429886d1ae8b621b7d125472c236b5d9b86f2c50b462dc60e9f8db7b4544",
+    "battleship-retrace-history05-block1-5seeds": "186cbb4d9d22a9c9a3f94e7efa9ac9003b50b0a8703177491c5cd5ef5aa7e8e2",
+    "battleship-retrace-history05-block2-5seeds": "ff0e1e4e6d5b213c29ff6c69c2ee4fa4429b94bad6a56380f3b3b75e47daacfc",
+    "battleship-retrace-history10-block1-5seeds": "03ea6256df9dfecf636175370cd0859d8b3b846d944f33b34955c84d868917fb",
+    "battleship-retrace-history10-block2-5seeds": "c0ac0b98fc4dd49201b47c7ee0872b1e02318fb2b8e9b104006a3d105d12e522",
+    "battleship-retrace-history15-block1-5seeds": "d3c331426a85d92e528331182e8508f17e07a9e73ab6692a46a0db9491f5f4c3",
+    "battleship-retrace-history15-block2-5seeds": "f3006759775e1e7f138e1cb70cae8423ad9670d645205d610924d4efef7b571f",
+    "battleship-retrace-history20-block1-5seeds": "237a6f98adc8d36b1f65afdeb837b473e30ad9c28483ebf1c9516d76d06faf73",
+    "battleship-retrace-history20-block2-5seeds": "d307dad68f109651fa26d7d98acb1167dbcfbe7b328a3ee0eeeef23baf28ee88",
+    "battleship-retrace-history25-block1-5seeds": "8ee278fe629233e2baf6d1b062ac04325e71a069e7193d3b07f9dc9e69ffc0cd",
+    "battleship-retrace-history25-block2-5seeds": "c85273c61fb63bd549f4e5f184ee279a2cff71b67e64a6a35a08a791aa4aa737"
+  },
+  "first_host_lifecycle_receipts_not_recovered": true,
+  "completion_evidence_caveat": "First blocks verified from finished W&B runs, immutable final results, full grids, configs and source hashes; original host lifecycle receipts are not included"
+}

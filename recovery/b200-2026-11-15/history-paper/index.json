@@ -1,0 +1,177 @@
+[
+  {
+    "path": "first-blocks/battleship-retrace-history00-block1-5seeds/config.json",
+    "sha256": "051d33f98f28377d692ab51fb276bab88c889ae4cda54fad2d0c85f0b1b9be1a",
+    "bytes": 1514
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history00-block1-5seeds/metrics.jsonl.gz",
+    "sha256": "84a7db7cbcfe9a06a17ec571d20896d9141bbd2387806ace7e85252f225686f4",
+    "bytes": 124450
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history00-block1-5seeds/summary.json",
+    "sha256": "5bedbb7aa2dc2d476b7acebe9d227eee38753ce46f537e404effd28375723483",
+    "bytes": 402
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history00-block1-5seeds/wandb-config.json",
+    "sha256": "56f4582a394e2f44e2d0a49654e6e741f3cb326f178e3b7f4594b6d738f72e7d",
+    "bytes": 3792
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history01-block1-5seeds/config.json",
+    "sha256": "218e715773115a00b91cfebcfa53cda8e9e85fc51632ba8da2fb133f1efdbfe7",
+    "bytes": 1514
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history01-block1-5seeds/metrics.jsonl.gz",
+    "sha256": "355cede414bffcfe27c27e847f35e672a4e04f14b9c634760b878906bba0fe64",
+    "bytes": 122099
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history01-block1-5seeds/summary.json",
+    "sha256": "eece2f2c18264823b5f5c85db0792f47c28e7d9ec195bc6eae99289c36f856ef",
+    "bytes": 400
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history01-block1-5seeds/wandb-config.json",
+    "sha256": "4ef5d385b2ec366ec49651ec0220d4bab5b871f245f5f07f67e35507d47c75e9",
+    "bytes": 3792
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history02-block1-5seeds/config.json",
+    "sha256": "3a41159a823c499f845abe106dc5ede55fb8aa9fade5c9c79a058e1ec7587305",
+    "bytes": 1514
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history02-block1-5seeds/metrics.jsonl.gz",
+    "sha256": "a781606fa55b605918d158ed79e22f119ba0e155bc5b7b0bd9ccae2860ce4700",
+    "bytes": 118721
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history02-block1-5seeds/summary.json",
+    "sha256": "14040ea3fb245d55e2917f5dd6d6892b1ec51149229c07edb2b4a6cbaf3dbbdf",
+    "bytes": 401
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history02-block1-5seeds/wandb-config.json",
+    "sha256": "1ee91ec524a7f1c0a2b677ac487fb3b93e826f5824655e939cfb88ee88860c51",
+    "bytes": 3792
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history05-block1-5seeds/config.json",
+    "sha256": "1af0352b305ceac82a6337e7a03d7f88d03f5bef6af4573fa304b92b5570a839",
+    "bytes": 1514
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history05-block1-5seeds/metrics.jsonl.gz",
+    "sha256": "b5ac6b5253ff0dcc9df266fddd52b36b617e9ec117ca7b0693325f6ad67d04db",
+    "bytes": 120496
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history05-block1-5seeds/summary.json",
+    "sha256": "514efe998100d76145f35ec9f233c789aace49c44ae553b3ab54d0e02e0c74b4",
+    "bytes": 399
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history05-block1-5seeds/wandb-config.json",
+    "sha256": "6ed3b132d838b2b604e2945ca696fd4e4909fcea6de313fc4093deeb73306724",
+    "bytes": 3792
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history10-block1-5seeds/config.json",
+    "sha256": "8df3817cbbaedc2d0fcdacc9709d012980052eee8bb42f20086514ecf4f32fee",
+    "bytes": 1515
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history10-block1-5seeds/metrics.jsonl.gz",
+    "sha256": "1c03d56ec5cf88258a64f1e5732577f5ff6bc6d0145d8a28a1e07c12a8af5890",
+    "bytes": 120928
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history10-block1-5seeds/summary.json",
+    "sha256": "4e23c5974a68c7b1e67aedc7340db8fdef055d6d582540a21cade699b11c2764",
+    "bytes": 394
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history10-block1-5seeds/wandb-config.json",
+    "sha256": "d460f29dea66bd20f8a59fe679c0a652254da4d320165b6aa5f3eb304875f7f8",
+    "bytes": 3793
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history15-block1-5seeds/config.json",
+    "sha256": "0bd2ed0975fd187afce032cb8c07b9b2f610aaf8b4d1f28e9ed9f05af7344e33",
+    "bytes": 1515
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history15-block1-5seeds/metrics.jsonl.gz",
+    "sha256": "6ca4bc6dfc9d8f036b0304544a8d0ae96aed09654d3d57e35922fa6830ef9807",
+    "bytes": 119737
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history15-block1-5seeds/summary.json",
+    "sha256": "fe64b45b4564e607f617a358cbb0660e9d1901c880487e479ff93aedc34fe8cf",
+    "bytes": 407
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history15-block1-5seeds/wandb-config.json",
+    "sha256": "859d718681125b0d059b3b516404133e297d53cd1a864825fa01cc32be4f9782",
+    "bytes": 3793
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history20-block1-5seeds/config.json",
+    "sha256": "07808bcec5a2bb236b784710ee8c7ac538861e9a4ffe9e31426b6cfb127904e1",
+    "bytes": 1515
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history20-block1-5seeds/metrics.jsonl.gz",
+    "sha256": "754458a463146a31dd09ca479f92b925bb8db669529d052d7edba25397b75a82",
+    "bytes": 119624
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history20-block1-5seeds/summary.json",
+    "sha256": "8c4b21503063906980f8b1575fa395bf0dccfee064b852803a85b59151a540db",
+    "bytes": 406
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history20-block1-5seeds/wandb-config.json",
+    "sha256": "ab156e371b2814648ceaebc16a7323de0dc81e53cbff1c83836316c344968b2c",
+    "bytes": 3793
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history25-block1-5seeds/config.json",
+    "sha256": "c4ee843e646a3f8d9c1a9e166d24d7ea4ebd78fbb4e7694ed328c553693220ac",
+    "bytes": 1515
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history25-block1-5seeds/metrics.jsonl.gz",
+    "sha256": "5baba216aef05bbcffa7342979d90cd4953ee19b7b419d18e68ed2975b07ceef",
+    "bytes": 119882
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history25-block1-5seeds/summary.json",
+    "sha256": "7585cafd32c46853aebb1e626f6d7a649efc0e89749fa6095b5ae781c5c93a84",
+    "bytes": 406
+  },
+  {
+    "path": "first-blocks/battleship-retrace-history25-block1-5seeds/wandb-config.json",
+    "sha256": "04c3445f6bcdca6e4091343cd51a3318b94b56f306df50a3f1a8106701d2a492",
+    "bytes": 3793
+  },
+  {
+    "path": "provenance.json",
+    "sha256": "cb5b1712778690c400186b450fbed7f686fede760007bb4380b9056dd6b5a6a1",
+    "bytes": 27424
+  },
+  {
+    "path": "seed_metrics.csv.gz",
+    "sha256": "48146ab59e984e47e6a415718d03b34f8a58c1e159980b71a223fa9e6e50d33c",
+    "bytes": 159364
+  },
+  {
+    "path": "statistics.json",
+    "sha256": "a1c943f32bd97b0cd6552a51b3158e2dc78bbcc2921278b9733d4fec318583e7",
+    "bytes": 10702
+  }
+]

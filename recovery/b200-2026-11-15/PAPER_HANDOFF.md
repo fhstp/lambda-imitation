@@ -13,6 +13,36 @@ Branch: `rebuttal/occupancy-correction-2026-11-13` in
 The user has only **10 GB free**. Do not install a GPU runtime or download all
 checkpoints. No W&B access is needed to use the Git-preserved results.
 
+**Both requested paper datasets are now in Git:** the complete occupancy /
+importance-sampling study, and all 16 blocks / 80 seed instances of the history
+study. The original host's eight first blocks were additionally recovered from
+their immutable final W&B result artifacts. See `PAPER_DATA_COVERAGE.json`.
+
+## Paper-facing numerical tables
+
+- `paper-tables/occupancy-learning.csv.gz`: **27,120 per-seed learning-curve rows**
+  for both games and all six sampling/trace conditions, including returns,
+  discrepancy measures, importance-ratio and trace-coefficient diagnostics.
+- `paper-tables/occupancy-frozen-fits.csv.gz`: **2,340 per-seed fixed-policy fit
+  rows** for the separate controls.
+- `history-paper/seed_metrics.csv.gz`: **3,840 per-seed history-curve rows** across
+  H=0,1,2,5,10,15,20,25, ten seeds each, at all 48 primary reporting checkpoints.
+- `history-paper/statistics.json`: history endpoint summaries using the unchanged
+  admitted report's Student-t summary function.
+- `history-paper/first-blocks/`: original first-host configs, full metrics and
+  summaries, plus W&B configurations/source hashes. B200 second-block raw data
+  remains under `snapshots/history/`.
+
+These are numerical results, not just figures. They support replotting and
+checking both studies without model checkpoints. `paper-tables/README.md`
+documents columns and scope. Each supplement has a file-hash index.
+
+Verify the tables on the new server using only Python's standard library:
+
+```bash
+python3.12 recovery/b200-2026-11-15/verify_paper_data.py
+```
+
 ## Small, independent copy of the paper's input data
 
 ```bash
@@ -23,6 +53,8 @@ python3.12 recovery/b200-2026-11-15/restore.py \
 This materializes approximately **217 MB** of original results/provenance from
 approximately 46 MB of compact Git snapshots. It verifies original byte hashes.
 These copies remain usable even if W&B's UI or API is unavailable.
+The supplemental `history-paper/` and `paper-tables/` data above are already in
+the Git checkout; they are additional to these original-server state snapshots.
 
 Important repository files:
 
@@ -56,10 +88,14 @@ the `studies/` protocol path is relative to the repository root.
   historical curves exclusively to discounted occupancy.
 - Battleship's primary endpoint is 492,800 interactions including prefill, not
   the later 512,800 training endpoint. Minesweeper's is 1,006,016. No peak picking.
-- The history archive contains only the eight **second** five-seed blocks from
-  this server (40 seed instances). A full 80-seed history-study analysis also
-  requires the first blocks from the other host; do not assume they are here or
-  inflate the seed count. Keep the original allocation/provenance separate.
+- The original B200 state archive contains only its eight **second** blocks.
+  The supplemental `history-paper/` export now recovers the other host's eight
+  first blocks too, providing the full predeclared 80 seed instances. Keep these
+  origins distinct in provenance; do not count the exports as additional runs.
+- First-host results were verified against finished W&B runs, immutable final
+  result artifacts, all 50 rounds, configs and admitted source hashes. Original
+  first-host lifecycle/exit receipts were not recovered. Do not fabricate those
+  receipts or claim they were verified; request them separately if required.
 - Incorporate evidence and caveats faithfully. Do not modify the sealed protocol
   or source files to make the narrative or a result more favorable.
 

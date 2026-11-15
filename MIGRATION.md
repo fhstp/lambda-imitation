@@ -15,3 +15,10 @@ cleanup is explicitly agreed.
 With only 10 GB free, use the **[paper-work handoff](recovery/b200-2026-11-15/PAPER_HANDOFF.md)**.
 All existing paper statistics, figures and per-seed metrics can be used from Git
 without downloading the large checkpoints or accessing W&B.
+
+Both paper additions are covered: the complete occupancy/importance-sampling
+comparison and **all 16 blocks / 80 seed instances of the history study**. The
+original host's first history blocks were additionally exported from immutable
+W&B results. See `recovery/b200-2026-11-15/PAPER_DATA_COVERAGE.json` and the compact
+tables linked in the handoff; this does not expand the B200 checkpoint archive's
+scope to include the other host's checkpoints.

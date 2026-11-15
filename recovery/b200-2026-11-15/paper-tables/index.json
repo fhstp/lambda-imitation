@@ -1,0 +1,12 @@
+[
+  {
+    "path": "occupancy-frozen-fits.csv.gz",
+    "sha256": "ad42013a5d708273eb7bb6a2fb62cb91f2c8a48f49d10d2476e968122a9d78c4",
+    "bytes": 72387
+  },
+  {
+    "path": "occupancy-learning.csv.gz",
+    "sha256": "278cb2db547c5aa91ca30dd2a1cdc3b3ab16442f11d06d39f8ab767461fd0813",
+    "bytes": 1620710
+  }
+]

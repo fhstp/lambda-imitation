@@ -6,6 +6,12 @@ This initial index nevertheless includes all original local evidence and all
 870 production upload entries, so restoration on the new server can start now.
 The final index will additionally catalogue redundant published result bundles.
 
+For the paper, both numerical datasets are available directly in Git, including
+the subsequently recovered original-host first history blocks: **all 80 history
+seed instances**, plus the complete importance-sampling/occupancy comparisons.
+See `PAPER_HANDOFF.md`, `PAPER_DATA_COVERAGE.json`, `paper-tables/`, and
+`history-paper/`. These supplements do not require downloading all checkpoints.
+
 ## Complete data restore
 
 On the **new server**, allow at least **80 GB free storage**:
