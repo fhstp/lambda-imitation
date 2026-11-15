@@ -1,0 +1,30 @@
+{
+  "actual_calls_per_seed": 6016,
+  "checks": [
+    {
+      "retained_episodes": 1037,
+      "retained_transitions": 6000,
+      "logged_fixed_probabilities_verified": true
+    },
+    {
+      "retained_episodes": 974,
+      "retained_transitions": 6012,
+      "logged_fixed_probabilities_verified": true
+    },
+    {
+      "retained_episodes": 1029,
+      "retained_transitions": 6012,
+      "logged_fixed_probabilities_verified": true
+    },
+    {
+      "retained_episodes": 1054,
+      "retained_transitions": 5999,
+      "logged_fixed_probabilities_verified": true
+    },
+    {
+      "retained_episodes": 1036,
+      "retained_transitions": 6013,
+      "logged_fixed_probabilities_verified": true
+    }
+  ]
+}

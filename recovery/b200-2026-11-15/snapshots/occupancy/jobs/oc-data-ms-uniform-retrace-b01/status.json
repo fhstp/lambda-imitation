@@ -1,0 +1,84 @@
+{
+  "status": "complete",
+  "kind": "data",
+  "summary": {
+    "fixed_collector_verified": true,
+    "reports": {
+      "fitting": {
+        "checks": [
+          {
+            "retained_episodes": 16873,
+            "retained_transitions": 99990,
+            "logged_fixed_probabilities_verified": true
+          },
+          {
+            "retained_episodes": 16770,
+            "retained_transitions": 99995,
+            "logged_fixed_probabilities_verified": true
+          },
+          {
+            "retained_episodes": 16779,
+            "retained_transitions": 99998,
+            "logged_fixed_probabilities_verified": true
+          },
+          {
+            "retained_episodes": 16710,
+            "retained_transitions": 99999,
+            "logged_fixed_probabilities_verified": true
+          },
+          {
+            "retained_episodes": 16584,
+            "retained_transitions": 100000,
+            "logged_fixed_probabilities_verified": true
+          }
+        ],
+        "physical_calls_per_seed": 100000,
+        "pending_calls_per_seed": [
+          10,
+          5,
+          2,
+          1,
+          0
+        ]
+      },
+      "heldout": {
+        "checks": [
+          {
+            "retained_episodes": 1663,
+            "retained_transitions": 9998,
+            "logged_fixed_probabilities_verified": true
+          },
+          {
+            "retained_episodes": 1623,
+            "retained_transitions": 9994,
+            "logged_fixed_probabilities_verified": true
+          },
+          {
+            "retained_episodes": 1712,
+            "retained_transitions": 10000,
+            "logged_fixed_probabilities_verified": true
+          },
+          {
+            "retained_episodes": 1640,
+            "retained_transitions": 9997,
+            "logged_fixed_probabilities_verified": true
+          },
+          {
+            "retained_episodes": 1699,
+            "retained_transitions": 9998,
+            "logged_fixed_probabilities_verified": true
+          }
+        ],
+        "physical_calls_per_seed": 10000,
+        "pending_calls_per_seed": [
+          2,
+          6,
+          0,
+          3,
+          2
+        ]
+      }
+    }
+  },
+  "utc": "2026-11-14T02:31:58.800323+00:00"
+}

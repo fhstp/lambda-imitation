@@ -1,0 +1,39 @@
+{
+  "job": {
+    "name": "oc-learning-bs-uniform-is-b02",
+    "session": "oc-learning-bs-uniform-is-b02",
+    "kind": "learning",
+    "environment": "battleship",
+    "measure": "uniform",
+    "correction": "is",
+    "block": 2,
+    "seeds": [
+      2026111305,
+      2026111306,
+      2026111307,
+      2026111308,
+      2026111309
+    ],
+    "wandb_id": "3e16dff7914f",
+    "project": "retrace-rebuttal-occupancy-battleship-20261113",
+    "dependencies": []
+  },
+  "study_sha256": "253227dc710d32d5e1b04d64947632b81d92b0fff32ba5118509b082b20fa234",
+  "admission_sha256": "754e890c0134d5f9d7d234caefaa29c031e2921a860820380b45098c78a9bf13",
+  "files": {
+    "config.json": "593b9cff9d3d50c458e5fdd1a194450575b26c52ec2a205fe84ec62eb7ff9244",
+    "metrics.jsonl": "fdfc3b5c8cfd833f40bffca96bfb0533a0ae22fe2447cd43c197818e0457e3b3",
+    "summary.json": "b15ca528519021bb6c72c653f20eb5011cb40069360d5e16a1cee14cc4d81781",
+    "status.json": "0dc87e837704dacdcf8dff7150a9cbe85a0c9185d2a2cd85eda33ee0ba380fae",
+    "uploads/config.json.committed": "5a796ab024ea0dae24b3427741bffaf5bce0a9e1b5f4fb667f289cf339c471c0",
+    "uploads/metrics.jsonl.committed": "0fec6f12983d9ab724221ae63fa036ec24c20aea862f964171308b707a1aa3f6",
+    "uploads/round-010.pkl.gz.committed": "fdb6991a1d2f2921c5a6f43f8e42179c29858403c778354258dbd18b54e55569",
+    "uploads/round-020.pkl.gz.committed": "ecfba0b50447417a6785a832befc83b9e73a0b46a48c2f8fab1c1ff1be62dd54",
+    "uploads/round-030.pkl.gz.committed": "e7dfc349f8dca89e02383d675d5c4ae7f82ca1eb770624f998483afe0376b022",
+    "uploads/round-040.pkl.gz.committed": "e46242ffa309cdced7b8655fa37a344637fb7db3860cd68a1bdc74b0765cccc2",
+    "uploads/round-050.pkl.gz.committed": "507a18fb1a098d3540c3b0c9b4fa9e5c29f344ae3e4a858135aedbd3315a875a",
+    "uploads/summary.json.committed": "da637363777e0a263627d9d360497ddd94b5c651b7ddbc729653e1994c6c961d",
+    "training-exit.json": "a6557b540c9b1db320642759323dc38589412366d758cf46d0e070b6cb61b311",
+    "prefill-validation.json": "77ee2c49adf116b63fdb6e0d78e5cd446ed7d0cd94e87e4eba35940ddcba15e9"
+  }
+}

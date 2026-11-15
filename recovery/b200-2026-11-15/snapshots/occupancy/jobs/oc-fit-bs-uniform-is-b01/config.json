@@ -1,0 +1,61 @@
+{
+  "job": {
+    "name": "oc-fit-bs-uniform-is-b01",
+    "session": "oc-fit-bs-uniform-is-b01",
+    "kind": "fit",
+    "environment": "battleship",
+    "measure": "uniform",
+    "correction": "is",
+    "block": 1,
+    "seeds": [
+      2026111300,
+      2026111301,
+      2026111302,
+      2026111303,
+      2026111304
+    ],
+    "wandb_id": "4a2b14c2cd73",
+    "project": "retrace-rebuttal-occupancy-battleship-20261113",
+    "dependencies": [
+      "oc-data-bs-uniform-retrace-b01"
+    ],
+    "data_job": "oc-data-bs-uniform-retrace-b01"
+  },
+  "settings": {
+    "environment": "battleship",
+    "measure": "uniform",
+    "correction": "is",
+    "hidden_dim": 512,
+    "batch_size": 128,
+    "sequence_length": 40,
+    "tail": 50,
+    "replay_capacity": 100000,
+    "episode_batch_factor": 4,
+    "gamma": 0.99,
+    "lambda1": 0.05,
+    "lambda2": 0.85,
+    "lambda_coef": 0.01,
+    "alpha": 0.1,
+    "tau": 0.005,
+    "fe_lr": 1e-05,
+    "actor_lr": 0.0001,
+    "critic_lr": 0.0001,
+    "frozen": true
+  },
+  "source_manifest_sha256": "754e890c0134d5f9d7d234caefaa29c031e2921a860820380b45098c78a9bf13",
+  "training_resume_allowed": false,
+  "starting_measure": "uniform",
+  "collector": "fixed-uniform",
+  "stationary_mu_claim": true,
+  "seeds": [
+    2026111300,
+    2026111301,
+    2026111302,
+    2026111303,
+    2026111304
+  ],
+  "runtime_devices": [
+    "cuda:0"
+  ],
+  "cuda_visible_devices": "GPU-a65c598f-779f-5cfb-a729-a0b012e44d96"
+}

@@ -1,0 +1,23 @@
+{
+  "name": "oc-data-bs-uniform-retrace-b02",
+  "session": "oc-data-bs-uniform-retrace-b02",
+  "kind": "data",
+  "environment": "battleship",
+  "measure": "uniform",
+  "correction": "retrace",
+  "block": 2,
+  "seeds": [
+    2026111305,
+    2026111306,
+    2026111307,
+    2026111308,
+    2026111309
+  ],
+  "wandb_id": "e3806b7c1171",
+  "project": "retrace-rebuttal-validation",
+  "dependencies": [
+    "oc-learning-bs-uniform-retrace-b02"
+  ],
+  "reference_job": "oc-learning-bs-uniform-retrace-b02",
+  "gpu_uuid": "GPU-fa613e69-e5e4-41f2-4ba1-7c19cfe31df9"
+}

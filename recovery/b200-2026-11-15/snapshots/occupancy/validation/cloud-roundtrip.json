@@ -1,0 +1,9 @@
+{
+  "passed": true,
+  "artifact": "fhstp-data-intelligence-research-group/retrace-rebuttal-validation/oc-checkpoint-canary-20261113-v1:v0",
+  "sha256": "f4bf7b431f2fa800aeae3a2263f56b03788355e4ac28d5b1dbf7c036d39c4a39",
+  "md5": "XXbE0DV6xHhVfij/l1qT0A==",
+  "bytes": 9612,
+  "utc": "2026-11-13T14:46:48.177011+00:00",
+  "production_training": false
+}

@@ -1,0 +1,20 @@
+{
+  "name": "oc-learning-bs-discounted-is-b02",
+  "session": "oc-learning-bs-discounted-is-b02",
+  "kind": "learning",
+  "environment": "battleship",
+  "measure": "discounted",
+  "correction": "is",
+  "block": 2,
+  "seeds": [
+    2026111305,
+    2026111306,
+    2026111307,
+    2026111308,
+    2026111309
+  ],
+  "wandb_id": "e02191c9359f",
+  "project": "retrace-rebuttal-occupancy-battleship-20261113",
+  "dependencies": [],
+  "gpu_uuid": "GPU-8f6bd869-91e3-3486-470b-bd869bd058db"
+}

@@ -1,0 +1,8 @@
+{
+  "path": "reference.pkl.gz",
+  "sha256": "ef9ee26c11a57f8f7b1f5a926dda52629469a0e859012840ae6d416e1d5fa8b1",
+  "bytes": 3141567,
+  "kind": "frozen-reference",
+  "release_after_remote_verification": false,
+  "utc": "2026-11-13T17:22:26.566290+00:00"
+}

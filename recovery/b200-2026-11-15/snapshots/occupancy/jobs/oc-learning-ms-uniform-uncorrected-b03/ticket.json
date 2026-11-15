@@ -1,0 +1,20 @@
+{
+  "name": "oc-learning-ms-uniform-uncorrected-b03",
+  "session": "oc-learning-ms-uniform-uncorrected-b03",
+  "kind": "learning",
+  "environment": "minesweeper",
+  "measure": "uniform",
+  "correction": "uncorrected",
+  "block": 3,
+  "seeds": [
+    2026111410,
+    2026111411,
+    2026111412,
+    2026111413,
+    2026111414
+  ],
+  "wandb_id": "629b3a412f06",
+  "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+  "dependencies": [],
+  "gpu_uuid": "GPU-47210a17-b8f2-1c10-a275-2daf5ea627fa"
+}

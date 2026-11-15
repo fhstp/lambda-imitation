@@ -1,0 +1,15 @@
+{
+  "passed": true,
+  "utc": "2026-11-15T11:02:37.133198+00:00",
+  "archive_sha256": "1a10cdb02f8c978dad8e2819a0848ef6a62cc08d3bc13159a64ec4e3aee5e246",
+  "all_original_regular_files_sha256_verified": 4210,
+  "git_bundles_cloned_and_fsck_verified": {
+    "fresh-code-clone": "f187e69bcd2994424082d715ad9ead2130cf0af0",
+    "fresh-paper-clone": "293c61d4db130f55d3a0b96d64032bf7ac31ef75"
+  },
+  "sealed_sources_verified_in_fresh_clone": 34,
+  "scientific_report_exactly_reproduced_except_timestamp": true,
+  "policy_training_started_or_resumed": false,
+  "recovery_unit_tests_passed": 11,
+  "gpu_required_for_restore": false
+}

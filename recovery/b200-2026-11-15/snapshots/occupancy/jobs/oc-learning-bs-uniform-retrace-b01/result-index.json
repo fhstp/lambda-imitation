@@ -1,0 +1,41 @@
+{
+  "job": {
+    "name": "oc-learning-bs-uniform-retrace-b01",
+    "session": "oc-learning-bs-uniform-retrace-b01",
+    "kind": "learning",
+    "environment": "battleship",
+    "measure": "uniform",
+    "correction": "retrace",
+    "block": 1,
+    "seeds": [
+      2026111300,
+      2026111301,
+      2026111302,
+      2026111303,
+      2026111304
+    ],
+    "wandb_id": "46a0b9fdc512",
+    "project": "retrace-rebuttal-occupancy-battleship-20261113",
+    "dependencies": []
+  },
+  "study_sha256": "253227dc710d32d5e1b04d64947632b81d92b0fff32ba5118509b082b20fa234",
+  "admission_sha256": "754e890c0134d5f9d7d234caefaa29c031e2921a860820380b45098c78a9bf13",
+  "files": {
+    "config.json": "9b81b00bb311d7192ce585e81949b989a7788f2d29ee3608aed3f56dd895b60f",
+    "metrics.jsonl": "0ba828bdeb911df3a8f5b253cbdd081c769b343cff0188c15add92513e0b3443",
+    "summary.json": "b15ca528519021bb6c72c653f20eb5011cb40069360d5e16a1cee14cc4d81781",
+    "status.json": "c92fdb2c66686a6ed7afec0ac936ea3de4f52d86213ec477bd47a461e5ff1fd8",
+    "uploads/config.json.committed": "1e2010b80b1af69f83ae6509a851e8dbe1370b9b60680af491d08c99a5f55816",
+    "uploads/metrics.jsonl.committed": "ea595cf846aebb8c1cd4502fde543cdd4051d76c1ae693fd16ea51fbf3d18996",
+    "uploads/reference.pkl.gz.committed": "95c47220d903678246a05c5571472f6b302355c92d756236cefd1fed7dc1a300",
+    "uploads/round-010.pkl.gz.committed": "eab51077a2c45d3da4150c2814f7e33636547dd2ca3638c6ddf025d4cbf074a2",
+    "uploads/round-020.pkl.gz.committed": "31fa8e902f43a48f427861a857ab5855943cf2365754a69fd04aa991791f54ec",
+    "uploads/round-030.pkl.gz.committed": "5db683e517d55e781477c2f1fa42c58396f193c83e7ddaa765a873de33949566",
+    "uploads/round-040.pkl.gz.committed": "99184bbfb8e031eda682365a9f20ae4ca948cdb325c45df21e23eb29b3dfe1c7",
+    "uploads/round-050.pkl.gz.committed": "fe88904930ad9628c319873f38dd62b19d3e7ca7a3524f1c38551b9bab190717",
+    "uploads/summary.json.committed": "56af750a4061bea08021f303fc84dcab1d23cc55a6817b07c58d34327326c5e5",
+    "training-exit.json": "817738ac04ca1b875d6df5407493aee93ec4751a6dc8e102af3d80882951882b",
+    "reference.json": "e73ee12d12bc9b1cd91a9241cbdc75ce6503e690f9075c1d39315be807ecca31",
+    "prefill-validation.json": "c8ca17154f382a15d8d0a96cbfc186f05fb53e6f01c79145b794830aadc17a0a"
+  }
+}

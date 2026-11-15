@@ -1,0 +1,78 @@
+{
+  "utc": "2026-11-13T15:17:29.982997+00:00",
+  "runs": [
+    {
+      "job": "oc-learning-bs-uniform-retrace-b01",
+      "id": "46a0b9fdc512",
+      "state": "running",
+      "sampler": "uniform",
+      "trace": "retrace",
+      "round": 1,
+      "env_interactions": 22800
+    },
+    {
+      "job": "oc-learning-bs-uniform-retrace-b02",
+      "id": "b1cd9d71cd7e",
+      "state": "running",
+      "sampler": "uniform",
+      "trace": "retrace",
+      "round": 1,
+      "env_interactions": 22800
+    },
+    {
+      "job": "oc-learning-ms-uniform-retrace-b01",
+      "id": "d1a614ede684",
+      "state": "running",
+      "sampler": "uniform",
+      "trace": "retrace",
+      "round": 11,
+      "env_interactions": 61016
+    },
+    {
+      "job": "oc-learning-ms-uniform-retrace-b02",
+      "id": "dc942afb5bbc",
+      "state": "running",
+      "sampler": "uniform",
+      "trace": "retrace",
+      "round": 11,
+      "env_interactions": 61016
+    },
+    {
+      "job": "oc-learning-ms-uniform-retrace-b03",
+      "id": "5ba759a2472f",
+      "state": "running",
+      "sampler": "uniform",
+      "trace": "retrace",
+      "round": 11,
+      "env_interactions": 61016
+    },
+    {
+      "job": "oc-learning-ms-uniform-retrace-b04",
+      "id": "2de33ba0fa99",
+      "state": "running",
+      "sampler": "uniform",
+      "trace": "retrace",
+      "round": 11,
+      "env_interactions": 61016
+    },
+    {
+      "job": "oc-learning-bs-discounted-is-b01",
+      "id": "ffd56bd4ea79",
+      "state": "running",
+      "sampler": "discounted",
+      "trace": "is",
+      "round": 1,
+      "env_interactions": 22800
+    },
+    {
+      "job": "oc-learning-bs-discounted-retrace-b01",
+      "id": "96936651c000",
+      "state": "running",
+      "sampler": "discounted",
+      "trace": "retrace",
+      "round": 1,
+      "env_interactions": 22800
+    }
+  ],
+  "verified_configs": true
+}

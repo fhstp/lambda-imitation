@@ -1,0 +1,11 @@
+{
+  "status": "complete",
+  "kind": "learning",
+  "summary": {
+    "env_interactions": 512800,
+    "round": 50,
+    "primary_endpoint": 492800,
+    "all_seeds_retained": true
+  },
+  "utc": "2026-11-13T18:31:31.901597+00:00"
+}

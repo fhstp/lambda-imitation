@@ -1,0 +1,709 @@
+{
+  "utc": "2026-11-14T03:44:48.851222+00:00",
+  "jobs": [
+    {
+      "name": "oc-learning-bs-uniform-retrace-b01",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-bs-uniform-retrace-b02",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-uniform-retrace-b01",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-uniform-retrace-b02",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-uniform-retrace-b03",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-uniform-retrace-b04",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-bs-discounted-is-b01",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-bs-discounted-retrace-b01",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-bs-discounted-uncorrected-b01",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-bs-uniform-is-b01",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-bs-uniform-uncorrected-b01",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-bs-discounted-is-b02",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-bs-discounted-retrace-b02",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-bs-discounted-uncorrected-b02",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-bs-uniform-is-b02",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-bs-uniform-uncorrected-b02",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-discounted-is-b01",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-discounted-retrace-b01",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-discounted-uncorrected-b01",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-uniform-is-b01",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-uniform-uncorrected-b01",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-discounted-is-b02",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-discounted-retrace-b02",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-discounted-uncorrected-b02",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-uniform-is-b02",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-uniform-uncorrected-b02",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-discounted-is-b03",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-discounted-retrace-b03",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-discounted-uncorrected-b03",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-uniform-is-b03",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-uniform-uncorrected-b03",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-discounted-is-b04",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-discounted-retrace-b04",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-discounted-uncorrected-b04",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-uniform-is-b04",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-learning-ms-uniform-uncorrected-b04",
+      "kind": "learning",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-data-bs-uniform-retrace-b01",
+      "kind": "data",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-data-bs-uniform-retrace-b02",
+      "kind": "data",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-data-ms-uniform-retrace-b01",
+      "kind": "data",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-data-ms-uniform-retrace-b02",
+      "kind": "data",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-data-ms-uniform-retrace-b03",
+      "kind": "data",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-data-ms-uniform-retrace-b04",
+      "kind": "data",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-bs-discounted-is-b01",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-bs-discounted-retrace-b01",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-bs-discounted-uncorrected-b01",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-bs-uniform-is-b01",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-bs-uniform-retrace-b01",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-bs-uniform-uncorrected-b01",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-bs-discounted-is-b02",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-bs-discounted-retrace-b02",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-bs-discounted-uncorrected-b02",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-bs-uniform-is-b02",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-bs-uniform-retrace-b02",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-bs-uniform-uncorrected-b02",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-discounted-is-b01",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-discounted-retrace-b01",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-discounted-uncorrected-b01",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-uniform-is-b01",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-uniform-retrace-b01",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-uniform-uncorrected-b01",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-discounted-is-b02",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-discounted-retrace-b02",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-discounted-uncorrected-b02",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-uniform-is-b02",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-uniform-retrace-b02",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-uniform-uncorrected-b02",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-discounted-is-b03",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-discounted-retrace-b03",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-discounted-uncorrected-b03",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-uniform-is-b03",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-uniform-retrace-b03",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-uniform-uncorrected-b03",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-discounted-is-b04",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-discounted-retrace-b04",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-discounted-uncorrected-b04",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-uniform-is-b04",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-uniform-retrace-b04",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    },
+    {
+      "name": "oc-fit-ms-uniform-uncorrected-b04",
+      "kind": "fit",
+      "status": "complete",
+      "round": null,
+      "updates": null,
+      "error": null,
+      "published": true
+    }
+  ],
+  "training_retry_allowed": false,
+  "complete": true
+}

@@ -1,0 +1,23 @@
+{
+  "name": "oc-fit-ms-uniform-retrace-b01",
+  "session": "oc-fit-ms-uniform-retrace-b01",
+  "kind": "fit",
+  "environment": "minesweeper",
+  "measure": "uniform",
+  "correction": "retrace",
+  "block": 1,
+  "seeds": [
+    2026111400,
+    2026111401,
+    2026111402,
+    2026111403,
+    2026111404
+  ],
+  "wandb_id": "fecbf9bd8760",
+  "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+  "dependencies": [
+    "oc-data-ms-uniform-retrace-b01"
+  ],
+  "data_job": "oc-data-ms-uniform-retrace-b01",
+  "gpu_uuid": "GPU-47210a17-b8f2-1c10-a275-2daf5ea627fa"
+}

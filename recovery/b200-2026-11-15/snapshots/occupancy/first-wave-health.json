@@ -1,0 +1,105 @@
+{
+  "passed": true,
+  "utc": "2026-11-13T15:14:29.794443+00:00",
+  "admission_sha256": "754e890c0134d5f9d7d234caefaa29c031e2921a860820380b45098c78a9bf13",
+  "actual_first_round_verified": true,
+  "jobs": [
+    {
+      "job": "oc-learning-bs-uniform-retrace-b01",
+      "gpu_uuid": "GPU-47210a17-b8f2-1c10-a275-2daf5ea627fa",
+      "round": 1,
+      "env_interactions": 22800,
+      "first_round_seconds": 262.2027176330448,
+      "sampler": "uniform",
+      "trace": "retrace",
+      "max_actual_vs_expected_age_frequency_error": 4.6119093894958496e-05,
+      "trace_coefficient_max_mean": 0.8500000238418579,
+      "wandb_id": "46a0b9fdc512"
+    },
+    {
+      "job": "oc-learning-bs-uniform-retrace-b02",
+      "gpu_uuid": "GPU-fa613e69-e5e4-41f2-4ba1-7c19cfe31df9",
+      "round": 1,
+      "env_interactions": 22800,
+      "first_round_seconds": 260.8607075900072,
+      "sampler": "uniform",
+      "trace": "retrace",
+      "max_actual_vs_expected_age_frequency_error": 5.129724740982056e-05,
+      "trace_coefficient_max_mean": 0.8500000238418579,
+      "wandb_id": "b1cd9d71cd7e"
+    },
+    {
+      "job": "oc-learning-ms-uniform-retrace-b01",
+      "gpu_uuid": "GPU-816695fe-800f-d45f-9e21-1f5deb1738a6",
+      "round": 1,
+      "env_interactions": 11016,
+      "first_round_seconds": 55.12428024696419,
+      "sampler": "uniform",
+      "trace": "retrace",
+      "max_actual_vs_expected_age_frequency_error": 0.0002888590097427368,
+      "trace_coefficient_max_mean": 0.949999988079071,
+      "wandb_id": "d1a614ede684"
+    },
+    {
+      "job": "oc-learning-ms-uniform-retrace-b02",
+      "gpu_uuid": "GPU-e194b2da-4088-e75c-a3ca-100e93713758",
+      "round": 1,
+      "env_interactions": 11016,
+      "first_round_seconds": 56.50212753302185,
+      "sampler": "uniform",
+      "trace": "retrace",
+      "max_actual_vs_expected_age_frequency_error": 0.0002967715263366699,
+      "trace_coefficient_max_mean": 0.949999988079071,
+      "wandb_id": "dc942afb5bbc"
+    },
+    {
+      "job": "oc-learning-ms-uniform-retrace-b03",
+      "gpu_uuid": "GPU-eed52dfa-fd80-fc9c-7527-6cde71d80f71",
+      "round": 1,
+      "env_interactions": 11016,
+      "first_round_seconds": 55.35941885400098,
+      "sampler": "uniform",
+      "trace": "retrace",
+      "max_actual_vs_expected_age_frequency_error": 0.0002740323543548584,
+      "trace_coefficient_max_mean": 0.949999988079071,
+      "wandb_id": "5ba759a2472f"
+    },
+    {
+      "job": "oc-learning-ms-uniform-retrace-b04",
+      "gpu_uuid": "GPU-8f6bd869-91e3-3486-470b-bd869bd058db",
+      "round": 1,
+      "env_interactions": 11016,
+      "first_round_seconds": 56.34967072104337,
+      "sampler": "uniform",
+      "trace": "retrace",
+      "max_actual_vs_expected_age_frequency_error": 0.00020107626914978027,
+      "trace_coefficient_max_mean": 0.949999988079071,
+      "wandb_id": "2de33ba0fa99"
+    },
+    {
+      "job": "oc-learning-bs-discounted-is-b01",
+      "gpu_uuid": "GPU-a65c598f-779f-5cfb-a729-a0b012e44d96",
+      "round": 1,
+      "env_interactions": 22800,
+      "first_round_seconds": 260.70074247702723,
+      "sampler": "discounted",
+      "trace": "is",
+      "max_actual_vs_expected_age_frequency_error": 4.763156175613403e-05,
+      "trace_coefficient_max_mean": 730.3961730957031,
+      "wandb_id": "ffd56bd4ea79"
+    },
+    {
+      "job": "oc-learning-bs-discounted-retrace-b01",
+      "gpu_uuid": "GPU-aa273aa9-18b3-2563-b1d5-1884e6e9dd51",
+      "round": 1,
+      "env_interactions": 22800,
+      "first_round_seconds": 262.3763631019974,
+      "sampler": "discounted",
+      "trace": "retrace",
+      "max_actual_vs_expected_age_frequency_error": 5.475059151649475e-05,
+      "trace_coefficient_max_mean": 0.8500000238418579,
+      "wandb_id": "96936651c000"
+    }
+  ],
+  "no_training_retried": true
+}

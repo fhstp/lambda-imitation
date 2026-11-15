@@ -1,0 +1,8 @@
+{
+  "path": "checkpoints/round-050.pkl.gz",
+  "sha256": "d5c1cbaec5a95a7b6a584692388ef427383dd977d51783ad988c8028f1a8e80e",
+  "bytes": 35899476,
+  "kind": "checkpoint",
+  "release_after_remote_verification": true,
+  "utc": "2026-11-13T15:44:04.879814+00:00"
+}

@@ -1,0 +1,23 @@
+{
+  "name": "oc-fit-bs-discounted-is-b01",
+  "session": "oc-fit-bs-discounted-is-b01",
+  "kind": "fit",
+  "environment": "battleship",
+  "measure": "discounted",
+  "correction": "is",
+  "block": 1,
+  "seeds": [
+    2026111300,
+    2026111301,
+    2026111302,
+    2026111303,
+    2026111304
+  ],
+  "wandb_id": "8914bad38083",
+  "project": "retrace-rebuttal-occupancy-battleship-20261113",
+  "dependencies": [
+    "oc-data-bs-uniform-retrace-b01"
+  ],
+  "data_job": "oc-data-bs-uniform-retrace-b01",
+  "gpu_uuid": "GPU-fa613e69-e5e4-41f2-4ba1-7c19cfe31df9"
+}

@@ -1,0 +1,37 @@
+{
+  "job": {
+    "name": "oc-fit-ms-uniform-retrace-b01",
+    "session": "oc-fit-ms-uniform-retrace-b01",
+    "kind": "fit",
+    "environment": "minesweeper",
+    "measure": "uniform",
+    "correction": "retrace",
+    "block": 1,
+    "seeds": [
+      2026111400,
+      2026111401,
+      2026111402,
+      2026111403,
+      2026111404
+    ],
+    "wandb_id": "fecbf9bd8760",
+    "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+    "dependencies": [
+      "oc-data-ms-uniform-retrace-b01"
+    ],
+    "data_job": "oc-data-ms-uniform-retrace-b01"
+  },
+  "study_sha256": "253227dc710d32d5e1b04d64947632b81d92b0fff32ba5118509b082b20fa234",
+  "admission_sha256": "754e890c0134d5f9d7d234caefaa29c031e2921a860820380b45098c78a9bf13",
+  "files": {
+    "config.json": "b82a6b04cfb997002740cd3c0a733586e09f1034492721b6d0f574c486b49243",
+    "metrics.jsonl": "ab1967507bcf63ac58878b217449cc7bfc33f1389a7218f415f6de4bf595599f",
+    "summary.json": "659cde7555d1868b8c0041bcc4741f0b41dbdff4e016119e7e8dc5cc6914ca30",
+    "status.json": "fc141f393060e8316b65079a6e940e71b7dde2bf3e3d3f75fa4fa2b7c43ceaa6",
+    "uploads/config.json.committed": "3ec080718c0ac55362b4cfa4281bad2cd17f123ec3c6aaafe9027fd75803b8f7",
+    "uploads/frozen-final.pkl.gz.committed": "505783bff4f63392a0c4d7640099857f05cbb60653ffd45c7f0e29ff4d741314",
+    "uploads/metrics.jsonl.committed": "1a301edebe202ec26ed30d2b971fd01f87be512ec7df3d7fcc37b48060cdd6db",
+    "uploads/summary.json.committed": "f27d23cbf65b9507b1263a831d208253b1b9737c25b6aa6ba821e62e1e99dc14",
+    "training-exit.json": "37543977f6c622a76b33f7f5ebb2c68547455f3762a47bdce12ad8f2dfed804f"
+  }
+}

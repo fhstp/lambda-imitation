@@ -1,0 +1,20 @@
+{
+  "name": "oc-learning-ms-discounted-uncorrected-b03",
+  "session": "oc-learning-ms-discounted-uncorrected-b03",
+  "kind": "learning",
+  "environment": "minesweeper",
+  "measure": "discounted",
+  "correction": "uncorrected",
+  "block": 3,
+  "seeds": [
+    2026111410,
+    2026111411,
+    2026111412,
+    2026111413,
+    2026111414
+  ],
+  "wandb_id": "65468c094033",
+  "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+  "dependencies": [],
+  "gpu_uuid": "GPU-fa613e69-e5e4-41f2-4ba1-7c19cfe31df9"
+}

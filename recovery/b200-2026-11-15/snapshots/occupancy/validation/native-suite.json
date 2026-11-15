@@ -1,0 +1,90 @@
+{
+  "passed": true,
+  "results": [
+    {
+      "profile": "native-battleship-uniform-uncorrected",
+      "passed": true,
+      "exit_code": 0,
+      "gpu": "GPU-47210a17-b8f2-1c10-a275-2daf5ea627fa",
+      "log": "/raid/ustp/experiments/occupancy-correction-2026-11-13/validation/native-battleship-uniform-uncorrected.console.txt"
+    },
+    {
+      "profile": "native-minesweeper-uniform-uncorrected",
+      "passed": true,
+      "exit_code": 0,
+      "gpu": "GPU-47210a17-b8f2-1c10-a275-2daf5ea627fa",
+      "log": "/raid/ustp/experiments/occupancy-correction-2026-11-13/validation/native-minesweeper-uniform-uncorrected.console.txt"
+    },
+    {
+      "profile": "native-battleship-uniform-is",
+      "passed": true,
+      "exit_code": 0,
+      "gpu": "GPU-fa613e69-e5e4-41f2-4ba1-7c19cfe31df9",
+      "log": "/raid/ustp/experiments/occupancy-correction-2026-11-13/validation/native-battleship-uniform-is.console.txt"
+    },
+    {
+      "profile": "native-minesweeper-uniform-is",
+      "passed": true,
+      "exit_code": 0,
+      "gpu": "GPU-fa613e69-e5e4-41f2-4ba1-7c19cfe31df9",
+      "log": "/raid/ustp/experiments/occupancy-correction-2026-11-13/validation/native-minesweeper-uniform-is.console.txt"
+    },
+    {
+      "profile": "native-battleship-uniform-retrace",
+      "passed": true,
+      "exit_code": 0,
+      "gpu": "GPU-816695fe-800f-d45f-9e21-1f5deb1738a6",
+      "log": "/raid/ustp/experiments/occupancy-correction-2026-11-13/validation/native-battleship-uniform-retrace.console.txt"
+    },
+    {
+      "profile": "native-minesweeper-uniform-retrace",
+      "passed": true,
+      "exit_code": 0,
+      "gpu": "GPU-816695fe-800f-d45f-9e21-1f5deb1738a6",
+      "log": "/raid/ustp/experiments/occupancy-correction-2026-11-13/validation/native-minesweeper-uniform-retrace.console.txt"
+    },
+    {
+      "profile": "native-battleship-discounted-uncorrected",
+      "passed": true,
+      "exit_code": 0,
+      "gpu": "GPU-e194b2da-4088-e75c-a3ca-100e93713758",
+      "log": "/raid/ustp/experiments/occupancy-correction-2026-11-13/validation/native-battleship-discounted-uncorrected.console.txt"
+    },
+    {
+      "profile": "native-minesweeper-discounted-uncorrected",
+      "passed": true,
+      "exit_code": 0,
+      "gpu": "GPU-e194b2da-4088-e75c-a3ca-100e93713758",
+      "log": "/raid/ustp/experiments/occupancy-correction-2026-11-13/validation/native-minesweeper-discounted-uncorrected.console.txt"
+    },
+    {
+      "profile": "native-battleship-discounted-is",
+      "passed": true,
+      "exit_code": 0,
+      "gpu": "GPU-eed52dfa-fd80-fc9c-7527-6cde71d80f71",
+      "log": "/raid/ustp/experiments/occupancy-correction-2026-11-13/validation/native-battleship-discounted-is.console.txt"
+    },
+    {
+      "profile": "native-minesweeper-discounted-is",
+      "passed": true,
+      "exit_code": 0,
+      "gpu": "GPU-eed52dfa-fd80-fc9c-7527-6cde71d80f71",
+      "log": "/raid/ustp/experiments/occupancy-correction-2026-11-13/validation/native-minesweeper-discounted-is.console.txt"
+    },
+    {
+      "profile": "native-battleship-discounted-retrace",
+      "passed": true,
+      "exit_code": 0,
+      "gpu": "GPU-8f6bd869-91e3-3486-470b-bd869bd058db",
+      "log": "/raid/ustp/experiments/occupancy-correction-2026-11-13/validation/native-battleship-discounted-retrace.console.txt"
+    },
+    {
+      "profile": "native-minesweeper-discounted-retrace",
+      "passed": true,
+      "exit_code": 0,
+      "gpu": "GPU-8f6bd869-91e3-3486-470b-bd869bd058db",
+      "log": "/raid/ustp/experiments/occupancy-correction-2026-11-13/validation/native-minesweeper-discounted-retrace.console.txt"
+    }
+  ],
+  "utc": "2026-11-13T14:49:59.614224+00:00"
+}

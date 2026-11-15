@@ -1,0 +1,10 @@
+{
+  "env_interactions": 512800,
+  "final/return_smoothed/seed_0": 6.271999931335449,
+  "final/return_smoothed/seed_1": 6.459999942779541,
+  "final/return_smoothed/seed_2": 6.795999813079834,
+  "final/return_smoothed/seed_3": 6.9039998054504395,
+  "final/return_smoothed/seed_4": 6.643999862670898,
+  "final/return_smoothed/mean": 6.615199871063233,
+  "final/return_smoothed/std": 0.25436031383663227
+}

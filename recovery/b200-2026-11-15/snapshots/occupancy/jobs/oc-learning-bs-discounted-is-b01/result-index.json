@@ -1,0 +1,39 @@
+{
+  "job": {
+    "name": "oc-learning-bs-discounted-is-b01",
+    "session": "oc-learning-bs-discounted-is-b01",
+    "kind": "learning",
+    "environment": "battleship",
+    "measure": "discounted",
+    "correction": "is",
+    "block": 1,
+    "seeds": [
+      2026111300,
+      2026111301,
+      2026111302,
+      2026111303,
+      2026111304
+    ],
+    "wandb_id": "ffd56bd4ea79",
+    "project": "retrace-rebuttal-occupancy-battleship-20261113",
+    "dependencies": []
+  },
+  "study_sha256": "253227dc710d32d5e1b04d64947632b81d92b0fff32ba5118509b082b20fa234",
+  "admission_sha256": "754e890c0134d5f9d7d234caefaa29c031e2921a860820380b45098c78a9bf13",
+  "files": {
+    "config.json": "6d924e8801fa6fd41777442f4520231f6746db29602347d14110cddbe655dfc0",
+    "metrics.jsonl": "9bd226f80b195b4304bbf6a8cac38d60890d66d86654e9155a2a15208bcd08bd",
+    "summary.json": "b15ca528519021bb6c72c653f20eb5011cb40069360d5e16a1cee14cc4d81781",
+    "status.json": "1f7435ab1f1eaabbd3c737aff5460514094812e5359e08a93c8ecc96d9fe25a2",
+    "uploads/config.json.committed": "91a654ecb150d2c5dc9f1198be2209e84d42a8d9bd17bc52d741a0f5b73c75cb",
+    "uploads/metrics.jsonl.committed": "f694cd7f27bc1643c20a869ec401f26aba1de171f78c6a6288143c6461e13583",
+    "uploads/round-010.pkl.gz.committed": "8fa4fdfe1b1c3e832d371bf56d5fae7f204cc63efd6b83f91dcae3d5913b6756",
+    "uploads/round-020.pkl.gz.committed": "b95c7fe28efe092e812478c7891cb62c4f6a84ac587a35205ec0a0bb1504d8a9",
+    "uploads/round-030.pkl.gz.committed": "93331a6fddb1af90c751917175df33fbf7a774fd39b726153f8222f023eb5802",
+    "uploads/round-040.pkl.gz.committed": "f17f9f84e14bf385a22570c7936bcbf10861ce65a8e15311453ce0eb97900180",
+    "uploads/round-050.pkl.gz.committed": "bd5fda874fbf6dba6ed33b846f951024aff17b07fe073cf59fada908a903f3d9",
+    "uploads/summary.json.committed": "3a2fb67f331788b53de43beda9d66eccdea97868aa11e7ee4b1e7ae94960f547",
+    "training-exit.json": "cd7e49788c6530589c7fd8661f92ec59cbafaae982e2b5ad834de77bdf0f0f91",
+    "prefill-validation.json": "c8ca17154f382a15d8d0a96cbfc186f05fb53e6f01c79145b794830aadc17a0a"
+  }
+}

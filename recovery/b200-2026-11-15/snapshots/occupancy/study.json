@@ -1,0 +1,1656 @@
+{
+  "study_id": "occupancy-correction-20261113-v1",
+  "entity": "fhstp-data-intelligence-research-group",
+  "validation_project": "retrace-rebuttal-validation",
+  "coordination_id": "oc-coordination-20261113-v1",
+  "schema": 1,
+  "scientific_scope": "fresh 2x3 adaptive-learning factorial plus separate fixed-mu frozen-reference critic fits",
+  "adaptive_replay_claim": "discounted empirical episode mixture, not one stationary-mu posterior",
+  "learning": {
+    "battleship": {
+      "seeds_per_condition": 10,
+      "prefill": 12800,
+      "rounds": 50,
+      "steps_per_round": 10000,
+      "eval_episodes": 50,
+      "eval_initial": false,
+      "reference_round": 48,
+      "primary_endpoint": 492800
+    },
+    "minesweeper": {
+      "seeds_per_condition": 20,
+      "prefill": 6016,
+      "rounds": 200,
+      "steps_per_round": 5000,
+      "eval_episodes": 128,
+      "eval_initial": true,
+      "reference_round": 200,
+      "primary_endpoint": 1006016
+    }
+  },
+  "frozen": {
+    "data_calls_per_seed": 100000,
+    "heldout_calls_per_seed": 10000,
+    "updates": 12000,
+    "eval_every_updates": 1000,
+    "collector": "fixed uniform on actual legal support",
+    "common_reference": "fresh uniform-start Retrace primary-endpoint encoder/online actor",
+    "representation_actor_task_frozen": true,
+    "fresh_auxiliary_heads": true,
+    "shared_fitting_and_heldout_data_across_six_fits": true
+  },
+  "no_training_resume": true,
+  "no_automatic_training_retry": true,
+  "all_seeds_reported": true,
+  "analysis": "seed-level means, pointwise 95% Student-t CIs; paired exploratory endpoint contrasts",
+  "jobs": [
+    {
+      "name": "oc-learning-bs-uniform-retrace-b01",
+      "session": "oc-learning-bs-uniform-retrace-b01",
+      "kind": "learning",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 1,
+      "seeds": [
+        2026111300,
+        2026111301,
+        2026111302,
+        2026111303,
+        2026111304
+      ],
+      "wandb_id": "46a0b9fdc512",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-bs-uniform-retrace-b02",
+      "session": "oc-learning-bs-uniform-retrace-b02",
+      "kind": "learning",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 2,
+      "seeds": [
+        2026111305,
+        2026111306,
+        2026111307,
+        2026111308,
+        2026111309
+      ],
+      "wandb_id": "b1cd9d71cd7e",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-uniform-retrace-b01",
+      "session": "oc-learning-ms-uniform-retrace-b01",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 1,
+      "seeds": [
+        2026111400,
+        2026111401,
+        2026111402,
+        2026111403,
+        2026111404
+      ],
+      "wandb_id": "d1a614ede684",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-uniform-retrace-b02",
+      "session": "oc-learning-ms-uniform-retrace-b02",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 2,
+      "seeds": [
+        2026111405,
+        2026111406,
+        2026111407,
+        2026111408,
+        2026111409
+      ],
+      "wandb_id": "dc942afb5bbc",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-uniform-retrace-b03",
+      "session": "oc-learning-ms-uniform-retrace-b03",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 3,
+      "seeds": [
+        2026111410,
+        2026111411,
+        2026111412,
+        2026111413,
+        2026111414
+      ],
+      "wandb_id": "5ba759a2472f",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-uniform-retrace-b04",
+      "session": "oc-learning-ms-uniform-retrace-b04",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 4,
+      "seeds": [
+        2026111415,
+        2026111416,
+        2026111417,
+        2026111418,
+        2026111419
+      ],
+      "wandb_id": "2de33ba0fa99",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-bs-discounted-is-b01",
+      "session": "oc-learning-bs-discounted-is-b01",
+      "kind": "learning",
+      "environment": "battleship",
+      "measure": "discounted",
+      "correction": "is",
+      "block": 1,
+      "seeds": [
+        2026111300,
+        2026111301,
+        2026111302,
+        2026111303,
+        2026111304
+      ],
+      "wandb_id": "ffd56bd4ea79",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-bs-discounted-retrace-b01",
+      "session": "oc-learning-bs-discounted-retrace-b01",
+      "kind": "learning",
+      "environment": "battleship",
+      "measure": "discounted",
+      "correction": "retrace",
+      "block": 1,
+      "seeds": [
+        2026111300,
+        2026111301,
+        2026111302,
+        2026111303,
+        2026111304
+      ],
+      "wandb_id": "96936651c000",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-bs-discounted-uncorrected-b01",
+      "session": "oc-learning-bs-discounted-uncorrected-b01",
+      "kind": "learning",
+      "environment": "battleship",
+      "measure": "discounted",
+      "correction": "uncorrected",
+      "block": 1,
+      "seeds": [
+        2026111300,
+        2026111301,
+        2026111302,
+        2026111303,
+        2026111304
+      ],
+      "wandb_id": "cd84d0730a97",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-bs-uniform-is-b01",
+      "session": "oc-learning-bs-uniform-is-b01",
+      "kind": "learning",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "is",
+      "block": 1,
+      "seeds": [
+        2026111300,
+        2026111301,
+        2026111302,
+        2026111303,
+        2026111304
+      ],
+      "wandb_id": "f12972281172",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-bs-uniform-uncorrected-b01",
+      "session": "oc-learning-bs-uniform-uncorrected-b01",
+      "kind": "learning",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "uncorrected",
+      "block": 1,
+      "seeds": [
+        2026111300,
+        2026111301,
+        2026111302,
+        2026111303,
+        2026111304
+      ],
+      "wandb_id": "35e010013b13",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-bs-discounted-is-b02",
+      "session": "oc-learning-bs-discounted-is-b02",
+      "kind": "learning",
+      "environment": "battleship",
+      "measure": "discounted",
+      "correction": "is",
+      "block": 2,
+      "seeds": [
+        2026111305,
+        2026111306,
+        2026111307,
+        2026111308,
+        2026111309
+      ],
+      "wandb_id": "e02191c9359f",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-bs-discounted-retrace-b02",
+      "session": "oc-learning-bs-discounted-retrace-b02",
+      "kind": "learning",
+      "environment": "battleship",
+      "measure": "discounted",
+      "correction": "retrace",
+      "block": 2,
+      "seeds": [
+        2026111305,
+        2026111306,
+        2026111307,
+        2026111308,
+        2026111309
+      ],
+      "wandb_id": "353eb82595e8",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-bs-discounted-uncorrected-b02",
+      "session": "oc-learning-bs-discounted-uncorrected-b02",
+      "kind": "learning",
+      "environment": "battleship",
+      "measure": "discounted",
+      "correction": "uncorrected",
+      "block": 2,
+      "seeds": [
+        2026111305,
+        2026111306,
+        2026111307,
+        2026111308,
+        2026111309
+      ],
+      "wandb_id": "aeb1555637c4",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-bs-uniform-is-b02",
+      "session": "oc-learning-bs-uniform-is-b02",
+      "kind": "learning",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "is",
+      "block": 2,
+      "seeds": [
+        2026111305,
+        2026111306,
+        2026111307,
+        2026111308,
+        2026111309
+      ],
+      "wandb_id": "3e16dff7914f",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-bs-uniform-uncorrected-b02",
+      "session": "oc-learning-bs-uniform-uncorrected-b02",
+      "kind": "learning",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "uncorrected",
+      "block": 2,
+      "seeds": [
+        2026111305,
+        2026111306,
+        2026111307,
+        2026111308,
+        2026111309
+      ],
+      "wandb_id": "064ede152204",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-discounted-is-b01",
+      "session": "oc-learning-ms-discounted-is-b01",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "is",
+      "block": 1,
+      "seeds": [
+        2026111400,
+        2026111401,
+        2026111402,
+        2026111403,
+        2026111404
+      ],
+      "wandb_id": "e4145876dafe",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-discounted-retrace-b01",
+      "session": "oc-learning-ms-discounted-retrace-b01",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "retrace",
+      "block": 1,
+      "seeds": [
+        2026111400,
+        2026111401,
+        2026111402,
+        2026111403,
+        2026111404
+      ],
+      "wandb_id": "59acda841a75",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-discounted-uncorrected-b01",
+      "session": "oc-learning-ms-discounted-uncorrected-b01",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "uncorrected",
+      "block": 1,
+      "seeds": [
+        2026111400,
+        2026111401,
+        2026111402,
+        2026111403,
+        2026111404
+      ],
+      "wandb_id": "14f21b5d03cc",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-uniform-is-b01",
+      "session": "oc-learning-ms-uniform-is-b01",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "is",
+      "block": 1,
+      "seeds": [
+        2026111400,
+        2026111401,
+        2026111402,
+        2026111403,
+        2026111404
+      ],
+      "wandb_id": "1c5ab4fe4150",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-uniform-uncorrected-b01",
+      "session": "oc-learning-ms-uniform-uncorrected-b01",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "uncorrected",
+      "block": 1,
+      "seeds": [
+        2026111400,
+        2026111401,
+        2026111402,
+        2026111403,
+        2026111404
+      ],
+      "wandb_id": "d9223bb66dd8",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-discounted-is-b02",
+      "session": "oc-learning-ms-discounted-is-b02",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "is",
+      "block": 2,
+      "seeds": [
+        2026111405,
+        2026111406,
+        2026111407,
+        2026111408,
+        2026111409
+      ],
+      "wandb_id": "b5992919486d",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-discounted-retrace-b02",
+      "session": "oc-learning-ms-discounted-retrace-b02",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "retrace",
+      "block": 2,
+      "seeds": [
+        2026111405,
+        2026111406,
+        2026111407,
+        2026111408,
+        2026111409
+      ],
+      "wandb_id": "6210888825a1",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-discounted-uncorrected-b02",
+      "session": "oc-learning-ms-discounted-uncorrected-b02",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "uncorrected",
+      "block": 2,
+      "seeds": [
+        2026111405,
+        2026111406,
+        2026111407,
+        2026111408,
+        2026111409
+      ],
+      "wandb_id": "189f89cf776c",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-uniform-is-b02",
+      "session": "oc-learning-ms-uniform-is-b02",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "is",
+      "block": 2,
+      "seeds": [
+        2026111405,
+        2026111406,
+        2026111407,
+        2026111408,
+        2026111409
+      ],
+      "wandb_id": "de913af0db73",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-uniform-uncorrected-b02",
+      "session": "oc-learning-ms-uniform-uncorrected-b02",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "uncorrected",
+      "block": 2,
+      "seeds": [
+        2026111405,
+        2026111406,
+        2026111407,
+        2026111408,
+        2026111409
+      ],
+      "wandb_id": "ea4f4ddad9ad",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-discounted-is-b03",
+      "session": "oc-learning-ms-discounted-is-b03",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "is",
+      "block": 3,
+      "seeds": [
+        2026111410,
+        2026111411,
+        2026111412,
+        2026111413,
+        2026111414
+      ],
+      "wandb_id": "ede7fe8b0d10",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-discounted-retrace-b03",
+      "session": "oc-learning-ms-discounted-retrace-b03",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "retrace",
+      "block": 3,
+      "seeds": [
+        2026111410,
+        2026111411,
+        2026111412,
+        2026111413,
+        2026111414
+      ],
+      "wandb_id": "014e527b8334",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-discounted-uncorrected-b03",
+      "session": "oc-learning-ms-discounted-uncorrected-b03",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "uncorrected",
+      "block": 3,
+      "seeds": [
+        2026111410,
+        2026111411,
+        2026111412,
+        2026111413,
+        2026111414
+      ],
+      "wandb_id": "65468c094033",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-uniform-is-b03",
+      "session": "oc-learning-ms-uniform-is-b03",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "is",
+      "block": 3,
+      "seeds": [
+        2026111410,
+        2026111411,
+        2026111412,
+        2026111413,
+        2026111414
+      ],
+      "wandb_id": "8cd070468409",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-uniform-uncorrected-b03",
+      "session": "oc-learning-ms-uniform-uncorrected-b03",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "uncorrected",
+      "block": 3,
+      "seeds": [
+        2026111410,
+        2026111411,
+        2026111412,
+        2026111413,
+        2026111414
+      ],
+      "wandb_id": "629b3a412f06",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-discounted-is-b04",
+      "session": "oc-learning-ms-discounted-is-b04",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "is",
+      "block": 4,
+      "seeds": [
+        2026111415,
+        2026111416,
+        2026111417,
+        2026111418,
+        2026111419
+      ],
+      "wandb_id": "2fb9171da2f3",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-discounted-retrace-b04",
+      "session": "oc-learning-ms-discounted-retrace-b04",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "retrace",
+      "block": 4,
+      "seeds": [
+        2026111415,
+        2026111416,
+        2026111417,
+        2026111418,
+        2026111419
+      ],
+      "wandb_id": "ba9416f13e75",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-discounted-uncorrected-b04",
+      "session": "oc-learning-ms-discounted-uncorrected-b04",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "uncorrected",
+      "block": 4,
+      "seeds": [
+        2026111415,
+        2026111416,
+        2026111417,
+        2026111418,
+        2026111419
+      ],
+      "wandb_id": "9d11fdc83664",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-uniform-is-b04",
+      "session": "oc-learning-ms-uniform-is-b04",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "is",
+      "block": 4,
+      "seeds": [
+        2026111415,
+        2026111416,
+        2026111417,
+        2026111418,
+        2026111419
+      ],
+      "wandb_id": "bb52a9588bb8",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-learning-ms-uniform-uncorrected-b04",
+      "session": "oc-learning-ms-uniform-uncorrected-b04",
+      "kind": "learning",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "uncorrected",
+      "block": 4,
+      "seeds": [
+        2026111415,
+        2026111416,
+        2026111417,
+        2026111418,
+        2026111419
+      ],
+      "wandb_id": "0869a7df510e",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": []
+    },
+    {
+      "name": "oc-data-bs-uniform-retrace-b01",
+      "session": "oc-data-bs-uniform-retrace-b01",
+      "kind": "data",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 1,
+      "seeds": [
+        2026111300,
+        2026111301,
+        2026111302,
+        2026111303,
+        2026111304
+      ],
+      "wandb_id": "940605c642d9",
+      "project": "retrace-rebuttal-validation",
+      "dependencies": [
+        "oc-learning-bs-uniform-retrace-b01"
+      ],
+      "reference_job": "oc-learning-bs-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-data-bs-uniform-retrace-b02",
+      "session": "oc-data-bs-uniform-retrace-b02",
+      "kind": "data",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 2,
+      "seeds": [
+        2026111305,
+        2026111306,
+        2026111307,
+        2026111308,
+        2026111309
+      ],
+      "wandb_id": "e3806b7c1171",
+      "project": "retrace-rebuttal-validation",
+      "dependencies": [
+        "oc-learning-bs-uniform-retrace-b02"
+      ],
+      "reference_job": "oc-learning-bs-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-data-ms-uniform-retrace-b01",
+      "session": "oc-data-ms-uniform-retrace-b01",
+      "kind": "data",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 1,
+      "seeds": [
+        2026111400,
+        2026111401,
+        2026111402,
+        2026111403,
+        2026111404
+      ],
+      "wandb_id": "f36ac3d64707",
+      "project": "retrace-rebuttal-validation",
+      "dependencies": [
+        "oc-learning-ms-uniform-retrace-b01"
+      ],
+      "reference_job": "oc-learning-ms-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-data-ms-uniform-retrace-b02",
+      "session": "oc-data-ms-uniform-retrace-b02",
+      "kind": "data",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 2,
+      "seeds": [
+        2026111405,
+        2026111406,
+        2026111407,
+        2026111408,
+        2026111409
+      ],
+      "wandb_id": "2be01c3ef873",
+      "project": "retrace-rebuttal-validation",
+      "dependencies": [
+        "oc-learning-ms-uniform-retrace-b02"
+      ],
+      "reference_job": "oc-learning-ms-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-data-ms-uniform-retrace-b03",
+      "session": "oc-data-ms-uniform-retrace-b03",
+      "kind": "data",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 3,
+      "seeds": [
+        2026111410,
+        2026111411,
+        2026111412,
+        2026111413,
+        2026111414
+      ],
+      "wandb_id": "ce8584753717",
+      "project": "retrace-rebuttal-validation",
+      "dependencies": [
+        "oc-learning-ms-uniform-retrace-b03"
+      ],
+      "reference_job": "oc-learning-ms-uniform-retrace-b03"
+    },
+    {
+      "name": "oc-data-ms-uniform-retrace-b04",
+      "session": "oc-data-ms-uniform-retrace-b04",
+      "kind": "data",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 4,
+      "seeds": [
+        2026111415,
+        2026111416,
+        2026111417,
+        2026111418,
+        2026111419
+      ],
+      "wandb_id": "dba8a67f2d6e",
+      "project": "retrace-rebuttal-validation",
+      "dependencies": [
+        "oc-learning-ms-uniform-retrace-b04"
+      ],
+      "reference_job": "oc-learning-ms-uniform-retrace-b04"
+    },
+    {
+      "name": "oc-fit-bs-discounted-is-b01",
+      "session": "oc-fit-bs-discounted-is-b01",
+      "kind": "fit",
+      "environment": "battleship",
+      "measure": "discounted",
+      "correction": "is",
+      "block": 1,
+      "seeds": [
+        2026111300,
+        2026111301,
+        2026111302,
+        2026111303,
+        2026111304
+      ],
+      "wandb_id": "8914bad38083",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": [
+        "oc-data-bs-uniform-retrace-b01"
+      ],
+      "data_job": "oc-data-bs-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-fit-bs-discounted-retrace-b01",
+      "session": "oc-fit-bs-discounted-retrace-b01",
+      "kind": "fit",
+      "environment": "battleship",
+      "measure": "discounted",
+      "correction": "retrace",
+      "block": 1,
+      "seeds": [
+        2026111300,
+        2026111301,
+        2026111302,
+        2026111303,
+        2026111304
+      ],
+      "wandb_id": "7f3a3e0f2df8",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": [
+        "oc-data-bs-uniform-retrace-b01"
+      ],
+      "data_job": "oc-data-bs-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-fit-bs-discounted-uncorrected-b01",
+      "session": "oc-fit-bs-discounted-uncorrected-b01",
+      "kind": "fit",
+      "environment": "battleship",
+      "measure": "discounted",
+      "correction": "uncorrected",
+      "block": 1,
+      "seeds": [
+        2026111300,
+        2026111301,
+        2026111302,
+        2026111303,
+        2026111304
+      ],
+      "wandb_id": "d946c1a64dc3",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": [
+        "oc-data-bs-uniform-retrace-b01"
+      ],
+      "data_job": "oc-data-bs-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-fit-bs-uniform-is-b01",
+      "session": "oc-fit-bs-uniform-is-b01",
+      "kind": "fit",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "is",
+      "block": 1,
+      "seeds": [
+        2026111300,
+        2026111301,
+        2026111302,
+        2026111303,
+        2026111304
+      ],
+      "wandb_id": "4a2b14c2cd73",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": [
+        "oc-data-bs-uniform-retrace-b01"
+      ],
+      "data_job": "oc-data-bs-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-fit-bs-uniform-retrace-b01",
+      "session": "oc-fit-bs-uniform-retrace-b01",
+      "kind": "fit",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 1,
+      "seeds": [
+        2026111300,
+        2026111301,
+        2026111302,
+        2026111303,
+        2026111304
+      ],
+      "wandb_id": "200383d8ad70",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": [
+        "oc-data-bs-uniform-retrace-b01"
+      ],
+      "data_job": "oc-data-bs-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-fit-bs-uniform-uncorrected-b01",
+      "session": "oc-fit-bs-uniform-uncorrected-b01",
+      "kind": "fit",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "uncorrected",
+      "block": 1,
+      "seeds": [
+        2026111300,
+        2026111301,
+        2026111302,
+        2026111303,
+        2026111304
+      ],
+      "wandb_id": "13d21bebbcf7",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": [
+        "oc-data-bs-uniform-retrace-b01"
+      ],
+      "data_job": "oc-data-bs-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-fit-bs-discounted-is-b02",
+      "session": "oc-fit-bs-discounted-is-b02",
+      "kind": "fit",
+      "environment": "battleship",
+      "measure": "discounted",
+      "correction": "is",
+      "block": 2,
+      "seeds": [
+        2026111305,
+        2026111306,
+        2026111307,
+        2026111308,
+        2026111309
+      ],
+      "wandb_id": "77a8a26626b0",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": [
+        "oc-data-bs-uniform-retrace-b02"
+      ],
+      "data_job": "oc-data-bs-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-fit-bs-discounted-retrace-b02",
+      "session": "oc-fit-bs-discounted-retrace-b02",
+      "kind": "fit",
+      "environment": "battleship",
+      "measure": "discounted",
+      "correction": "retrace",
+      "block": 2,
+      "seeds": [
+        2026111305,
+        2026111306,
+        2026111307,
+        2026111308,
+        2026111309
+      ],
+      "wandb_id": "43cd073081bd",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": [
+        "oc-data-bs-uniform-retrace-b02"
+      ],
+      "data_job": "oc-data-bs-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-fit-bs-discounted-uncorrected-b02",
+      "session": "oc-fit-bs-discounted-uncorrected-b02",
+      "kind": "fit",
+      "environment": "battleship",
+      "measure": "discounted",
+      "correction": "uncorrected",
+      "block": 2,
+      "seeds": [
+        2026111305,
+        2026111306,
+        2026111307,
+        2026111308,
+        2026111309
+      ],
+      "wandb_id": "cc7f00778331",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": [
+        "oc-data-bs-uniform-retrace-b02"
+      ],
+      "data_job": "oc-data-bs-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-fit-bs-uniform-is-b02",
+      "session": "oc-fit-bs-uniform-is-b02",
+      "kind": "fit",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "is",
+      "block": 2,
+      "seeds": [
+        2026111305,
+        2026111306,
+        2026111307,
+        2026111308,
+        2026111309
+      ],
+      "wandb_id": "a9c974ef8da4",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": [
+        "oc-data-bs-uniform-retrace-b02"
+      ],
+      "data_job": "oc-data-bs-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-fit-bs-uniform-retrace-b02",
+      "session": "oc-fit-bs-uniform-retrace-b02",
+      "kind": "fit",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 2,
+      "seeds": [
+        2026111305,
+        2026111306,
+        2026111307,
+        2026111308,
+        2026111309
+      ],
+      "wandb_id": "b223fe7e2a3a",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": [
+        "oc-data-bs-uniform-retrace-b02"
+      ],
+      "data_job": "oc-data-bs-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-fit-bs-uniform-uncorrected-b02",
+      "session": "oc-fit-bs-uniform-uncorrected-b02",
+      "kind": "fit",
+      "environment": "battleship",
+      "measure": "uniform",
+      "correction": "uncorrected",
+      "block": 2,
+      "seeds": [
+        2026111305,
+        2026111306,
+        2026111307,
+        2026111308,
+        2026111309
+      ],
+      "wandb_id": "8ace696ee1f4",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "dependencies": [
+        "oc-data-bs-uniform-retrace-b02"
+      ],
+      "data_job": "oc-data-bs-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-fit-ms-discounted-is-b01",
+      "session": "oc-fit-ms-discounted-is-b01",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "is",
+      "block": 1,
+      "seeds": [
+        2026111400,
+        2026111401,
+        2026111402,
+        2026111403,
+        2026111404
+      ],
+      "wandb_id": "37f246d38d0f",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b01"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-fit-ms-discounted-retrace-b01",
+      "session": "oc-fit-ms-discounted-retrace-b01",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "retrace",
+      "block": 1,
+      "seeds": [
+        2026111400,
+        2026111401,
+        2026111402,
+        2026111403,
+        2026111404
+      ],
+      "wandb_id": "48d0caec32eb",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b01"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-fit-ms-discounted-uncorrected-b01",
+      "session": "oc-fit-ms-discounted-uncorrected-b01",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "uncorrected",
+      "block": 1,
+      "seeds": [
+        2026111400,
+        2026111401,
+        2026111402,
+        2026111403,
+        2026111404
+      ],
+      "wandb_id": "ef9ae8ca9f6c",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b01"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-fit-ms-uniform-is-b01",
+      "session": "oc-fit-ms-uniform-is-b01",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "is",
+      "block": 1,
+      "seeds": [
+        2026111400,
+        2026111401,
+        2026111402,
+        2026111403,
+        2026111404
+      ],
+      "wandb_id": "ba4e3abe661d",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b01"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-fit-ms-uniform-retrace-b01",
+      "session": "oc-fit-ms-uniform-retrace-b01",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 1,
+      "seeds": [
+        2026111400,
+        2026111401,
+        2026111402,
+        2026111403,
+        2026111404
+      ],
+      "wandb_id": "fecbf9bd8760",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b01"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-fit-ms-uniform-uncorrected-b01",
+      "session": "oc-fit-ms-uniform-uncorrected-b01",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "uncorrected",
+      "block": 1,
+      "seeds": [
+        2026111400,
+        2026111401,
+        2026111402,
+        2026111403,
+        2026111404
+      ],
+      "wandb_id": "75db459750dc",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b01"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b01"
+    },
+    {
+      "name": "oc-fit-ms-discounted-is-b02",
+      "session": "oc-fit-ms-discounted-is-b02",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "is",
+      "block": 2,
+      "seeds": [
+        2026111405,
+        2026111406,
+        2026111407,
+        2026111408,
+        2026111409
+      ],
+      "wandb_id": "d3f231284f78",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b02"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-fit-ms-discounted-retrace-b02",
+      "session": "oc-fit-ms-discounted-retrace-b02",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "retrace",
+      "block": 2,
+      "seeds": [
+        2026111405,
+        2026111406,
+        2026111407,
+        2026111408,
+        2026111409
+      ],
+      "wandb_id": "be0671b91a23",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b02"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-fit-ms-discounted-uncorrected-b02",
+      "session": "oc-fit-ms-discounted-uncorrected-b02",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "uncorrected",
+      "block": 2,
+      "seeds": [
+        2026111405,
+        2026111406,
+        2026111407,
+        2026111408,
+        2026111409
+      ],
+      "wandb_id": "0f8ffe52c4f3",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b02"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-fit-ms-uniform-is-b02",
+      "session": "oc-fit-ms-uniform-is-b02",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "is",
+      "block": 2,
+      "seeds": [
+        2026111405,
+        2026111406,
+        2026111407,
+        2026111408,
+        2026111409
+      ],
+      "wandb_id": "ec91ccee8509",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b02"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-fit-ms-uniform-retrace-b02",
+      "session": "oc-fit-ms-uniform-retrace-b02",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 2,
+      "seeds": [
+        2026111405,
+        2026111406,
+        2026111407,
+        2026111408,
+        2026111409
+      ],
+      "wandb_id": "f2d96d9667f9",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b02"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-fit-ms-uniform-uncorrected-b02",
+      "session": "oc-fit-ms-uniform-uncorrected-b02",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "uncorrected",
+      "block": 2,
+      "seeds": [
+        2026111405,
+        2026111406,
+        2026111407,
+        2026111408,
+        2026111409
+      ],
+      "wandb_id": "df624abc4a04",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b02"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b02"
+    },
+    {
+      "name": "oc-fit-ms-discounted-is-b03",
+      "session": "oc-fit-ms-discounted-is-b03",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "is",
+      "block": 3,
+      "seeds": [
+        2026111410,
+        2026111411,
+        2026111412,
+        2026111413,
+        2026111414
+      ],
+      "wandb_id": "bf1a1f20889a",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b03"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b03"
+    },
+    {
+      "name": "oc-fit-ms-discounted-retrace-b03",
+      "session": "oc-fit-ms-discounted-retrace-b03",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "retrace",
+      "block": 3,
+      "seeds": [
+        2026111410,
+        2026111411,
+        2026111412,
+        2026111413,
+        2026111414
+      ],
+      "wandb_id": "03063e6dcd8b",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b03"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b03"
+    },
+    {
+      "name": "oc-fit-ms-discounted-uncorrected-b03",
+      "session": "oc-fit-ms-discounted-uncorrected-b03",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "uncorrected",
+      "block": 3,
+      "seeds": [
+        2026111410,
+        2026111411,
+        2026111412,
+        2026111413,
+        2026111414
+      ],
+      "wandb_id": "4d4063bdf048",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b03"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b03"
+    },
+    {
+      "name": "oc-fit-ms-uniform-is-b03",
+      "session": "oc-fit-ms-uniform-is-b03",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "is",
+      "block": 3,
+      "seeds": [
+        2026111410,
+        2026111411,
+        2026111412,
+        2026111413,
+        2026111414
+      ],
+      "wandb_id": "3f044d82fab4",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b03"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b03"
+    },
+    {
+      "name": "oc-fit-ms-uniform-retrace-b03",
+      "session": "oc-fit-ms-uniform-retrace-b03",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 3,
+      "seeds": [
+        2026111410,
+        2026111411,
+        2026111412,
+        2026111413,
+        2026111414
+      ],
+      "wandb_id": "2f9eca8e2f36",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b03"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b03"
+    },
+    {
+      "name": "oc-fit-ms-uniform-uncorrected-b03",
+      "session": "oc-fit-ms-uniform-uncorrected-b03",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "uncorrected",
+      "block": 3,
+      "seeds": [
+        2026111410,
+        2026111411,
+        2026111412,
+        2026111413,
+        2026111414
+      ],
+      "wandb_id": "850278f37874",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b03"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b03"
+    },
+    {
+      "name": "oc-fit-ms-discounted-is-b04",
+      "session": "oc-fit-ms-discounted-is-b04",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "is",
+      "block": 4,
+      "seeds": [
+        2026111415,
+        2026111416,
+        2026111417,
+        2026111418,
+        2026111419
+      ],
+      "wandb_id": "dd05c8d137fb",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b04"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b04"
+    },
+    {
+      "name": "oc-fit-ms-discounted-retrace-b04",
+      "session": "oc-fit-ms-discounted-retrace-b04",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "retrace",
+      "block": 4,
+      "seeds": [
+        2026111415,
+        2026111416,
+        2026111417,
+        2026111418,
+        2026111419
+      ],
+      "wandb_id": "24632fcfb7ca",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b04"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b04"
+    },
+    {
+      "name": "oc-fit-ms-discounted-uncorrected-b04",
+      "session": "oc-fit-ms-discounted-uncorrected-b04",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "discounted",
+      "correction": "uncorrected",
+      "block": 4,
+      "seeds": [
+        2026111415,
+        2026111416,
+        2026111417,
+        2026111418,
+        2026111419
+      ],
+      "wandb_id": "e89b5b4c601e",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b04"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b04"
+    },
+    {
+      "name": "oc-fit-ms-uniform-is-b04",
+      "session": "oc-fit-ms-uniform-is-b04",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "is",
+      "block": 4,
+      "seeds": [
+        2026111415,
+        2026111416,
+        2026111417,
+        2026111418,
+        2026111419
+      ],
+      "wandb_id": "331cf31f1388",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b04"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b04"
+    },
+    {
+      "name": "oc-fit-ms-uniform-retrace-b04",
+      "session": "oc-fit-ms-uniform-retrace-b04",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "retrace",
+      "block": 4,
+      "seeds": [
+        2026111415,
+        2026111416,
+        2026111417,
+        2026111418,
+        2026111419
+      ],
+      "wandb_id": "9c7b6d28e25b",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b04"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b04"
+    },
+    {
+      "name": "oc-fit-ms-uniform-uncorrected-b04",
+      "session": "oc-fit-ms-uniform-uncorrected-b04",
+      "kind": "fit",
+      "environment": "minesweeper",
+      "measure": "uniform",
+      "correction": "uncorrected",
+      "block": 4,
+      "seeds": [
+        2026111415,
+        2026111416,
+        2026111417,
+        2026111418,
+        2026111419
+      ],
+      "wandb_id": "ad169804f0a0",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "dependencies": [
+        "oc-data-ms-uniform-retrace-b04"
+      ],
+      "data_job": "oc-data-ms-uniform-retrace-b04"
+    }
+  ]
+}

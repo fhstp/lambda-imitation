@@ -1,0 +1,58 @@
+{
+  "job": {
+    "name": "oc-learning-ms-uniform-uncorrected-b02",
+    "session": "oc-learning-ms-uniform-uncorrected-b02",
+    "kind": "learning",
+    "environment": "minesweeper",
+    "measure": "uniform",
+    "correction": "uncorrected",
+    "block": 2,
+    "seeds": [
+      2026111405,
+      2026111406,
+      2026111407,
+      2026111408,
+      2026111409
+    ],
+    "wandb_id": "ea4f4ddad9ad",
+    "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+    "dependencies": []
+  },
+  "settings": {
+    "environment": "minesweeper",
+    "measure": "uniform",
+    "correction": "uncorrected",
+    "hidden_dim": 128,
+    "batch_size": 64,
+    "sequence_length": 32,
+    "tail": 32,
+    "replay_capacity": 100000,
+    "episode_batch_factor": 4,
+    "gamma": 0.99,
+    "lambda1": 0.0,
+    "lambda2": 0.95,
+    "lambda_coef": 0.1,
+    "alpha": 0.01,
+    "tau": 0.005,
+    "fe_lr": 1e-05,
+    "actor_lr": 0.0001,
+    "critic_lr": 0.0001,
+    "frozen": false
+  },
+  "source_manifest_sha256": "754e890c0134d5f9d7d234caefaa29c031e2921a860820380b45098c78a9bf13",
+  "training_resume_allowed": false,
+  "starting_measure": "uniform",
+  "collector": "adaptive-online",
+  "stationary_mu_claim": false,
+  "seeds": [
+    2026111405,
+    2026111406,
+    2026111407,
+    2026111408,
+    2026111409
+  ],
+  "runtime_devices": [
+    "cuda:0"
+  ],
+  "cuda_visible_devices": "GPU-eed52dfa-fd80-fc9c-7527-6cde71d80f71"
+}

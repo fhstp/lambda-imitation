@@ -1,0 +1,234 @@
+{
+  "status": "complete",
+  "job": {
+    "name": "battleship-retrace-history10-block2-5seeds",
+    "history": 10,
+    "block": 2,
+    "num_seeds": 5,
+    "base_seed": 7451234542,
+    "training_seeds": [
+      7451234542,
+      7451234543,
+      7451234544,
+      7451234545,
+      7451234546
+    ],
+    "wandb_id": "732aa042",
+    "session": "rr-history-h10-b2",
+    "flags": [
+      "--method",
+      "ld",
+      "--num-seeds",
+      "5",
+      "--seed",
+      "7451234542",
+      "--memory-type",
+      "gru",
+      "--fe-lr",
+      "1e-5",
+      "--actor-lr",
+      "1e-4",
+      "--critic-lr",
+      "1e-4",
+      "--gamma",
+      "0.99",
+      "--tau",
+      "0.005",
+      "--critic-layer-norm",
+      "--online-buffer-size",
+      "100000",
+      "--checkpoint-every",
+      "10",
+      "--eval-every",
+      "1",
+      "--final-return-window",
+      "5",
+      "--replay-correction",
+      "retrace",
+      "--lambda-critic-loss",
+      "mse",
+      "--trace-diagnostics",
+      "--rows",
+      "5",
+      "--cols",
+      "5",
+      "--ship-lengths",
+      "3,2",
+      "--memory-hidden-dim",
+      "512",
+      "--rounds",
+      "50",
+      "--train-steps",
+      "10000",
+      "--batch-size",
+      "128",
+      "--burn-in-length",
+      "10",
+      "--sequence-length",
+      "40",
+      "--lambda-truncation",
+      "50",
+      "--lambda1",
+      "0.05",
+      "--lambda2",
+      "0.85",
+      "--lambda-coef",
+      "0.01",
+      "--alpha",
+      "0.1",
+      "--prefill-steps",
+      "12800",
+      "--eval-episodes",
+      "50",
+      "--history-length",
+      "10",
+      "--history-context",
+      "26",
+      "--archive-checkpoints"
+    ]
+  },
+  "exit_code": 0,
+  "continuous_no_resume": true,
+  "all_checkpoints_archived": true,
+  "source_admission_sha256": "54424d0b2da49e78a461bbd2da296fc3d8daba2ca77520aef4febdbe23584986",
+  "lease_id": "32df839bad43f7e9",
+  "output": "/home/ustp/.local/state/lambda-history-b200/32df839bad43f7e9/work/runs/wandb/run-20261110_142017-732aa042/files/training",
+  "finished_utc": "2026-11-11T00:36:55.131089+00:00",
+  "host": "dgxB200",
+  "owner_host": "68c05e666f7e8f12ff4b6f408a295d62503c74076efbef76a615337488df6d9a",
+  "gpu": {
+    "index": 4,
+    "uuid": "GPU-eed52dfa-fd80-fc9c-7527-6cde71d80f71",
+    "name": "NVIDIA B200",
+    "memory_total_mib": 183359,
+    "driver_version": "570.211.01"
+  },
+  "native_validation": {
+    "passed": true,
+    "history": 10,
+    "num_seeds": 5,
+    "batch_size": 128,
+    "learning_steps": 40,
+    "context_only_prefix": 26,
+    "burn_in": 10,
+    "tail": 50,
+    "prefill": 12800,
+    "native_updates": 64,
+    "devices": [
+      "cuda:0"
+    ],
+    "cuda_visible_devices": "GPU-eed52dfa-fd80-fc9c-7527-6cde71d80f71",
+    "initial_network_sha256": "73e914aa6106feb6d1f8740fe943b2600336edb0a8de8c661d5f81da547bf258",
+    "prefill_sha256": "40076aecda7aafa3da6b972c6b4a845873e1450d17ad66761fb3fe8b7590f52c",
+    "first32_updates_including_compilation_seconds": 24.049717052999767,
+    "second32_updates_seconds": 2.38584179400641,
+    "steady_seconds_per_update": 0.07455755606270031,
+    "evaluation": {
+      "greedy": {
+        "aux_twin_rms": [
+          0.4932785630226135,
+          0.4708751142024994,
+          0.48145201802253723,
+          0.5091703534126282,
+          0.4916645884513855
+        ],
+        "completed": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "discrepancy_rms": [
+          2.516425371170044,
+          2.3847501277923584,
+          2.5651347637176514,
+          2.473043441772461,
+          2.4482529163360596
+        ],
+        "repeat_fraction": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "return": [
+          4.739999771118164,
+          5.920000076293945,
+          5.679999828338623,
+          5.679999828338623,
+          4.639999866485596
+        ],
+        "steps": [
+          21.260000228881836,
+          20.079999923706055,
+          20.31999969482422,
+          20.31999969482422,
+          21.35999870300293
+        ]
+      },
+      "sampled": {
+        "aux_twin_rms": [
+          0.5039857625961304,
+          0.46385693550109863,
+          0.486604779958725,
+          0.4938341975212097,
+          0.508346438407898
+        ],
+        "completed": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "discrepancy_rms": [
+          2.4587624073028564,
+          2.3962833881378174,
+          2.413508176803589,
+          2.444383144378662,
+          2.3286502361297607
+        ],
+        "repeat_fraction": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "return": [
+          4.440000057220459,
+          4.139999866485596,
+          5.87999963760376,
+          4.480000019073486,
+          4.599999904632568
+        ],
+        "steps": [
+          21.559999465942383,
+          21.85999870300293,
+          20.119998931884766,
+          21.520000457763672,
+          21.399999618530273
+        ]
+      }
+    },
+    "validation_only_no_state_reuse": true,
+    "total_seconds": 50.83909370699257
+  },
+  "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "runtime_versions": {
+    "jax": "0.6.2",
+    "jaxlib": "0.6.2",
+    "jax-cuda12-plugin": "0.6.2",
+    "jax-cuda12-pjrt": "0.6.2",
+    "flax": "0.10.7",
+    "optax": "0.2.5",
+    "numpy": "1.26.4",
+    "scipy": "1.13.1",
+    "gymnax": "0.0.9",
+    "wandb": "0.30.0"
+  },
+  "git_commit": "78733f0cc8c0edf92e0009f08fc0d67f6827a5db",
+  "deployment_bundle_sha256": "d177ce908b13d87e0e28071f274d8389070a094dd4ace247d64fa97de815c3b1"
+}

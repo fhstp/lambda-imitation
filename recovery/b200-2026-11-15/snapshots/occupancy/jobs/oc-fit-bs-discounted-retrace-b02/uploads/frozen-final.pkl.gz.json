@@ -1,0 +1,8 @@
+{
+  "path": "checkpoints/frozen-final.pkl.gz",
+  "sha256": "97c00aa5742191b0a1154f89053f5ce29312d39f58b7b5af1985cdabbb4bb876",
+  "bytes": 204091914,
+  "kind": "checkpoint",
+  "release_after_remote_verification": true,
+  "utc": "2026-11-14T02:40:59.728491+00:00"
+}

@@ -1,0 +1,705 @@
+{
+  "passed": true,
+  "utc": "2026-11-15T11:01:38.552120+00:00",
+  "jobs": [
+    {
+      "name": "oc-learning-bs-uniform-retrace-b01",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "46a0b9fdc512",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-bs-uniform-retrace-b02",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "b1cd9d71cd7e",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-uniform-retrace-b01",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "d1a614ede684",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-uniform-retrace-b02",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "dc942afb5bbc",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-uniform-retrace-b03",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "5ba759a2472f",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-uniform-retrace-b04",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "2de33ba0fa99",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-bs-discounted-is-b01",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "ffd56bd4ea79",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-bs-discounted-retrace-b01",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "96936651c000",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-bs-discounted-uncorrected-b01",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "cd84d0730a97",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-bs-uniform-is-b01",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "f12972281172",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-bs-uniform-uncorrected-b01",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "35e010013b13",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-bs-discounted-is-b02",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "e02191c9359f",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-bs-discounted-retrace-b02",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "353eb82595e8",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-bs-discounted-uncorrected-b02",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "aeb1555637c4",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-bs-uniform-is-b02",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "3e16dff7914f",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-bs-uniform-uncorrected-b02",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "064ede152204",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-discounted-is-b01",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "e4145876dafe",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-discounted-retrace-b01",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "59acda841a75",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-discounted-uncorrected-b01",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "14f21b5d03cc",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-uniform-is-b01",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "1c5ab4fe4150",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-uniform-uncorrected-b01",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "d9223bb66dd8",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-discounted-is-b02",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "b5992919486d",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-discounted-retrace-b02",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "6210888825a1",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-discounted-uncorrected-b02",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "189f89cf776c",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-uniform-is-b02",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "de913af0db73",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-uniform-uncorrected-b02",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "ea4f4ddad9ad",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-discounted-is-b03",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "ede7fe8b0d10",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-discounted-retrace-b03",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "014e527b8334",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-discounted-uncorrected-b03",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "65468c094033",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-uniform-is-b03",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "8cd070468409",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-uniform-uncorrected-b03",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "629b3a412f06",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-discounted-is-b04",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "2fb9171da2f3",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-discounted-retrace-b04",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "ba9416f13e75",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-discounted-uncorrected-b04",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "9d11fdc83664",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-uniform-is-b04",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "bb52a9588bb8",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-learning-ms-uniform-uncorrected-b04",
+      "kind": "learning",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "0869a7df510e",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-data-bs-uniform-retrace-b01",
+      "kind": "data",
+      "project": "retrace-rebuttal-validation",
+      "wandb_id": "940605c642d9",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-data-bs-uniform-retrace-b02",
+      "kind": "data",
+      "project": "retrace-rebuttal-validation",
+      "wandb_id": "e3806b7c1171",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-data-ms-uniform-retrace-b01",
+      "kind": "data",
+      "project": "retrace-rebuttal-validation",
+      "wandb_id": "f36ac3d64707",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-data-ms-uniform-retrace-b02",
+      "kind": "data",
+      "project": "retrace-rebuttal-validation",
+      "wandb_id": "2be01c3ef873",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-data-ms-uniform-retrace-b03",
+      "kind": "data",
+      "project": "retrace-rebuttal-validation",
+      "wandb_id": "ce8584753717",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-data-ms-uniform-retrace-b04",
+      "kind": "data",
+      "project": "retrace-rebuttal-validation",
+      "wandb_id": "dba8a67f2d6e",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-bs-discounted-is-b01",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "8914bad38083",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-bs-discounted-retrace-b01",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "7f3a3e0f2df8",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-bs-discounted-uncorrected-b01",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "d946c1a64dc3",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-bs-uniform-is-b01",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "4a2b14c2cd73",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-bs-uniform-retrace-b01",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "200383d8ad70",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-bs-uniform-uncorrected-b01",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "13d21bebbcf7",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-bs-discounted-is-b02",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "77a8a26626b0",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-bs-discounted-retrace-b02",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "43cd073081bd",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-bs-discounted-uncorrected-b02",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "cc7f00778331",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-bs-uniform-is-b02",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "a9c974ef8da4",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-bs-uniform-retrace-b02",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "b223fe7e2a3a",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-bs-uniform-uncorrected-b02",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-battleship-20261113",
+      "wandb_id": "8ace696ee1f4",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-discounted-is-b01",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "37f246d38d0f",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-discounted-retrace-b01",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "48d0caec32eb",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-discounted-uncorrected-b01",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "ef9ae8ca9f6c",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-uniform-is-b01",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "ba4e3abe661d",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-uniform-retrace-b01",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "fecbf9bd8760",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-uniform-uncorrected-b01",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "75db459750dc",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-discounted-is-b02",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "d3f231284f78",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-discounted-retrace-b02",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "be0671b91a23",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-discounted-uncorrected-b02",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "0f8ffe52c4f3",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-uniform-is-b02",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "ec91ccee8509",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-uniform-retrace-b02",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "f2d96d9667f9",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-uniform-uncorrected-b02",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "df624abc4a04",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-discounted-is-b03",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "bf1a1f20889a",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-discounted-retrace-b03",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "03063e6dcd8b",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-discounted-uncorrected-b03",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "4d4063bdf048",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-uniform-is-b03",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "3f044d82fab4",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-uniform-retrace-b03",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "2f9eca8e2f36",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-uniform-uncorrected-b03",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "850278f37874",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-discounted-is-b04",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "dd05c8d137fb",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-discounted-retrace-b04",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "24632fcfb7ca",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-discounted-uncorrected-b04",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "e89b5b4c601e",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-uniform-is-b04",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "331cf31f1388",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-uniform-retrace-b04",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "9c7b6d28e25b",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "oc-fit-ms-uniform-uncorrected-b04",
+      "kind": "fit",
+      "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+      "wandb_id": "ad169804f0a0",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "battleship-retrace-history00-block2-5seeds",
+      "kind": "history",
+      "project": "retrace-rebuttal-battleship-history-length-20261109",
+      "wandb_id": "d824a0e5",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "battleship-retrace-history01-block2-5seeds",
+      "kind": "history",
+      "project": "retrace-rebuttal-battleship-history-length-20261109",
+      "wandb_id": "5818f1c6",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "battleship-retrace-history02-block2-5seeds",
+      "kind": "history",
+      "project": "retrace-rebuttal-battleship-history-length-20261109",
+      "wandb_id": "17303dc7",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "battleship-retrace-history05-block2-5seeds",
+      "kind": "history",
+      "project": "retrace-rebuttal-battleship-history-length-20261109",
+      "wandb_id": "89c59f8c",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "battleship-retrace-history10-block2-5seeds",
+      "kind": "history",
+      "project": "retrace-rebuttal-battleship-history-length-20261109",
+      "wandb_id": "732aa042",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "battleship-retrace-history15-block2-5seeds",
+      "kind": "history",
+      "project": "retrace-rebuttal-battleship-history-length-20261109",
+      "wandb_id": "2a13741b",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "battleship-retrace-history20-block2-5seeds",
+      "kind": "history",
+      "project": "retrace-rebuttal-battleship-history-length-20261109",
+      "wandb_id": "65d38c8b",
+      "status": "complete",
+      "wandb_state": "finished"
+    },
+    {
+      "name": "battleship-retrace-history25-block2-5seeds",
+      "kind": "history",
+      "project": "retrace-rebuttal-battleship-history-length-20261109",
+      "wandb_id": "5962fc87",
+      "status": "complete",
+      "wandb_state": "finished"
+    }
+  ],
+  "counts": {
+    "learning": 36,
+    "data": 6,
+    "fit": 36,
+    "history": 8
+  },
+  "all_remote_runs_finished": true,
+  "all_result_indices_verified": true,
+  "occupancy_sealed_sources_verified": 34,
+  "no_training_started_or_resumed": true,
+  "no_local_deletion": true
+}

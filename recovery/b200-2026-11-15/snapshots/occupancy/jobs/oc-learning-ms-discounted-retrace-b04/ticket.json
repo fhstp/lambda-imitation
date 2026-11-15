@@ -1,0 +1,20 @@
+{
+  "name": "oc-learning-ms-discounted-retrace-b04",
+  "session": "oc-learning-ms-discounted-retrace-b04",
+  "kind": "learning",
+  "environment": "minesweeper",
+  "measure": "discounted",
+  "correction": "retrace",
+  "block": 4,
+  "seeds": [
+    2026111415,
+    2026111416,
+    2026111417,
+    2026111418,
+    2026111419
+  ],
+  "wandb_id": "ba9416f13e75",
+  "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+  "dependencies": [],
+  "gpu_uuid": "GPU-816695fe-800f-d45f-9e21-1f5deb1738a6"
+}

@@ -1,0 +1,20 @@
+{
+  "name": "oc-learning-bs-uniform-uncorrected-b01",
+  "session": "oc-learning-bs-uniform-uncorrected-b01",
+  "kind": "learning",
+  "environment": "battleship",
+  "measure": "uniform",
+  "correction": "uncorrected",
+  "block": 1,
+  "seeds": [
+    2026111300,
+    2026111301,
+    2026111302,
+    2026111303,
+    2026111304
+  ],
+  "wandb_id": "35e010013b13",
+  "project": "retrace-rebuttal-occupancy-battleship-20261113",
+  "dependencies": [],
+  "gpu_uuid": "GPU-e194b2da-4088-e75c-a3ca-100e93713758"
+}

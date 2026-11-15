@@ -1,0 +1,601 @@
+{
+  "passed": true,
+  "validation_only_no_state_reuse": true,
+  "environment": "battleship",
+  "settings": {
+    "environment": "battleship",
+    "measure": "discounted",
+    "correction": "retrace",
+    "hidden_dim": 512,
+    "batch_size": 128,
+    "sequence_length": 40,
+    "tail": 50,
+    "replay_capacity": 100000,
+    "episode_batch_factor": 4,
+    "gamma": 0.99,
+    "lambda1": 0.05,
+    "lambda2": 0.85,
+    "lambda_coef": 0.01,
+    "alpha": 0.1,
+    "tau": 0.005,
+    "fe_lr": 1e-05,
+    "actor_lr": 0.0001,
+    "critic_lr": 0.0001,
+    "frozen": false
+  },
+  "seeds": [
+    424200,
+    424201,
+    424202,
+    424203,
+    424204
+  ],
+  "num_seeds": 5,
+  "native_online_updates": 128,
+  "native_frozen_updates": 64,
+  "production_admitted": false,
+  "cuda_visible_devices": "GPU-8f6bd869-91e3-3486-470b-bd869bd058db",
+  "device": "cuda:0",
+  "device_kind": "NVIDIA B200",
+  "fixed_prefill_probability_checks": [
+    {
+      "retained_episodes": 586,
+      "retained_transitions": 12792,
+      "logged_fixed_probabilities_verified": true
+    },
+    {
+      "retained_episodes": 586,
+      "retained_transitions": 12793,
+      "logged_fixed_probabilities_verified": true
+    },
+    {
+      "retained_episodes": 590,
+      "retained_transitions": 12796,
+      "logged_fixed_probabilities_verified": true
+    },
+    {
+      "retained_episodes": 592,
+      "retained_transitions": 12797,
+      "logged_fixed_probabilities_verified": true
+    },
+    {
+      "retained_episodes": 593,
+      "retained_transitions": 12787,
+      "logged_fixed_probabilities_verified": true
+    }
+  ],
+  "separate_frozen_dataset_checks": [
+    {
+      "retained_episodes": 589,
+      "retained_transitions": 12793,
+      "logged_fixed_probabilities_verified": true
+    },
+    {
+      "retained_episodes": 591,
+      "retained_transitions": 12782,
+      "logged_fixed_probabilities_verified": true
+    },
+    {
+      "retained_episodes": 589,
+      "retained_transitions": 12782,
+      "logged_fixed_probabilities_verified": true
+    },
+    {
+      "retained_episodes": 594,
+      "retained_transitions": 12797,
+      "logged_fixed_probabilities_verified": true
+    },
+    {
+      "retained_episodes": 592,
+      "retained_transitions": 12798,
+      "logged_fixed_probabilities_verified": true
+    }
+  ],
+  "frozen_encoder_actor_task_hash_before_and_after": "e4ea103b14abf88c54a1ec4bb9c668222dfe0535691d3f0209bcbe5b390086f6",
+  "first_64_updates_seconds_with_compilation": 22.96543603896862,
+  "steady_64_updates_seconds": 1.5458668610081077,
+  "total_seconds": 118.658828996995,
+  "utc": "2026-11-13T14:48:49.158726+00:00",
+  "runtime": {
+    "jax": "0.6.2",
+    "jaxlib": "0.6.2",
+    "flax": "0.10.7",
+    "optax": "0.2.5",
+    "numpy": "1.26.4"
+  },
+  "source_sha256": {
+    "src/lambda_imitation/__init__.py": "96233e98e9ef51676a796bde9cb387af2d2f393c28ab232a82210360658b84ee",
+    "src/lambda_imitation/actor_critic.py": "02f74b3821737718afe4ca6de4a55eafce89e2819ed710c7c147542e2cb22648",
+    "src/lambda_imitation/buffer.py": "4b2c889bdf9ae08161aff87ccc1cb03d8b5321ba7b13089ae9bd9622151b24e4",
+    "src/lambda_imitation/envs/__init__.py": "5eb115fe860c25a179e87b04986930e5cc05891031d2ac24f6f995aa7b64b10e",
+    "src/lambda_imitation/envs/battleship.py": "ee9c03a29661391c1c73535d280fdc2aa43c4ad9040e378509e875dc8f08bb57",
+    "src/lambda_imitation/envs/minesweeper.py": "b3958390af3cac5124d051ec9ae6f44316bdd1ed0b92fdbdf2d681102825264b",
+    "src/lambda_imitation/envs/tmaze.py": "a1d22ce7dbaa29d7b12ab9e0249d5b3a398f6ad2fe91c9e101f9dd54a1c9baaf",
+    "src/lambda_imitation/history.py": "87abb24622200fc48f4dc987d2b973cbf010b271d244b239c6fa848d8ebe7749",
+    "src/lambda_imitation/utils.py": "b068fdea64658f8f5c064db7e72d3d8cdd62da2a8a6daf94540bc9c5f249d13d",
+    "studies/occupancy_correction/__init__.py": "9a0e401ad70c7633972c3ef83e68e3c2c90b2543ff16ee028e1274024c10fdb7",
+    "studies/occupancy_correction/cloud_validation.py": "cc54eccc4ffd4995f33555f7e6a02ca1425815c3eabffb9f3991f9588c083aa5",
+    "studies/occupancy_correction/collection.py": "6e866c853ebeb5a85b7d62618b2016967ca521ce4cd30d00bad3a146003b4246",
+    "studies/occupancy_correction/frozen_evaluation.py": "adf80f669fa2bfb1189b3f0c0c42b36ebff63dc561fdfd1bc5b281a8dc66976c",
+    "studies/occupancy_correction/learner.py": "79513892bec73012796fe5d7bd561a4424d402a64e3aca039430b4b36a8a8907",
+    "studies/occupancy_correction/native_suite.py": "63e3f48689cb924a02f6b3bfbc5ec0bf643ae83c15d3ec731082ce426b502408",
+    "studies/occupancy_correction/native_validation.py": "8fc0dc0de492351bd3205ead0c054e645c784682771279cea435741b70dab037",
+    "studies/occupancy_correction/queue.py": "370d9dd115a8142337d626358daefc0456bfe86b942545e25fc732c338887061",
+    "studies/occupancy_correction/records.py": "81134f7baf5d063f3e3dbc70fce55b7e83ee1c826017afcf1d4b345577f3dc6c",
+    "studies/occupancy_correction/replay.py": "52ad12cafa097c422825e9308b2e70bd3204571fc88df5e77571676cb78f8ab1",
+    "studies/occupancy_correction/run_worker.py": "f6248343ee16ebfeb252ad85816d2621a18121997d789affea2dd8f219d00ab6",
+    "studies/occupancy_correction/sampling.py": "a77da0c6c53e8cd906928640fbd296485c02c7c70c3ce6479d4dfbeccd5cb72d",
+    "studies/occupancy_correction/study.py": "51fa8819820582f57a0123a8ff40f5f2dd277bc0f858b196d985815d48c2c2c3",
+    "studies/occupancy_correction/test_collection.py": "aa022d4eff9cadebc61e7ae6ba4b5216665704c32d2eef8cd106aa9c54535f2b",
+    "studies/occupancy_correction/test_learner.py": "1ea95a574238df0613f273f20ad4f43471e53477e4b02fd4273c00ac86feb0d4",
+    "studies/occupancy_correction/test_lifecycle.py": "87a7301e72bb8410816698ce206fd2461beb980bcf1c4633839911d695be32c5",
+    "studies/occupancy_correction/test_operator.py": "489056747927bb77472fe7f00c33f80ff61563ea7f17f1e5dc75a4f0926033bf",
+    "studies/occupancy_correction/test_sampling.py": "a945af3f49cc589746fa9b9d548f8356e9c98eeeba12a35a741792e1d0353d6e",
+    "studies/occupancy_correction/test_worker.py": "7b695f5849ccff9b9b435810b626210582690fdebb9a09f94cd81f8091b1e991",
+    "studies/occupancy_correction/worker_path_validation.py": "5276229ebfb850cef14a2f15fafa0b9b2578621654d84ba3a3603057bd1e7ff0"
+  },
+  "last_metrics": {
+    "actor_loss": [
+      0.05612440034747124,
+      0.21871954202651978,
+      -0.040023982524871826,
+      0.09927885234355927,
+      0.15472373366355896
+    ],
+    "anchor_age_00_fraction": [
+      0.05097656697034836,
+      0.05108507350087166,
+      0.05119900032877922,
+      0.05134548619389534,
+      0.05144449323415756
+    ],
+    "anchor_age_01_fraction": [
+      0.05016818642616272,
+      0.05077989399433136,
+      0.05053575709462166,
+      0.05062799155712128,
+      0.05089789256453514
+    ],
+    "anchor_age_02_fraction": [
+      0.049772121012210846,
+      0.05010986328125,
+      0.049677200615406036,
+      0.04999728873372078,
+      0.05027534067630768
+    ],
+    "anchor_age_03_fraction": [
+      0.04913601279258728,
+      0.04927300289273262,
+      0.0496622771024704,
+      0.049930837005376816,
+      0.04981553927063942
+    ],
+    "anchor_age_04_fraction": [
+      0.04897597059607506,
+      0.04839951917529106,
+      0.04918212816119194,
+      0.04912245646119118,
+      0.0494181327521801
+    ],
+    "anchor_age_05_fraction": [
+      0.04789632931351662,
+      0.04873182624578476,
+      0.048456497490406036,
+      0.049020737409591675,
+      0.04885254055261612
+    ],
+    "anchor_age_06_fraction": [
+      0.0478312224149704,
+      0.04776475206017494,
+      0.04802924394607544,
+      0.04834797978401184,
+      0.04844970628619194
+    ],
+    "anchor_age_07_fraction": [
+      0.04697807505726814,
+      0.047798678278923035,
+      0.047756627202034,
+      0.04818115755915642,
+      0.04775255173444748
+    ],
+    "anchor_age_08_fraction": [
+      0.04699843376874924,
+      0.046808529645204544,
+      0.047275111079216,
+      0.04702962934970856,
+      0.047075748443603516
+    ],
+    "anchor_age_09_fraction": [
+      0.046154774725437164,
+      0.04639892280101776,
+      0.047009289264678955,
+      0.0466715507209301,
+      0.0467461459338665
+    ],
+    "anchor_age_10_fraction": [
+      0.0463867262005806,
+      0.046175144612789154,
+      0.046512845903635025,
+      0.046228036284446716,
+      0.04624566063284874
+    ],
+    "anchor_age_11_fraction": [
+      0.0453559011220932,
+      0.04523655027151108,
+      0.044843219220638275,
+      0.04565836489200592,
+      0.04577365890145302
+    ],
+    "anchor_age_12_fraction": [
+      0.0452609620988369,
+      0.04473605751991272,
+      0.0442301444709301,
+      0.044882532209157944,
+      0.04496392980217934
+    ],
+    "anchor_age_13_fraction": [
+      0.04434678703546524,
+      0.0438842847943306,
+      0.04319525882601738,
+      0.04322781786322594,
+      0.044226087629795074
+    ],
+    "anchor_age_14_fraction": [
+      0.04221191257238388,
+      0.04214545339345932,
+      0.042121030390262604,
+      0.0430772565305233,
+      0.042552363127470016
+    ],
+    "anchor_age_15_fraction": [
+      0.04158122092485428,
+      0.04152696579694748,
+      0.04207492619752884,
+      0.04090576246380806,
+      0.04129774495959282
+    ],
+    "anchor_age_16_fraction": [
+      0.040310338139534,
+      0.04028184711933136,
+      0.0405002199113369,
+      0.039903424680233,
+      0.04057617485523224
+    ],
+    "anchor_age_17_fraction": [
+      0.03884819149971008,
+      0.03794487565755844,
+      0.03791911154985428,
+      0.03820393607020378,
+      0.03834228217601776
+    ],
+    "anchor_age_18_fraction": [
+      0.036127377301454544,
+      0.03556450828909874,
+      0.03589816763997078,
+      0.03634575754404068,
+      0.03564859926700592
+    ],
+    "anchor_age_19_fraction": [
+      0.03323568031191826,
+      0.033028170466423035,
+      0.03250868245959282,
+      0.03316785767674446,
+      0.03302545100450516
+    ],
+    "anchor_age_20_fraction": [
+      0.029903164133429527,
+      0.0299207903444767,
+      0.02949082851409912,
+      0.02936333417892456,
+      0.02956407330930233
+    ],
+    "anchor_age_21_fraction": [
+      0.02616237662732601,
+      0.02617730386555195,
+      0.02548692375421524,
+      0.025172250345349312,
+      0.02438422478735447
+    ],
+    "anchor_age_22_fraction": [
+      0.021759716793894768,
+      0.02112901583313942,
+      0.02149793691933155,
+      0.02070990949869156,
+      0.02016873098909855
+    ],
+    "anchor_age_23_fraction": [
+      0.015539553016424179,
+      0.01630181074142456,
+      0.01571180298924446,
+      0.01497667096555233,
+      0.014652506448328495
+    ],
+    "anchor_age_24_fraction": [
+      0.00808241032063961,
+      0.008797203190624714,
+      0.00922580249607563,
+      0.00790201872587204,
+      0.007850478403270245
+    ],
+    "anchor_age_mean": [
+      10.201557159423828,
+      10.185256958007812,
+      10.17041301727295,
+      10.125337600708008,
+      10.10346794128418
+    ],
+    "discrepancy_loss": [
+      4.569608688354492,
+      5.824383735656738,
+      4.936828136444092,
+      5.196493148803711,
+      4.84689998626709
+    ],
+    "entropy": [
+      2.422074794769287,
+      2.389021396636963,
+      2.3473434448242188,
+      2.3441247940063477,
+      2.4004263877868652
+    ],
+    "expected_anchor_age_00_fraction": [
+      0.05087640509009361,
+      0.05086901783943176,
+      0.0511452816426754,
+      0.05134127661585808,
+      0.05141323804855347
+    ],
+    "expected_anchor_age_01_fraction": [
+      0.05036765709519386,
+      0.050360336899757385,
+      0.05063382908701897,
+      0.05082782357931137,
+      0.05089903250336647
+    ],
+    "expected_anchor_age_02_fraction": [
+      0.049863964319229126,
+      0.04985672980546951,
+      0.05012743920087814,
+      0.05031954124569893,
+      0.050390131771564484
+    ],
+    "expected_anchor_age_03_fraction": [
+      0.049365296959877014,
+      0.049358218908309937,
+      0.04962616041302681,
+      0.04981635510921478,
+      0.04988617077469826
+    ],
+    "expected_anchor_age_04_fraction": [
+      0.04887169227004051,
+      0.04886459931731224,
+      0.049129925668239594,
+      0.049318213015794754,
+      0.04938735067844391
+    ],
+    "expected_anchor_age_05_fraction": [
+      0.0483829639852047,
+      0.04837595298886299,
+      0.04863864555954933,
+      0.04882500693202019,
+      0.04889344051480293
+    ],
+    "expected_anchor_age_06_fraction": [
+      0.04789908602833748,
+      0.04789215326309204,
+      0.04815223067998886,
+      0.048336755484342575,
+      0.0484045073390007
+    ],
+    "expected_anchor_age_07_fraction": [
+      0.04742012172937393,
+      0.047413263469934464,
+      0.04767072573304176,
+      0.04785342514514923,
+      0.047840218991041183
+    ],
+    "expected_anchor_age_08_fraction": [
+      0.04694591835141182,
+      0.04693915322422981,
+      0.04711449518799782,
+      0.04721600189805031,
+      0.04728240519762039
+    ],
+    "expected_anchor_age_09_fraction": [
+      0.04647647961974144,
+      0.04646976664662361,
+      0.04664341360330582,
+      0.04674380272626877,
+      0.04673090577125549
+    ],
+    "expected_anchor_age_10_fraction": [
+      0.04593376815319061,
+      0.046005040407180786,
+      0.04602109268307686,
+      0.046042781323194504,
+      0.04618576541543007
+    ],
+    "expected_anchor_age_11_fraction": [
+      0.04522138461470604,
+      0.045390717685222626,
+      0.04502100870013237,
+      0.04542820528149605,
+      0.045569755136966705
+    ],
+    "expected_anchor_age_12_fraction": [
+      0.044769130647182465,
+      0.04470767080783844,
+      0.044265370815992355,
+      0.04466862604022026,
+      0.04503775015473366
+    ],
+    "expected_anchor_age_13_fraction": [
+      0.043943505734205246,
+      0.043806884437799454,
+      0.043293584138154984,
+      0.04346643015742302,
+      0.043907489627599716
+    ],
+    "expected_anchor_age_14_fraction": [
+      0.04275556281208992,
+      0.0426950640976429,
+      0.04263611137866974,
+      0.042732544243335724,
+      0.04294490069150925
+    ],
+    "expected_anchor_age_15_fraction": [
+      0.04173526167869568,
+      0.04144131392240524,
+      0.04191339388489723,
+      0.040972329676151276,
+      0.04133084788918495
+    ],
+    "expected_anchor_age_16_fraction": [
+      0.040217556059360504,
+      0.040293216705322266,
+      0.04017401114106178,
+      0.03997616097331047,
+      0.04025787487626076
+    ],
+    "expected_anchor_age_17_fraction": [
+      0.038653429597616196,
+      0.03792908415198326,
+      0.03810213506221771,
+      0.03819746896624565,
+      0.038331400603055954
+    ],
+    "expected_anchor_age_18_fraction": [
+      0.0359661690890789,
+      0.0355362668633461,
+      0.03585202619433403,
+      0.03623480349779129,
+      0.03543369844555855
+    ],
+    "expected_anchor_age_19_fraction": [
+      0.03347119688987732,
+      0.03311632201075554,
+      0.03271786496043205,
+      0.03311502933502197,
+      0.03301682323217392
+    ],
+    "expected_anchor_age_20_fraction": [
+      0.030176902189850807,
+      0.029684066772460938,
+      0.029290568083524704,
+      0.029474101960659027,
+      0.029558978974819183
+    ],
+    "expected_anchor_age_21_fraction": [
+      0.0261080265045166,
+      0.026247354224324226,
+      0.02539885602891445,
+      0.025167493149638176,
+      0.02466278336942196
+    ],
+    "expected_anchor_age_22_fraction": [
+      0.021409694105386734,
+      0.021633001044392586,
+      0.021553970873355865,
+      0.02084369957447052,
+      0.0204082690179348
+    ],
+    "expected_anchor_age_23_fraction": [
+      0.015452277846634388,
+      0.016219284385442734,
+      0.01573249325156212,
+      0.015032308176159859,
+      0.014533736743032932
+    ],
+    "expected_anchor_age_24_fraction": [
+      0.007716576103121042,
+      0.0088954521343112,
+      0.009145422838628292,
+      0.008049802854657173,
+      0.007692466024309397
+    ],
+    "expected_anchor_age_mean": [
+      10.186013221740723,
+      10.198835372924805,
+      10.16605281829834,
+      10.125682830810547,
+      10.100921630859375
+    ],
+    "importance_ratio_ess_fraction": [
+      0.9968549013137817,
+      0.9964941740036011,
+      0.9962647557258606,
+      0.9956448674201965,
+      0.9963536262512207
+    ],
+    "importance_ratio_max": [
+      1.65569269657135,
+      2.1010072231292725,
+      1.6966301202774048,
+      2.0998659133911133,
+      2.0898218154907227
+    ],
+    "importance_ratio_mean": [
+      0.9991841316223145,
+      0.9994292855262756,
+      0.9989698529243469,
+      1.0000731945037842,
+      1.0002281665802002
+    ],
+    "lambda1_loss": [
+      25.242191314697266,
+      26.044050216674805,
+      26.196619033813477,
+      26.333433151245117,
+      26.194257736206055
+    ],
+    "lambda1_target_abs_max": [
+      25.0,
+      25.0,
+      25.0,
+      25.0,
+      25.0
+    ],
+    "lambda2_loss": [
+      57.35859298706055,
+      55.66147232055664,
+      57.30937576293945,
+      57.12428283691406,
+      57.17924499511719
+    ],
+    "lambda2_target_abs_max": [
+      25.0,
+      25.0,
+      25.0,
+      25.0,
+      25.0
+    ],
+    "retained_transitions": [
+      12886.59375,
+      12885.859375,
+      12885.59375,
+      12887.03125,
+      12885.515625
+    ],
+    "task_loss": [
+      25.664430618286133,
+      26.205617904663086,
+      25.99800682067871,
+      26.408367156982422,
+      26.310134887695312
+    ],
+    "total_loss": [
+      108.36702728271484,
+      108.1881103515625,
+      109.5133285522461,
+      110.01734161376953,
+      109.88681030273438
+    ],
+    "trace_coefficient_max": [
+      0.8500000238418579,
+      0.8500000238418579,
+      0.8500000238418579,
+      0.8500000238418579,
+      0.8500000238418579
+    ]
+  }
+}

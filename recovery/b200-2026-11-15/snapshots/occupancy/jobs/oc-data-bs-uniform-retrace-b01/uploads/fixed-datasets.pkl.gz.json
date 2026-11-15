@@ -1,0 +1,8 @@
+{
+  "path": "fixed-datasets.pkl.gz",
+  "sha256": "57b02a1f7b499175fdebce98dcad21c56cc27f1fa285a6b54ff063005c9c81b4",
+  "bytes": 19042970,
+  "kind": "fixed-datasets",
+  "release_after_remote_verification": false,
+  "utc": "2026-11-14T02:28:16.698276+00:00"
+}

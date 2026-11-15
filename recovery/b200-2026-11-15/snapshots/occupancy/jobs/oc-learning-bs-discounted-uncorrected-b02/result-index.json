@@ -1,0 +1,39 @@
+{
+  "job": {
+    "name": "oc-learning-bs-discounted-uncorrected-b02",
+    "session": "oc-learning-bs-discounted-uncorrected-b02",
+    "kind": "learning",
+    "environment": "battleship",
+    "measure": "discounted",
+    "correction": "uncorrected",
+    "block": 2,
+    "seeds": [
+      2026111305,
+      2026111306,
+      2026111307,
+      2026111308,
+      2026111309
+    ],
+    "wandb_id": "aeb1555637c4",
+    "project": "retrace-rebuttal-occupancy-battleship-20261113",
+    "dependencies": []
+  },
+  "study_sha256": "253227dc710d32d5e1b04d64947632b81d92b0fff32ba5118509b082b20fa234",
+  "admission_sha256": "754e890c0134d5f9d7d234caefaa29c031e2921a860820380b45098c78a9bf13",
+  "files": {
+    "config.json": "6162eb9bfea970c973f5b773612dd241a105746b2bae2887453d85cd5fdb0964",
+    "metrics.jsonl": "7fd84470a17cc6e45e2190409f8016f933d3f2364228fc1527dbf59731bf2df8",
+    "summary.json": "b15ca528519021bb6c72c653f20eb5011cb40069360d5e16a1cee14cc4d81781",
+    "status.json": "ee37db121646e11bafb8faec386f006d26822a322c8fbdcaa2333d27f488edff",
+    "uploads/config.json.committed": "1ec0208b46a5d03824138b5d478b26d76dbae8df9c12c3cc14a1d5635462e736",
+    "uploads/metrics.jsonl.committed": "9c4bceb13f9c89aae06110a4bf9dadc481b614a5441832152ab41a395ee545e1",
+    "uploads/round-010.pkl.gz.committed": "d2abb21a4197ba059b8a088c256613dd171eca78e74adf2c03ebdc770a7798cb",
+    "uploads/round-020.pkl.gz.committed": "55a849e30f3d08748a15c172ed878ac18136c5e00104242cb03a1e1007318192",
+    "uploads/round-030.pkl.gz.committed": "0aec42e10a4f102a8f4b55b3ad4f31b4435e229510fd8b1618da64bf29597c85",
+    "uploads/round-040.pkl.gz.committed": "c6e1a94ee9573e6c86aaf07fad6d0eaa26a70d9aa7f5969cf192168facfd5105",
+    "uploads/round-050.pkl.gz.committed": "1ba55d7b6863922a95692f813ff1f506876a4533ed016a9ec040d85275d77125",
+    "uploads/summary.json.committed": "bbaa3c843a7460d2646f3a58c34ac4cb2fae3bdddc8b7d423fc4b29a336b1612",
+    "training-exit.json": "41974141b85ea735f594fb01f8b8baff84099cab66af9f714236c3a02687f365",
+    "prefill-validation.json": "77ee2c49adf116b63fdb6e0d78e5cd446ed7d0cd94e87e4eba35940ddcba15e9"
+  }
+}

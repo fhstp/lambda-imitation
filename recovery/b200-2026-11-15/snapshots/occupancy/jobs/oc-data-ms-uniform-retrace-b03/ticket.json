@@ -1,0 +1,23 @@
+{
+  "name": "oc-data-ms-uniform-retrace-b03",
+  "session": "oc-data-ms-uniform-retrace-b03",
+  "kind": "data",
+  "environment": "minesweeper",
+  "measure": "uniform",
+  "correction": "retrace",
+  "block": 3,
+  "seeds": [
+    2026111410,
+    2026111411,
+    2026111412,
+    2026111413,
+    2026111414
+  ],
+  "wandb_id": "ce8584753717",
+  "project": "retrace-rebuttal-validation",
+  "dependencies": [
+    "oc-learning-ms-uniform-retrace-b03"
+  ],
+  "reference_job": "oc-learning-ms-uniform-retrace-b03",
+  "gpu_uuid": "GPU-47210a17-b8f2-1c10-a275-2daf5ea627fa"
+}

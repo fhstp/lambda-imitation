@@ -1,0 +1,23 @@
+{
+  "name": "oc-fit-ms-discounted-is-b03",
+  "session": "oc-fit-ms-discounted-is-b03",
+  "kind": "fit",
+  "environment": "minesweeper",
+  "measure": "discounted",
+  "correction": "is",
+  "block": 3,
+  "seeds": [
+    2026111410,
+    2026111411,
+    2026111412,
+    2026111413,
+    2026111414
+  ],
+  "wandb_id": "bf1a1f20889a",
+  "project": "retrace-rebuttal-occupancy-minesweeper-20261113",
+  "dependencies": [
+    "oc-data-ms-uniform-retrace-b03"
+  ],
+  "data_job": "oc-data-ms-uniform-retrace-b03",
+  "gpu_uuid": "GPU-a65c598f-779f-5cfb-a729-a0b012e44d96"
+}

@@ -1,0 +1,17 @@
+{
+  "lease_id": "32df839bad43f7e9",
+  "job": "battleship-retrace-history05-block2-5seeds",
+  "assignment_sha256": "741654502f92efc4c1ad8480bd72adb8b3d1c931f862381440848bfa00021f9d",
+  "files": {
+    "summary.json": "56b99a09f9727667d86aa5eaaebd3b412650cb3f078ad9885689e976603ef0dc",
+    "checkpoint_final.pkl.archived.json": "41024f607be70e3994013ab5077c217bbd135cea5942dbf8889d6c83d1463dca",
+    "checkpoint_50.pkl.archived.json": "bdf7283c9b96b3f5f52d62e8a68996a2511b9f03eea96d99855ce060d551c65a",
+    "config.json": "5da8fbecfcb00e67cd02194586349868d20f9d1f396525b42ef071449b96d01f",
+    "checkpoint_30.pkl.archived.json": "98a7a0af7b5eba0178d79eff64588406342572fc7620f2478b0cf2ea3573aa19",
+    "checkpoint_40.pkl.archived.json": "93bb31d14753d0f0957c28685cda2d0abf4ad48c099e769d0a2323cb0159e154",
+    "receipt.json": "18a52b14d7a99d7b0acaeaf983f9234c480a81e3d4729bfdd671ae277eea7775",
+    "checkpoint_10.pkl.archived.json": "08dcb4965ef4eec21f812371c8eb051e0c9b065fb949334743072c6071da5d5f",
+    "checkpoint_20.pkl.archived.json": "c4ccd512147e90af128f1027839be42f15e876054d9654217fca124b5741f06c",
+    "metrics.jsonl": "ff0e1e4e6d5b213c29ff6c69c2ee4fa4429b94bad6a56380f3b3b75e47daacfc"
+  }
+}

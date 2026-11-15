@@ -1,0 +1,23 @@
+{
+  "name": "oc-fit-bs-uniform-is-b02",
+  "session": "oc-fit-bs-uniform-is-b02",
+  "kind": "fit",
+  "environment": "battleship",
+  "measure": "uniform",
+  "correction": "is",
+  "block": 2,
+  "seeds": [
+    2026111305,
+    2026111306,
+    2026111307,
+    2026111308,
+    2026111309
+  ],
+  "wandb_id": "a9c974ef8da4",
+  "project": "retrace-rebuttal-occupancy-battleship-20261113",
+  "dependencies": [
+    "oc-data-bs-uniform-retrace-b02"
+  ],
+  "data_job": "oc-data-bs-uniform-retrace-b02",
+  "gpu_uuid": "GPU-aa273aa9-18b3-2563-b1d5-1884e6e9dd51"
+}

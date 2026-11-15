@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "environment": "minesweeper",
+  "kinds": [
+    "learning",
+    "data",
+    "fit"
+  ],
+  "num_seeds": 5,
+  "source_sha256": {
+    "src/lambda_imitation/__init__.py": "96233e98e9ef51676a796bde9cb387af2d2f393c28ab232a82210360658b84ee",
+    "src/lambda_imitation/actor_critic.py": "02f74b3821737718afe4ca6de4a55eafce89e2819ed710c7c147542e2cb22648",
+    "src/lambda_imitation/buffer.py": "4b2c889bdf9ae08161aff87ccc1cb03d8b5321ba7b13089ae9bd9622151b24e4",
+    "src/lambda_imitation/envs/__init__.py": "5eb115fe860c25a179e87b04986930e5cc05891031d2ac24f6f995aa7b64b10e",
+    "src/lambda_imitation/envs/battleship.py": "ee9c03a29661391c1c73535d280fdc2aa43c4ad9040e378509e875dc8f08bb57",
+    "src/lambda_imitation/envs/minesweeper.py": "b3958390af3cac5124d051ec9ae6f44316bdd1ed0b92fdbdf2d681102825264b",
+    "src/lambda_imitation/envs/tmaze.py": "a1d22ce7dbaa29d7b12ab9e0249d5b3a398f6ad2fe91c9e101f9dd54a1c9baaf",
+    "src/lambda_imitation/history.py": "87abb24622200fc48f4dc987d2b973cbf010b271d244b239c6fa848d8ebe7749",
+    "src/lambda_imitation/utils.py": "b068fdea64658f8f5c064db7e72d3d8cdd62da2a8a6daf94540bc9c5f249d13d",
+    "studies/occupancy_correction/learner.py": "79513892bec73012796fe5d7bd561a4424d402a64e3aca039430b4b36a8a8907",
+    "studies/occupancy_correction/replay.py": "52ad12cafa097c422825e9308b2e70bd3204571fc88df5e77571676cb78f8ab1",
+    "studies/occupancy_correction/collection.py": "6e866c853ebeb5a85b7d62618b2016967ca521ce4cd30d00bad3a146003b4246",
+    "studies/occupancy_correction/sampling.py": "a77da0c6c53e8cd906928640fbd296485c02c7c70c3ce6479d4dfbeccd5cb72d",
+    "studies/occupancy_correction/run_worker.py": "f6248343ee16ebfeb252ad85816d2621a18121997d789affea2dd8f219d00ab6",
+    "studies/occupancy_correction/frozen_evaluation.py": "adf80f669fa2bfb1189b3f0c0c42b36ebff63dc561fdfd1bc5b281a8dc66976c",
+    "studies/occupancy_correction/records.py": "81134f7baf5d063f3e3dbc70fce55b7e83ee1c826017afcf1d4b345577f3dc6c",
+    "studies/occupancy_correction/native_validation.py": "8fc0dc0de492351bd3205ead0c054e645c784682771279cea435741b70dab037",
+    "studies/occupancy_correction/worker_path_validation.py": "5276229ebfb850cef14a2f15fafa0b9b2578621654d84ba3a3603057bd1e7ff0"
+  },
+  "validation_only_no_state_reuse": true,
+  "utc": "2026-11-13T14:48:14.470913+00:00"
+}

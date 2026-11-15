@@ -1,0 +1,10 @@
+{
+  "artifact": "fhstp-data-intelligence-research-group/retrace-rebuttal-battleship-history-length-20261109/replay-correction-checkpoint-5962fc87-r30:v0",
+  "name": "checkpoint_30.pkl",
+  "round": 30,
+  "sha256": "a9ce57843f58e72c87e184690b6355dcf947407510545ca6f18ae52da38589b3",
+  "md5": "VigzXcV60TRMb2CEdbQ/fg==",
+  "bytes": 385810795,
+  "remote_committed_verified": true,
+  "local_staging_released": true
+}

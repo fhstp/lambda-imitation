@@ -1,0 +1,37 @@
+{
+  "job": {
+    "name": "oc-fit-bs-uniform-retrace-b01",
+    "session": "oc-fit-bs-uniform-retrace-b01",
+    "kind": "fit",
+    "environment": "battleship",
+    "measure": "uniform",
+    "correction": "retrace",
+    "block": 1,
+    "seeds": [
+      2026111300,
+      2026111301,
+      2026111302,
+      2026111303,
+      2026111304
+    ],
+    "wandb_id": "200383d8ad70",
+    "project": "retrace-rebuttal-occupancy-battleship-20261113",
+    "dependencies": [
+      "oc-data-bs-uniform-retrace-b01"
+    ],
+    "data_job": "oc-data-bs-uniform-retrace-b01"
+  },
+  "study_sha256": "253227dc710d32d5e1b04d64947632b81d92b0fff32ba5118509b082b20fa234",
+  "admission_sha256": "754e890c0134d5f9d7d234caefaa29c031e2921a860820380b45098c78a9bf13",
+  "files": {
+    "config.json": "b05babbb431868a9e51dc3415c75f4bd11bc6a2d388d9bf68ce43d9c24c947d9",
+    "metrics.jsonl": "bdd2ef223cc9d27a375267a00a08222d67f491368a38ae27b285dfcdfaac7d81",
+    "summary.json": "498bc79981baf5d827ffedd604dabff80982d8329dfd6c0d9f57b47f5f103513",
+    "status.json": "4c1ffd8b61fc1c8180ad79c0306c49461a7ab80e8192847744f74c13b85e9b1a",
+    "uploads/config.json.committed": "cf7ae71bfad5bbb4ad2ad5eaf5d99cd451defa1d09c499ce13e81a06de245a15",
+    "uploads/frozen-final.pkl.gz.committed": "5e174f20bd25661fdbd36a578cc1aa03cf83acdb6e99510436a3c616bc915b3f",
+    "uploads/metrics.jsonl.committed": "e33430e7bc788ffd4ab9f1bd03a801459dcaddba4c528b77b987c73e4894ff5d",
+    "uploads/summary.json.committed": "1020e3090f0775dfd2d5c91efa143a0904f5e65ffa32398721f064890997881e",
+    "training-exit.json": "383f920ce27a031826881157236d0b7d6001727c65a8257ba8adaac7e8aa6e17"
+  }
+}

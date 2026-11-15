@@ -1,0 +1,88 @@
+{
+  "utc": "2026-11-15T10:53:44.718004+00:00",
+  "state": "/home/ustp/.local/state/lambda-history-b200/32df839bad43f7e9",
+  "jobs": [
+    {
+      "history": 0,
+      "status": "complete",
+      "gpu": 0,
+      "session": "rr-history-h00-b2",
+      "round": 50,
+      "wandb_id": "d824a0e5",
+      "result_published": true,
+      "error": null
+    },
+    {
+      "history": 1,
+      "status": "complete",
+      "gpu": 1,
+      "session": "rr-history-h01-b2",
+      "round": 50,
+      "wandb_id": "5818f1c6",
+      "result_published": true,
+      "error": null
+    },
+    {
+      "history": 2,
+      "status": "complete",
+      "gpu": 2,
+      "session": "rr-history-h02-b2",
+      "round": 50,
+      "wandb_id": "17303dc7",
+      "result_published": true,
+      "error": null
+    },
+    {
+      "history": 5,
+      "status": "complete",
+      "gpu": 3,
+      "session": "rr-history-h05-b2",
+      "round": 50,
+      "wandb_id": "89c59f8c",
+      "result_published": true,
+      "error": null
+    },
+    {
+      "history": 10,
+      "status": "complete",
+      "gpu": 4,
+      "session": "rr-history-h10-b2",
+      "round": 50,
+      "wandb_id": "732aa042",
+      "result_published": true,
+      "error": null
+    },
+    {
+      "history": 15,
+      "status": "complete",
+      "gpu": 5,
+      "session": "rr-history-h15-b2",
+      "round": 50,
+      "wandb_id": "2a13741b",
+      "result_published": true,
+      "error": null
+    },
+    {
+      "history": 20,
+      "status": "complete",
+      "gpu": 6,
+      "session": "rr-history-h20-b2",
+      "round": 50,
+      "wandb_id": "65d38c8b",
+      "result_published": true,
+      "error": null
+    },
+    {
+      "history": 25,
+      "status": "complete",
+      "gpu": 7,
+      "session": "rr-history-h25-b2",
+      "round": 50,
+      "wandb_id": "5962fc87",
+      "result_published": true,
+      "error": null
+    }
+  ],
+  "complete": true,
+  "training_retry_allowed": false
+}

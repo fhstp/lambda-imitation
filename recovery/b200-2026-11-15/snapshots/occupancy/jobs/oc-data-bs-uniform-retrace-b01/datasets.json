@@ -1,0 +1,83 @@
+{
+  "name": "fixed-datasets.pkl.gz",
+  "sha256": "57b02a1f7b499175fdebce98dcad21c56cc27f1fa285a6b54ff063005c9c81b4",
+  "bytes": 19042970,
+  "reference_job": "oc-learning-bs-uniform-retrace-b01",
+  "reference_sha256": "dd259fed5d88f87377fd03a873823746ef136186b8e94ce63611be73b9b266b2",
+  "reports": {
+    "fitting": {
+      "checks": [
+        {
+          "retained_episodes": 4607,
+          "retained_transitions": 99986,
+          "logged_fixed_probabilities_verified": true
+        },
+        {
+          "retained_episodes": 4620,
+          "retained_transitions": 99977,
+          "logged_fixed_probabilities_verified": true
+        },
+        {
+          "retained_episodes": 4609,
+          "retained_transitions": 99994,
+          "logged_fixed_probabilities_verified": true
+        },
+        {
+          "retained_episodes": 4627,
+          "retained_transitions": 99983,
+          "logged_fixed_probabilities_verified": true
+        },
+        {
+          "retained_episodes": 4615,
+          "retained_transitions": 99988,
+          "logged_fixed_probabilities_verified": true
+        }
+      ],
+      "physical_calls_per_seed": 100000,
+      "pending_calls_per_seed": [
+        14,
+        23,
+        6,
+        17,
+        12
+      ]
+    },
+    "heldout": {
+      "checks": [
+        {
+          "retained_episodes": 462,
+          "retained_transitions": 9996,
+          "logged_fixed_probabilities_verified": true
+        },
+        {
+          "retained_episodes": 464,
+          "retained_transitions": 9995,
+          "logged_fixed_probabilities_verified": true
+        },
+        {
+          "retained_episodes": 462,
+          "retained_transitions": 9977,
+          "logged_fixed_probabilities_verified": true
+        },
+        {
+          "retained_episodes": 455,
+          "retained_transitions": 9993,
+          "logged_fixed_probabilities_verified": true
+        },
+        {
+          "retained_episodes": 458,
+          "retained_transitions": 9980,
+          "logged_fixed_probabilities_verified": true
+        }
+      ],
+      "physical_calls_per_seed": 10000,
+      "pending_calls_per_seed": [
+        4,
+        5,
+        23,
+        7,
+        20
+      ]
+    }
+  }
+}
