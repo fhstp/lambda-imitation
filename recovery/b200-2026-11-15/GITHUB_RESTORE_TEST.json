@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "utc": "2026-11-15T11:22:29.707274+00:00",
+  "github_commit": "f65ac5320fc5537ff9cc42f7db8160d82f6a4563",
+  "github_clone_fsck_passed": true,
+  "all_git_snapshots_restored_and_hash_verified": true,
+  "original_archived_files_restored_and_hash_verified": 4210,
+  "archive_source": "Previously downloaded from immutable W&B artifact and SHA-256 verified; reused locally to avoid duplicate transfer",
+  "production_checkpoint_entries_indexed": 624,
+  "complete_checkpoint_redownload_still_in_progress": true,
+  "test_host": "dgxB200; not a different physical server",
+  "no_original_files_deleted": true
+}
