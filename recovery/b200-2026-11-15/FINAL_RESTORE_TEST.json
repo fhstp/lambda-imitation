@@ -1,0 +1,19 @@
+{
+  "passed": true,
+  "utc": "2026-11-15T12:47:06.081095+00:00",
+  "manifest_sha256": "7d5e1ff00e042c00a37d737f3fa725425843e02f1db8ac13033becac0e146e99",
+  "all_selected_remote_files_reverified_by_restore_tool": 2332,
+  "file_groups": {
+    "archive": 1,
+    "production": 870,
+    "publication": 1461
+  },
+  "remote_bytes": 66445348968,
+  "production_checkpoint_files": 624,
+  "original_local_files_extracted_and_sha256_verified": 4210,
+  "all_checkpoint_downloads_independently_performed_before_this_test": true,
+  "paper_data_verifier_passed": true,
+  "new_model_training_or_evaluation": false,
+  "original_local_files_deleted": false,
+  "physical_host": "dgxB200; fresh-directory tests, not a test on a second physical server"
+}

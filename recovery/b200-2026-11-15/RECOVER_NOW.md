@@ -1,10 +1,10 @@
 # Restore on the next server now
 
-The full byte-by-byte re-download audit on the old server is **still in progress**.
-Do not delete the original files until recovery is verified and cleanup is agreed.
-This initial index nevertheless includes all original local evidence and all
-870 production upload entries, so restoration on the new server can start now.
-The final index will additionally catalogue redundant published result bundles.
+The full byte-by-byte remote download audit has **completed successfully**.
+`manifest.json` is the final index, including all original local evidence, all
+870 production upload entries and 1,461 publication entries. The initial index
+is retained as a historical record and remains sufficient for the original
+evidence and production files. Local cleanup still requires explicit agreement.
 
 For the paper, both numerical datasets are available directly in Git, including
 the subsequently recovered original-host first history blocks: **all 80 history
@@ -24,7 +24,7 @@ python3.12 -m venv .venv-restore
 .venv-restore/bin/pip install wandb==0.30.0
 .venv-restore/bin/wandb login
 .venv-restore/bin/python recovery/b200-2026-11-15/restore.py \
-  --manifest recovery/b200-2026-11-15/manifest.initial.json \
+  --manifest recovery/b200-2026-11-15/manifest.json \
   --destination /your/storage/b200-recovered --checkpoints
 ```
 

@@ -8,9 +8,10 @@ Compact results are included in Git. Large artifacts have immutable W&B versions
 and byte hashes, with a repository-based restore command. Do not start the old
 training queues on the new server: both allocations have already completed.
 
-Full re-download verification is still in progress. You can restore on the new
-server now, but do not delete the originals until recovery is verified and
-cleanup is explicitly agreed.
+Full remote download/hash verification has completed. The final `manifest.json`
+pins the original local evidence, all 624 B200 production checkpoint files and
+all other production/publication entries. See the final recovery guide and
+`FINAL_RESTORE_TEST.json`. Local cleanup remains a separate, explicit decision.
 
 With only 10 GB free, use the **[paper-work handoff](recovery/b200-2026-11-15/PAPER_HANDOFF.md)**.
 All existing paper statistics, figures and per-seed metrics can be used from Git

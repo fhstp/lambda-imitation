@@ -131,8 +131,8 @@ size and SHA-256. The final `manifest.json`, when present, adds the completed
 remote byte audit and publication-bundle index. The restore command checks hashes
 even when using the initial index.
 
-The user reported a W&B storage-quota warning. API retrieval was still working
-during migration, but that is not a guarantee of future access. Never delete these
-W&B artifacts to clear the warning. Ask the organization admin/W&B support about
-the account's storage/retention restrictions, or arrange an independent backup.
+The user initially reported a W&B storage-quota warning, then confirmed that it
+had cleared with 43 GB available. API retrieval and the full B200 byte audit
+succeeded. This is not a guarantee of indefinite future access: keep these W&B
+artifacts, and consult the organization admin/W&B support if restrictions return.
 Credentials and the old server's SSH key are deliberately not in Git/archives.
